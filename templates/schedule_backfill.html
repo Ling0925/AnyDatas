@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Backfill {{ schedule.name }}</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/i18n.js" defer></script>
+    <script src="/static/workspace.js" defer></script>
+  </head>
+  <body class="detail-page">
+    {% include "shell_sidebar.html" %}
+
+    <main class="workspace app-main report-flow">
+      <div class="mobile-appbar">
+        <button class="sidebar-toggle" type="button" aria-controls="workspace-nav" aria-expanded="false">Menu</button>
+        <strong>{{ context.workspace_name }}</strong>
+        <span>{{ context.role }}</span>
+      </div>
+      <header class="detail-header">
+        <div>
+          <span class="eyebrow">Schedules</span>
+          <h1>Backfill Schedule</h1>
+          <p>{{ schedule.name }} · {{ schedule.project_name }}</p>
+        </div>
+        <nav class="detail-actions">
+          <a class="button-link secondary" href="/#schedules">Workspace</a>
+        </nav>
+      </header>
+
+      {% if notice %}
+        <div class="notice">{{ notice }}</div>
+      {% endif %}
+
+      <section class="panel schedule-backfill-panel">
+        <div class="section-heading">
+          <h2>Historical Runs</h2>
+          <span>{{ schedule.schedule_type }} · {{ schedule.timezone }}</span>
+        </div>
+        <div class="meta-grid">
+          <div>
+            <span>Rule</span>
+            <strong>{% if schedule.schedule_type == "cron" %}{{ schedule.cron_expression }}{% else %}Every {{ schedule.interval_minutes }} min{% endif %}</strong>
+          </div>
+          <div>
+            <span>Concurrency</span>
+            <strong>{{ schedule.concurrency_policy }}</strong>
+          </div>
+          <div>
+            <span>State</span>
+            <strong>{{ "Active" if schedule.is_active else "Paused" }}</strong>
+          </div>
+        </div>
+        <form class="backfill-form" action="/schedules/{{ schedule.id }}/backfill" method="post">
+          <label>
+            Start
+            <input name="start_at" type="datetime-local" value="{{ start_at }}" required>
+          </label>
+          <label>
+            End
+            <input name="end_at" type="datetime-local" value="{{ end_at }}" required>
+          </label>
+          <label>
+            Run limit
+            <input name="max_runs" type="number" min="1" max="{{ backfill_max_runs }}" value="25" required>
+          </label>
+          <button type="submit">Queue Backfill</button>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>

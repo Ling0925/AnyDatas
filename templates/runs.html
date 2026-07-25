@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Run Search</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/i18n.js" defer></script>
+    <script src="/static/workspace.js" defer></script>
+  </head>
+  <body class="detail-page">
+    {% include "shell_sidebar.html" %}
+
+    <main class="workspace app-main report-flow">
+      <div class="mobile-appbar">
+        <button class="sidebar-toggle" type="button" aria-controls="workspace-nav" aria-expanded="false">Menu</button>
+        <strong>{{ context.workspace_name }}</strong>
+        <span>{{ context.role }}</span>
+      </div>
+      <header class="detail-header">
+        <div>
+          <span class="eyebrow">Runs</span>
+          <h1>Run Search</h1>
+          <p>{{ result.total }} workspace runs</p>
+        </div>
+        <nav class="detail-actions">
+          <a class="button-link secondary" href="/#runs">Workspace</a>
+        </nav>
+      </header>
+
+      {% if error %}<div class="notice">{{ error }}</div>{% endif %}
+      <section class="band">
+        <form class="panel filter-grid" action="/runs" method="get">
+          <label>
+            Search logs or errors
+            <input name="q" value="{{ filters.query }}" placeholder="timeout, order id, run id">
+          </label>
+          <label>
+            Status
+            <select name="status">
+              <option value="">All</option>
+              {% for value in run_statuses %}<option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ value }}</option>{% endfor %}
+            </select>
+          </label>
+          <label>
+            Trigger
+            <select name="trigger_type">
+              <option value="">All</option>
+              {% for value in run_trigger_types %}<option value="{{ value }}" {% if filters.trigger_type == value %}selected{% endif %}>{{ value }}</option>{% endfor %}
+            </select>
+          </label>
+          <label>
+            Project
+            <select name="project_id">
+              <option value="">All</option>
+              {% for project in projects %}<option value="{{ project.id }}" {% if filters.project_id == project.id %}selected{% endif %}>{{ project.name }}</option>{% endfor %}
+            </select>
+          </label>
+          <label>Started from <input name="started_from" type="date" value="{{ raw_started_from }}"></label>
+          <label>Started to <input name="started_to" type="date" value="{{ raw_started_to }}"></label>
+          <div class="actions">
+            <button type="submit">Search</button>
+            <a class="button-link secondary" href="/runs">Clear</a>
+          </div>
+        </form>
+      </section>
+
+      <section class="band">
+        <div class="section-heading">
+          <h2>Results</h2>
+          <span>Page {{ result.page }} of {{ result.pages }}</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Project</th><th>Status</th><th>Trigger</th><th>Started</th><th>Duration</th><th>Log excerpt</th><th></th></tr></thead>
+            <tbody>
+              {% for run in result["items"] %}
+                <tr>
+                  <td>{{ run.project_name }}</td>
+                  <td><span class="status {{ run.status }}">{{ run.status }}</span></td>
+                  <td>{{ run.trigger_type }}</td>
+                  <td>{{ run.started_at[:19].replace("T", " ") }}</td>
+                  <td>{% if run.duration_ms is not none %}{{ run.duration_ms }} ms{% endif %}</td>
+                  <td>{{ run.log_excerpt or "No log output" }}</td>
+                  <td><a href="/runs/{{ run.id }}">Details</a></td>
+                </tr>
+              {% else %}
+                <tr><td colspan="7" class="empty">No matching runs.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% if result.pages > 1 %}
+          <div class="pagination">
+            {% if result.page > 1 %}<a class="button-link secondary" href="{{ previous_url }}">Previous</a>{% endif %}
+            {% if result.page < result.pages %}<a class="button-link secondary" href="{{ next_url }}">Next</a>{% endif %}
+          </div>
+        {% endif %}
+      </section>
+    </main>
+  </body>
+</html>

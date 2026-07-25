@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Join {{ invitation.workspace_name }} · AnyDatas</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/i18n.js" defer></script>
+  </head>
+  <body class="auth-body">
+    <header class="topbar">
+      <div>
+        <h1>AnyDatas</h1>
+        <p>{{ invitation.workspace_name }}</p>
+      </div>
+      <nav><a href="/login">Sign in</a></nav>
+    </header>
+    <main class="workspace auth-page">
+      <form class="panel auth-panel" action="/accept-invitation/{{ token }}" method="post">
+        <h2>Join Workspace</h2>
+        {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+        <dl class="meta-list">
+          <div><dt>Email</dt><dd>{{ invitation.email }}</dd></div>
+          <div><dt>Role</dt><dd>{{ invitation.role }}</dd></div>
+        </dl>
+        <label>
+          {{ "Current password" if existing_account else "Create password" }}
+          <input name="password" type="password" autocomplete="{{ 'current-password' if existing_account else 'new-password' }}" minlength="12" required>
+        </label>
+        {% if not existing_account %}
+          <label>
+            Confirm password
+            <input name="password_confirmation" type="password" autocomplete="new-password" minlength="12" required>
+          </label>
+        {% endif %}
+        <button type="submit">Join Workspace</button>
+      </form>
+    </main>
+  </body>
+</html>

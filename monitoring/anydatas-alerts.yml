@@ -1,0 +1,31 @@
+groups:
+  - name: anydatas-single-server
+    rules:
+      - alert: AnyDatasApiDown
+        expr: up{job="anydatas"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: AnyDatas metrics endpoint is unavailable.
+      - alert: AnyDatasSchedulerDown
+        expr: anydatas_scheduler_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: AnyDatas scheduler task is not active.
+      - alert: AnyDatasFailedNotificationDeliveries
+        expr: sum(anydatas_notification_deliveries{status="failed"}) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: AnyDatas has notification deliveries that exhausted their retries.
+      - alert: AnyDatasNotificationDeliveryBacklog
+        expr: sum(anydatas_notification_deliveries{status="queued"}) > 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: AnyDatas has more than 20 queued notification deliveries.

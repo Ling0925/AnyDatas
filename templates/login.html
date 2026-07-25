@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign in · AnyDatas</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/i18n.js" defer></script>
+  </head>
+  <body class="auth-body">
+    <header class="topbar">
+      <div>
+        <h1>AnyDatas</h1>
+        <p>Sign in</p>
+      </div>
+      <nav>
+        <a href="/">Workspace</a>
+      </nav>
+    </header>
+    <main class="workspace auth-page">
+      <form class="panel auth-panel" action="/login" method="post">
+        <h2>Sign in</h2>
+        {% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+        {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+        <label>
+          Email
+          <input name="email" type="email" autocomplete="username" placeholder="analyst@example.com" required>
+        </label>
+        {% if password_auth %}
+          <label>
+            Password
+            <input name="password" type="password" autocomplete="current-password" required>
+          </label>
+        {% else %}
+          <label>
+            Name
+            <input name="name" placeholder="Analyst">
+          </label>
+        {% endif %}
+        <button type="submit">Continue</button>
+        {% if signup_enabled %}<a class="button-link secondary" href="/register">Create Account</a>{% endif %}
+      </form>
+    </main>
+  </body>
+</html>

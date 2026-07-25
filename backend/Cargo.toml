@@ -1,0 +1,38 @@
+[package]
+name = "anydatas-api"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+argon2 = "0.5"
+axum = { version = "0.8", features = ["multipart"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
+base64 = "0.22"
+calamine = { version = "0.36", features = ["dates"] }
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+cron = "0.17"
+csv = "1.4"
+dotenvy = "0.15"
+duckdb = { version = "1.10504.0", features = ["bundled", "chrono", "serde_json"] }
+futures-util = "0.3"
+hex = "0.4"
+regex = "1.12"
+rand_core = { version = "0.6", features = ["getrandom"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ring = "0.17"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "macros", "migrate"] }
+thiserror = "2.0"
+time = "0.3"
+tokio = { version = "1.49", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.21", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3.25"

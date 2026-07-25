@@ -1,0 +1,14 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+jinja2==3.1.5
+python-multipart==0.0.20
+duckdb==1.1.3
+httpx==0.28.1
+pytest==8.4.2
+psycopg[binary]==3.2.13
+PyMySQL[rsa]==1.2.0
+clickhouse-connect==0.15.1
+boto3==1.42.97; python_version < "3.10"
+boto3==1.43.42; python_version >= "3.10"
+Pillow==11.3.0
+reportlab==4.4.3

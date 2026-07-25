@@ -1,0 +1,50 @@
+<header class="app-sidebar">
+  <div class="sidebar-brand">
+    <span class="brand-mark">A</span>
+    <div>
+      <h1>AnyDatas</h1>
+      <p>Analysis workspace</p>
+    </div>
+  </div>
+  <button class="sidebar-toggle" type="button" aria-controls="workspace-nav" aria-expanded="false">Menu</button>
+  <nav id="workspace-nav" class="sidebar-nav">
+    <span class="nav-label">Workspace</span>
+    <a href="/#overview" {% if nav_section == "overview" %}class="active" aria-current="page"{% endif %}>Overview</a>
+    <a href="/#data" {% if nav_section == "data" %}class="active" aria-current="page"{% endif %}>Data Sources</a>
+    <a href="/#projects" {% if nav_section == "projects" %}class="active" aria-current="page"{% endif %}>Projects</a>
+    <a href="{% if nav_section == 'runs' %}/runs{% else %}/#runs{% endif %}" {% if nav_section == "runs" %}class="active" aria-current="page"{% endif %}>Runs</a>
+    <a href="/#schedules" {% if nav_section == "schedules" %}class="active" aria-current="page"{% endif %}>Schedules</a>
+    <a href="/#reports" {% if nav_section == "reports" %}class="active" aria-current="page"{% endif %}>Reports</a>
+    <span class="nav-label">Operations</span>
+    <a href="/#notifications" {% if nav_section == "notifications" %}class="active" aria-current="page"{% endif %}>Notifications</a>
+    {% if context.role in ["owner", "admin"] %}
+      <a href="/#run-usage" {% if nav_section == "run-usage" %}class="active" aria-current="page"{% endif %}>Usage</a>
+    {% endif %}
+    {% if context.role in ["owner", "admin"] %}
+      <a href="/#delivery-channels" {% if nav_section == "delivery-channels" %}class="active" aria-current="page"{% endif %}>Delivery</a>
+    {% endif %}
+    <a href="/#audit" {% if nav_section == "audit" %}class="active" aria-current="page"{% endif %}>Audit</a>
+    <span class="nav-label">Administration</span>
+    <a href="/#members" {% if nav_section == "members" %}class="active" aria-current="page"{% endif %}>Members</a>
+    {% if password_auth %}
+      <a href="/#account-security" {% if nav_section == "account-security" %}class="active" aria-current="page"{% endif %}>Account</a>
+    {% endif %}
+    {% if password_auth and context.role in ["owner", "admin"] %}
+      <a href="/#service-accounts" {% if nav_section == "service-accounts" %}class="active" aria-current="page"{% endif %}>Automation</a>
+    {% endif %}
+    {% if context.role in ["owner", "admin"] %}
+      <a href="/#secrets" {% if nav_section == "secrets" %}class="active" aria-current="page"{% endif %}>Secrets</a>
+    {% endif %}
+    <a href="/#quotas" {% if nav_section == "quotas" %}class="active" aria-current="page"{% endif %}>Limits</a>
+  </nav>
+  <div class="sidebar-user">
+    <span>{{ context.user_email[:1]|upper }}</span>
+    <div>
+      <strong>{{ context.user_email }}</strong>
+      <small>{{ context.role }} · {{ context.workspace_name }}</small>
+    </div>
+    <form action="/logout" method="post">
+      <button class="link-button" type="submit">Sign out</button>
+    </form>
+  </div>
+</header>

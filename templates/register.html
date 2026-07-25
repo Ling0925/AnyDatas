@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Create Account · AnyDatas</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/i18n.js" defer></script>
+  </head>
+  <body class="auth-body">
+    <header class="topbar">
+      <div>
+        <h1>AnyDatas</h1>
+        <p>Create account</p>
+      </div>
+      <nav><a href="/login">Sign in</a></nav>
+    </header>
+    <main class="workspace auth-page">
+      <form class="panel auth-panel" action="/register" method="post">
+        <h2>Create Account</h2>
+        {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+        <label>
+          Name
+          <input name="name" autocomplete="name" maxlength="120" required>
+        </label>
+        <label>
+          Email
+          <input name="email" type="email" autocomplete="username" maxlength="320" required>
+        </label>
+        <label>
+          Password
+          <input name="password" type="password" autocomplete="new-password" minlength="12" required>
+        </label>
+        <label>
+          Confirm password
+          <input name="password_confirmation" type="password" autocomplete="new-password" minlength="12" required>
+        </label>
+        <button type="submit">Create Account</button>
+      </form>
+    </main>
+  </body>
+</html>

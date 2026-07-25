@@ -1,0 +1,158 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "anydatas-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "green", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"expr": "anydatas_up", "legendFormat": "Control plane", "refId": "A"}],
+      "title": "Control Plane",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "anydatas-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "green", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0},
+      "id": 2,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"expr": "anydatas_database_up", "legendFormat": "SQLite", "refId": "A"}],
+      "title": "Metadata Database",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "anydatas-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "green", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
+      "id": 3,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"expr": "anydatas_scheduler_up", "legendFormat": "Scheduler", "refId": "A"}],
+      "title": "Scheduler",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "anydatas-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 80},
+              {"color": "green", "value": 95}
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
+      "id": 4,
+      "options": {"minVizHeight": 75, "minVizWidth": 75, "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showThresholdLabels": false, "showThresholdMarkers": true, "sizing": "auto"},
+      "targets": [{"expr": "100 * sum(anydatas_runs{status=\"succeeded\"}) / clamp_min(sum(anydatas_runs{status=~\"succeeded|failed|canceled\"}), 1)", "legendFormat": "Success rate", "refId": "A"}],
+      "title": "Retained Run Success Rate",
+      "type": "gauge"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "anydatas-prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"axisBorderShow": false, "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 15, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": false, "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}}, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+      "gridPos": {"h": 9, "w": 16, "x": 0, "y": 5},
+      "id": 5,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"hideZeros": false, "mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "anydatas_runs", "legendFormat": "{{status}}", "refId": "A"}],
+      "title": "Retained Runs by Status",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "anydatas-prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+      "gridPos": {"h": 9, "w": 8, "x": 16, "y": 5},
+      "id": 6,
+      "options": {"displayLabels": ["name", "value"], "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "values": ["value"]}, "pieType": "donut", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "tooltip": {"hideZeros": false, "mode": "single", "sort": "none"}},
+      "targets": [{"expr": "anydatas_notification_deliveries", "legendFormat": "{{status}}", "refId": "A"}],
+      "title": "Notification Deliveries",
+      "type": "piechart"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "anydatas-prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 14},
+      "id": 7,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [
+        {"expr": "anydatas_workspaces", "legendFormat": "Workspaces", "refId": "A"},
+        {"expr": "anydatas_workspace_members", "legendFormat": "Memberships", "refId": "B"},
+        {"expr": "anydatas_projects", "legendFormat": "Projects", "refId": "C"},
+        {"expr": "anydatas_reports", "legendFormat": "Reports", "refId": "D"}
+      ],
+      "title": "Platform Resources",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "anydatas-prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 14},
+      "id": 8,
+      "options": {"displayMode": "gradient", "legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": false}, "maxVizHeight": 300, "minVizHeight": 16, "minVizWidth": 8, "namePlacement": "auto", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showUnfilled": true, "sizing": "auto", "text": {}, "valueMode": "color"},
+      "targets": [{"expr": "anydatas_schedules", "legendFormat": "{{state}}", "refId": "A"}],
+      "title": "Schedules",
+      "type": "bargauge"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": ["anydatas", "single-server"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "AnyDatas Single Server",
+  "uid": "anydatas-single-server",
+  "version": 1
+}

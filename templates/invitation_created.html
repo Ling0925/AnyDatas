@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Invitation Created · AnyDatas</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/i18n.js" defer></script>
+  </head>
+  <body class="auth-body">
+    <header class="topbar">
+      <div>
+        <h1>AnyDatas</h1>
+        <p>Invitation created</p>
+      </div>
+      <nav><a href="/">Workspace</a></nav>
+    </header>
+    <main class="workspace auth-page">
+      <section class="panel auth-panel">
+        <h2>Invitation Link</h2>
+        <p>{{ invitation.email }} · {{ invitation.role }}</p>
+        <label>
+          One-time link
+          <input value="{{ invitation_url }}" readonly>
+        </label>
+        <a class="button-link" href="{{ invitation_url }}">Open Invitation</a>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Run {{ run.id[:8] }}</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/i18n.js" defer></script>
+    <script src="/static/workspace.js" defer></script>
+  </head>
+  <body class="detail-page">
+    {% include "shell_sidebar.html" %}
+
+    <main class="workspace app-main report-flow">
+      <div class="mobile-appbar">
+        <button class="sidebar-toggle" type="button" aria-controls="workspace-nav" aria-expanded="false">Menu</button>
+        <strong>{{ context.workspace_name }}</strong>
+        <span>{{ context.role }}</span>
+      </div>
+      <header class="detail-header">
+        <div>
+          <span class="eyebrow">Run Details</span>
+          <h1>{{ run.project_name }}</h1>
+          <p>{{ run.id[:8] }} · {{ run.trigger_type }}</p>
+        </div>
+        <nav class="detail-actions">
+          <a class="button-link secondary" href="/runs">Run Search</a>
+          <a class="button-link secondary" href="/#runs">Workspace</a>
+          {% if result and result.columns and can_export_result %}
+            <a class="button-link" href="/runs/{{ run.id }}/result.csv">Download CSV</a>
+            <a class="button-link secondary" href="/runs/{{ run.id }}/result.json">Download JSON</a>
+          {% endif %}
+        </nav>
+      </header>
+      {% if notice %}
+        <div class="notice">{{ notice }}</div>
+      {% endif %}
+
+      <section class="band">
+        <div class="section-heading">
+          <h2>Execution</h2>
+          <span class="status {{ run.status }}">{{ run.status }}</span>
+        </div>
+        {% if can_cancel %}
+          <div class="actions">
+            <form action="/runs/{{ run.id }}/cancel" method="post">
+              <button class="danger" type="submit">Cancel Run</button>
+            </form>
+          </div>
+        {% endif %}
+        <div class="meta-grid">
+          <div>
+            <span>Project</span>
+            <strong>{{ run.project_name }}</strong>
+          </div>
+          <div>
+            <span>Version</span>
+            <strong>{% if run.version_number %}v{{ run.version_number }}{% else %}Draft{% endif %}</strong>
+          </div>
+          <div>
+            <span>Data Source</span>
+            <strong>{{ run.data_source_name }} / {{ run.data_source_type }}</strong>
+          </div>
+          <div>
+            <span>Classification</span>
+            <strong>{{ run.data_source_classification|default("internal") }}</strong>
+          </div>
+          <div>
+            <span>Trigger</span>
+            <strong>{{ run.trigger_type }}</strong>
+          </div>
+          {% if run.scheduled_for_at %}
+            <div>
+              <span>Scheduled For</span>
+              <strong>{{ run.scheduled_for_at[:19].replace("T", " ") }}</strong>
+            </div>
+          {% endif %}
+          <div>
+            <span>Attempt</span>
+            <strong>{{ run.attempt }}</strong>
+          </div>
+          {% if run.retry_of_run_id %}
+            <div>
+              <span>Retry Of</span>
+              <strong><a href="/runs/{{ run.retry_of_run_id }}">{{ run.retry_of_run_id[:8] }}</a></strong>
+            </div>
+          {% endif %}
+          <div>
+            <span>Started</span>
+            <strong>{{ run.started_at[:19].replace("T", " ") }}</strong>
+          </div>
+          <div>
+            <span>Finished</span>
+            <strong>{% if run.finished_at %}{{ run.finished_at[:19].replace("T", " ") }}{% else %}Pending{% endif %}</strong>
+          </div>
+          <div>
+            <span>Duration</span>
+            <strong>{% if run.duration_ms is not none %}{{ run.duration_ms }} ms{% else %}Pending{% endif %}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="section-heading">
+          <h2>Parameters</h2>
+          <span>{{ parameters|length }} values</span>
+        </div>
+        <pre class="log-block">{{ parameters_json }}</pre>
+      </section>
+
+      {% if run.error %}
+        <section class="band">
+          <div class="section-heading">
+            <h2>{% if run.status == "canceled" %}Cancellation{% else %}Error Summary{% endif %}</h2>
+            <span>{{ run.status }}</span>
+          </div>
+          <pre class="log-block error">{{ run.error }}</pre>
+        </section>
+      {% endif %}
+
+      <section id="result-artifacts" class="band">
+        <div class="section-heading">
+          <h2>Result Artifacts</h2>
+          {% if result and result.columns %}
+            <span>{{ result_pagination.start }}-{{ result_pagination.end }} of {{ result_pagination.total }} rows</span>
+          {% else %}
+            <span>No result</span>
+          {% endif %}
+        </div>
+        {% if result and result.columns %}
+          {% if can_export_result %}
+            <div class="actions">
+              <a class="button-link" href="/runs/{{ run.id }}/result.csv">Download CSV</a>
+              <a class="button-link secondary" href="/runs/{{ run.id }}/result.json">Download JSON</a>
+            </div>
+          {% else %}
+            <p class="report-note">Downloads require manage access to this restricted data source.</p>
+          {% endif %}
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  {% for column in result.columns %}
+                    <th>{{ column }}</th>
+                  {% endfor %}
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in result.rows %}
+                  <tr>
+                    {% for value in row %}
+                      <td>{{ value }}</td>
+                    {% endfor %}
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% if result_pagination.total_pages > 1 %}
+            <nav class="page-controls" aria-label="Result pages">
+              {% if result_pagination.page > 1 %}
+                <a class="button-link secondary" href="/runs/{{ run.id }}?result_page={{ result_pagination.page - 1 }}&amp;log_page={{ log_pagination.page }}#result-artifacts">Previous</a>
+              {% endif %}
+              <span>Page {{ result_pagination.page }} of {{ result_pagination.total_pages }}</span>
+              {% if result_pagination.page < result_pagination.total_pages %}
+                <a class="button-link secondary" href="/runs/{{ run.id }}?result_page={{ result_pagination.page + 1 }}&amp;log_page={{ log_pagination.page }}#result-artifacts">Next</a>
+              {% endif %}
+            </nav>
+          {% endif %}
+        {% else %}
+          <p class="empty">This run has not produced a table result.</p>
+        {% endif %}
+      </section>
+
+      <section id="execution-logs" class="band">
+        <div class="section-heading">
+          <h2>Execution Logs</h2>
+          <span>{% if run.logs %}{{ log_pagination.start }}-{{ log_pagination.end }} of {{ log_pagination.total }} log lines{% else %}empty{% endif %}</span>
+        </div>
+        <pre class="log-block">{{ displayed_logs if run.logs else "No logs were captured for this run." }}</pre>
+        {% if log_pagination.total_pages > 1 %}
+          <nav class="page-controls" aria-label="Log pages">
+            {% if log_pagination.page > 1 %}
+              <a class="button-link secondary" href="/runs/{{ run.id }}?result_page={{ result_pagination.page }}&amp;log_page={{ log_pagination.page - 1 }}#execution-logs">Previous</a>
+            {% endif %}
+            <span>Page {{ log_pagination.page }} of {{ log_pagination.total_pages }}</span>
+            {% if log_pagination.page < log_pagination.total_pages %}
+              <a class="button-link secondary" href="/runs/{{ run.id }}?result_page={{ result_pagination.page }}&amp;log_page={{ log_pagination.page + 1 }}#execution-logs">Next</a>
+            {% endif %}
+          </nav>
+        {% endif %}
+      </section>
+    </main>
+  </body>
+</html>

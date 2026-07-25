@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ report.title }}</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/i18n.js" defer></script>
+    <script src="/static/workspace.js" defer></script>
+  </head>
+  <body class="detail-page report-page">
+    {% include "shell_sidebar.html" %}
+
+    <main class="workspace app-main report-flow">
+      <div class="mobile-appbar">
+        <button class="sidebar-toggle" type="button" aria-controls="workspace-nav" aria-expanded="false">Menu</button>
+        <strong>{{ context.workspace_name }}</strong>
+        <span>{{ context.role }}</span>
+      </div>
+      <header class="detail-header">
+        <div>
+          <span class="eyebrow">Reports</span>
+          <h1>{{ report.title }}</h1>
+          <p>{{ report.project_name }} · {{ report.visibility }}</p>
+        </div>
+        <nav class="detail-actions">
+          <a class="button-link secondary" href="/#reports">Workspace</a>
+          {% if latest_run %}
+            <a class="button-link secondary" href="/runs/{{ latest_run.id }}">Run Details</a>
+          {% endif %}
+        </nav>
+      </header>
+      {% if notice %}
+        <div class="notice">{{ notice }}</div>
+      {% endif %}
+
+      <section id="report-lineage" class="band">
+        <div class="section-heading">
+          <h2>Lineage</h2>
+          <span>{% if latest_snapshot %}latest snapshot{% else %}awaiting first snapshot{% endif %}</span>
+        </div>
+        <div class="meta-grid">
+          <div>
+            <span>Project</span>
+            <strong><a href="/#project-{{ report.project_id }}">{{ report.project_name }}</a></strong>
+          </div>
+          <div>
+            <span>Version</span>
+            <strong>
+              {% if snapshot_run and snapshot_run.version_number %}
+                v{{ snapshot_run.version_number }}
+              {% elif report.published_version_number %}
+                Published v{{ report.published_version_number }}
+              {% else %}
+                Draft
+              {% endif %}
+            </strong>
+          </div>
+          <div>
+            <span>Data Source</span>
+            <strong>
+              {% if snapshot_source %}
+                <a href="/#data">{{ snapshot_source.name }} / {{ snapshot_source.source_type }}</a>
+              {% else %}
+                Unavailable
+              {% endif %}
+            </strong>
+          </div>
+          <div>
+            <span>Snapshot Run</span>
+            <strong>
+              {% if latest_snapshot and snapshot_run %}
+                <a href="/runs/{{ snapshot_run.id }}"><span class="status {{ latest_snapshot.status }}">{{ latest_snapshot.status }}</span></a>
+              {% else %}
+                Pending
+              {% endif %}
+            </strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="section-heading">
+          <h2>Latest Snapshot</h2>
+          {% if successful_snapshot %}
+            <span>{{ successful_snapshot.created_at[:19].replace("T", " ") }}</span>
+          {% else %}
+            <span>No successful snapshot</span>
+          {% endif %}
+        </div>
+        {% if report.description %}
+          <p class="report-note">{{ report.description }}</p>
+        {% endif %}
+        <div class="report-toolbar">
+          <div class="actions">
+            {% if can_refresh %}
+              <form action="/reports/{{ report.id }}/refresh" method="post">
+                <button type="submit">Refresh Snapshot</button>
+              </form>
+            {% endif %}
+            {% if is_subscribed %}<span class="status success">Subscribed</span>{% endif %}
+          </div>
+          <div class="toolbar-menus">
+            <details class="toolbar-menu">
+              <summary>Delivery</summary>
+              <div class="toolbar-menu-panel">
+                <form action="/reports/{{ report.id }}/subscriptions" method="post">
+                  {% for channel in subscription_channels %}
+                    <label class="checkbox-label">
+                      <input
+                        type="checkbox"
+                        name="external_channel_ids"
+                        value="{{ channel.id }}"
+                        {% if channel.id in selected_subscription_channels %}checked{% endif %}
+                      >
+                      {{ channel.name }} ({{ channel.channel_type }})
+                    </label>
+                  {% endfor %}
+                  <button class="secondary" type="submit">{% if is_subscribed %}Save Delivery{% else %}Subscribe{% endif %}</button>
+                </form>
+                {% if is_subscribed %}
+                  <form action="/reports/{{ report.id }}/subscriptions/delete" method="post">
+                    <button class="secondary" type="submit">Unsubscribe</button>
+                  </form>
+                {% endif %}
+              </div>
+            </details>
+            {% if successful_snapshot and can_export_snapshot %}
+              <details class="toolbar-menu export-menu">
+                <summary>Export</summary>
+                <div class="toolbar-menu-panel">
+                  <a href="/reports/{{ report.id }}/snapshot.csv">Download CSV</a>
+                  <a href="/reports/{{ report.id }}/snapshot.json">Download JSON</a>
+                  <a href="/reports/{{ report.id }}/snapshot.xlsx">Download XLSX</a>
+                  <a href="/reports/{{ report.id }}/snapshot.png">Download PNG</a>
+                  <a href="/reports/{{ report.id }}/snapshot.pdf">Download PDF</a>
+                </div>
+              </details>
+            {% elif successful_snapshot %}
+              <span class="report-note">Downloads require manage access to this restricted data source.</span>
+            {% endif %}
+          </div>
+        </div>
+      </section>
+
+      {% if successful_snapshot and report_filters %}
+        <section class="band report-filter-panel">
+          <div class="section-heading">
+            <h2>Filters</h2>
+            <span>{{ result.rows|length }} matching rows</span>
+          </div>
+          <form class="report-filter-form" action="/reports/{{ report.id }}" method="get">
+            {% for report_filter in report_filters %}
+              {% if report_filter.filter_type == "select" %}
+                <label>
+                  {{ report_filter.name }}
+                  <select name="{{ report_filter.input_name }}" {% if not report_filter.available %}disabled{% endif %}>
+                    <option value="">All</option>
+                    {% for option in report_filter.options %}
+                      <option value="{{ option }}" {% if option == report_filter.value %}selected{% endif %}>{{ option }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+              {% elif report_filter.filter_type == "contains" %}
+                <label>
+                  {{ report_filter.name }}
+                  <input name="{{ report_filter.input_name }}" value="{{ report_filter.value }}" {% if not report_filter.available %}disabled{% endif %}>
+                </label>
+              {% else %}
+                <label>
+                  {{ report_filter.name }} min
+                  <input name="{{ report_filter.min_input_name }}" type="number" step="any" value="{{ report_filter.minimum }}" {% if not report_filter.available %}disabled{% endif %}>
+                </label>
+                <label>
+                  {{ report_filter.name }} max
+                  <input name="{{ report_filter.max_input_name }}" type="number" step="any" value="{{ report_filter.maximum }}" {% if not report_filter.available %}disabled{% endif %}>
+                </label>
+              {% endif %}
+            {% endfor %}
+            <button type="submit">Apply</button>
+            <a class="button-link secondary" href="/reports/{{ report.id }}">Clear</a>
+          </form>
+        </section>
+      {% endif %}
+
+      {% if report.can_manage %}
+        <section class="band report-access-section">
+          <div class="section-heading">
+            <h2>Private Access</h2>
+            <span>{{ report_grantees|length }} members</span>
+          </div>
+          {% if report.visibility == "private" %}
+            <p class="report-note">Private reports are visible to their creator, workspace owners and admins, plus selected members below.</p>
+            {% if grantable_members %}
+              <form class="report-grant-form" action="/reports/{{ report.id }}/grants" method="post">
+                <label class="compact-field">
+                  Member
+                  <select name="user_id" aria-label="Grant private report access">
+                    {% for member in grantable_members %}
+                      <option value="{{ member.user_id }}">{{ member.name }} · {{ member.email }} · {{ member.role }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <button class="secondary" type="submit">Grant Access</button>
+              </form>
+            {% else %}
+              <p class="empty">No additional eligible members are available.</p>
+            {% endif %}
+            {% if report_grantees %}
+              <ul class="report-grant-list">
+                {% for grantee in report_grantees %}
+                  <li>
+                    <span>{{ grantee.name }} · {{ grantee.email }} · {{ grantee.role }}</span>
+                    <form action="/reports/{{ report.id }}/grants/{{ grantee.user_id }}/delete" method="post">
+                      <button class="small secondary" type="submit">Remove</button>
+                    </form>
+                  </li>
+                {% endfor %}
+              </ul>
+            {% endif %}
+          {% else %}
+            <p class="report-note">Set this report to Private from the workspace report list before granting selected members access.</p>
+          {% endif %}
+        </section>
+      {% endif %}
+
+      {% if report.can_manage %}
+        <section class="band">
+          <details class="report-widget-controls">
+            <summary>
+              <span>Components</span>
+              <small>{{ widgets|length }} configured</small>
+            </summary>
+            <div class="report-widget-editor">
+              <form class="report-widget-form" action="/reports/{{ report.id }}/widgets" method="post">
+                <label class="compact-field">
+                  Component
+                  <select name="kind">
+                    <option value="metric">Metric</option>
+                    <option value="table">Table</option>
+                    <option value="bar">Bar Chart</option>
+                    <option value="line">Line Chart</option>
+                    <option value="scatter">Scatter Chart</option>
+                    <option value="pie">Pie Chart</option>
+                    <option value="markdown">Markdown</option>
+                  </select>
+                </label>
+                <label class="compact-field">
+                  Title
+                  <input name="title" placeholder="Revenue total">
+                </label>
+                <label class="compact-field">
+                  Width
+                  <select name="widget_width">
+                    <option value="">Automatic</option>
+                    <option value="quarter">Quarter</option>
+                    <option value="half">Half</option>
+                    <option value="full">Full</option>
+                  </select>
+                </label>
+                <label class="compact-field">
+                  Aggregate
+                  <select name="aggregate">
+                    <option value="sum">Sum</option>
+                    <option value="average">Average</option>
+                    <option value="minimum">Minimum</option>
+                    <option value="maximum">Maximum</option>
+                    <option value="count">Count</option>
+                    <option value="row_count">Row count</option>
+                    <option value="column_count">Column count</option>
+                  </select>
+                </label>
+                <label class="compact-field">
+                  Value column
+                  <input name="value_column" placeholder="revenue">
+                </label>
+                <label class="compact-field">
+                  Label column
+                  <input name="label_column" placeholder="region">
+                </label>
+                <label class="compact-field">
+                  X column
+                  <input name="x_column" placeholder="day_number">
+                </label>
+                <label class="compact-field">
+                  Table rows
+                  <input name="table_limit" type="number" min="1" max="500" value="100">
+                </label>
+                <label class="compact-field">
+                  Highlight column
+                  <input name="table_highlight_column" placeholder="revenue">
+                </label>
+                <label class="compact-field">
+                  Highlight rule
+                  <select name="table_highlight_rule">
+                    <option value="none">None</option>
+                    <option value="positive">Positive</option>
+                    <option value="negative">Negative</option>
+                    <option value="above">At or above</option>
+                    <option value="below">At or below</option>
+                  </select>
+                </label>
+                <label class="compact-field">
+                  Highlight threshold
+                  <input name="table_highlight_threshold" type="number" step="any" placeholder="100">
+                </label>
+                <label class="compact-field widget-markdown-field">
+                  Markdown
+                  <textarea name="markdown_text" placeholder="# Notes"></textarea>
+                </label>
+                <button type="submit">Add Component</button>
+              </form>
+              <ul
+                class="report-widget-list sortable-widget-list"
+                id="report-widget-list"
+                data-reorder-url="/reports/{{ report.id }}/widgets/reorder"
+              >
+                {% for widget in widgets %}
+                  <li draggable="true" data-widget-id="{{ widget.id }}">
+                    <span class="report-widget-list-label">
+                      <span class="drag-handle" aria-hidden="true" title="Drag to reorder">&#8942;&#8942;</span>
+                      <span>{{ widget.kind }} · {{ widget.title }}</span>
+                    </span>
+                    <div class="report-widget-list-actions">
+                      <form class="report-layout-form" action="/reports/{{ report.id }}/widgets/{{ widget.id }}/layout" method="post">
+                        <select name="width" aria-label="Width for {{ widget.title }}">
+                          <option value="quarter" {% if widget.width == "quarter" %}selected{% endif %}>Quarter</option>
+                          <option value="half" {% if widget.width == "half" %}selected{% endif %}>Half</option>
+                          <option value="full" {% if widget.width == "full" %}selected{% endif %}>Full</option>
+                        </select>
+                        <button class="small secondary icon-button" name="direction" value="up" type="submit" title="Move up" aria-label="Move {{ widget.title }} up">&uarr;</button>
+                        <button class="small secondary icon-button" name="direction" value="down" type="submit" title="Move down" aria-label="Move {{ widget.title }} down">&darr;</button>
+                        <button class="small secondary" name="direction" value="stay" type="submit">Save</button>
+                      </form>
+                      <form action="/reports/{{ report.id }}/widgets/{{ widget.id }}/delete" method="post">
+                        <button class="small secondary" type="submit">Remove</button>
+                      </form>
+                    </div>
+                  </li>
+                {% endfor %}
+              </ul>
+              <span class="sr-only" id="widget-order-status" role="status" aria-live="polite"></span>
+            </div>
+          </details>
+        </section>
+
+        <section class="band">
+          <details class="report-widget-controls">
+            <summary>
+              <span>Filters</span>
+              <small>{{ report_filters|length }} configured</small>
+            </summary>
+            <div class="report-widget-editor">
+              <form class="report-filter-form" action="/reports/{{ report.id }}/filters" method="post">
+                <label class="compact-field">
+                  Filter
+                  <input name="name" placeholder="Region" required>
+                </label>
+                <label class="compact-field">
+                  Column
+                  <input name="column_name" placeholder="region" required>
+                </label>
+                <label class="compact-field">
+                  Type
+                  <select name="filter_type">
+                    <option value="select">Select</option>
+                    <option value="contains">Contains</option>
+                    <option value="range">Number range</option>
+                  </select>
+                </label>
+                <label class="compact-field">
+                  Default
+                  <input name="default_value" placeholder="min,max for range">
+                </label>
+                <button type="submit">Add Filter</button>
+              </form>
+              {% if report_filters %}
+                <ul class="report-widget-list">
+                  {% for report_filter in report_filters %}
+                    <li>
+                      <span>{{ report_filter.name }} · {{ report_filter.column_name }} · {{ report_filter.filter_type }}</span>
+                      <form action="/reports/{{ report.id }}/filters/{{ report_filter.id }}/delete" method="post">
+                        <button class="small secondary" type="submit">Remove</button>
+                      </form>
+                    </li>
+                  {% endfor %}
+                </ul>
+              {% endif %}
+            </div>
+          </details>
+        </section>
+      {% endif %}
+
+      {% if latest_snapshot %}
+        <section class="band">
+          <div class="section-heading">
+            <h2>Refresh Status</h2>
+            <span class="status {{ latest_snapshot.status }}">{{ latest_snapshot.status }}</span>
+          </div>
+          <p class="report-note">
+            Run {{ latest_snapshot.run_id[:8] }} · {{ latest_snapshot.created_at[:19].replace("T", " ") }}
+          </p>
+          {% if latest_snapshot.status != "succeeded" and latest_snapshot.error %}
+            <pre class="log-block error">{{ latest_snapshot.error }}</pre>
+          {% endif %}
+        </section>
+      {% endif %}
+
+      <section class="report-layout-grid">
+        {% for widget in widgets %}
+          {% if widget.kind == "metric" and successful_snapshot %}
+            <div class="metric report-metric report-layout-item width-{{ widget.width }}" data-widget-id="{{ widget.id }}">
+              <span>{{ widget.metric.title }}</span>
+              <strong>{{ widget.metric.value }}</strong>
+              <small>{{ widget.metric.detail }}</small>
+            </div>
+          {% elif widget.kind == "markdown" %}
+            <section class="report-widget markdown-widget report-layout-item width-{{ widget.width }}" data-widget-id="{{ widget.id }}">
+              <div class="section-heading">
+                <h2>{{ widget.title }}</h2>
+              </div>
+              <div class="markdown-content">{{ widget.markdown_html }}</div>
+            </section>
+          {% elif widget.kind == "bar" and successful_snapshot %}
+            <section class="report-widget report-layout-item width-{{ widget.width }}" data-widget-id="{{ widget.id }}">
+              <div class="section-heading">
+                <h2>{{ widget.title }}</h2>
+                <span>{{ widget.chart.value_column }}</span>
+              </div>
+              {% if widget.chart.bars %}
+                <div class="bar-chart">
+                  {% for bar in widget.chart.bars %}
+                    <div class="bar-row {% if bar.negative %}negative{% endif %}">
+                      <span>{{ bar.label }}</span>
+                      <div><i style="width: {{ bar.width }}%"></i></div>
+                      <b>{{ "%.2f"|format(bar.value) }}</b>
+                    </div>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <p class="empty">No chartable numeric data.</p>
+              {% endif %}
+            </section>
+          {% elif widget.kind == "line" and successful_snapshot %}
+            <section class="report-widget report-layout-item width-{{ widget.width }}" data-widget-id="{{ widget.id }}">
+              <div class="section-heading">
+                <h2>{{ widget.title }}</h2>
+                <span>{{ widget.chart.value_column }}</span>
+              </div>
+              {% if widget.chart.line_points %}
+                <div class="line-chart-wrap">
+                  <svg class="line-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="{{ widget.title }}">
+                    <polyline points="{{ widget.chart.polyline_points }}"></polyline>
+                    {% for point in widget.chart.line_points %}
+                      <circle cx="{{ point.x }}" cy="{{ point.y }}" r="2"></circle>
+                    {% endfor %}
+                  </svg>
+                  <div class="line-chart-labels">
+                    <span>{{ widget.chart.line_points[0].label }}</span>
+                    <span>{{ widget.chart.line_points[-1].label }}</span>
+                  </div>
+                </div>
+              {% else %}
+                <p class="empty">No chartable numeric data.</p>
+              {% endif %}
+            </section>
+          {% elif widget.kind == "scatter" and successful_snapshot %}
+            <section class="report-widget report-layout-item width-{{ widget.width }}" data-widget-id="{{ widget.id }}">
+              <div class="section-heading">
+                <h2>{{ widget.title }}</h2>
+                <span>{{ widget.scatter.x_column }} / {{ widget.scatter.value_column }}</span>
+              </div>
+              {% if widget.scatter.points %}
+                <div class="scatter-chart-wrap">
+                  <svg class="scatter-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="{{ widget.title }}">
+                    <line class="scatter-axis" x1="6" y1="94" x2="94" y2="94"></line>
+                    <line class="scatter-axis" x1="6" y1="6" x2="6" y2="94"></line>
+                    {% for point in widget.scatter.points %}
+                      <circle cx="{{ point.x }}" cy="{{ point.y }}" r="2.4"><title>{{ point.tooltip }}</title></circle>
+                    {% endfor %}
+                  </svg>
+                  <div class="scatter-chart-labels">
+                    <span>{{ widget.scatter.x_column }}</span>
+                    <span>{{ widget.scatter.value_column }}</span>
+                  </div>
+                </div>
+              {% else %}
+                <p class="empty">Choose two numeric columns to render a scatter chart.</p>
+              {% endif %}
+            </section>
+          {% elif widget.kind == "pie" and successful_snapshot %}
+            <section class="report-widget report-layout-item width-{{ widget.width }}" data-widget-id="{{ widget.id }}">
+              <div class="section-heading">
+                <h2>{{ widget.title }}</h2>
+                <span>{{ widget.pie.value_column }}</span>
+              </div>
+              {% if widget.pie.slices %}
+                <div class="pie-chart-layout">
+                  <div class="pie-chart" style="background: {{ widget.pie.gradient }}" role="img" aria-label="{{ widget.title }}"></div>
+                  <ul class="pie-chart-legend">
+                    {% for slice in widget.pie.slices %}
+                      <li>
+                        <i style="background: {{ slice.color }}"></i>
+                        <span>{{ slice.label }}</span>
+                        <b>{{ "%.2f"|format(slice.percent) }}%</b>
+                      </li>
+                    {% endfor %}
+                  </ul>
+                </div>
+              {% else %}
+                <p class="empty">No positive numeric data for a pie chart.</p>
+              {% endif %}
+            </section>
+          {% elif widget.kind == "table" and successful_snapshot %}
+            <section class="report-widget report-layout-item width-{{ widget.width }}" data-widget-id="{{ widget.id }}">
+              <div class="section-heading">
+                <h2>{{ widget.title }}</h2>
+                <span>{{ widget.table.rows|length }} of {{ widget.table.total_rows }} rows</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      {% for column in widget.table.columns %}
+                        <th>{{ column }}</th>
+                      {% endfor %}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for row in widget.table.rows %}
+                      <tr>
+                        {% for cell in row.cells %}
+                          <td{% if cell.class_name %} class="{{ cell.class_name }}"{% endif %}>{{ cell.value }}</td>
+                        {% endfor %}
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          {% endif %}
+        {% endfor %}
+      </section>
+      {% if not successful_snapshot %}
+        <section class="band">
+          <p class="empty">Refresh the report after a successful project run to publish a snapshot.</p>
+        </section>
+      {% endif %}
+    </main>
+    {% if report.can_manage %}
+      <script>
+        (() => {
+          const list = document.getElementById("report-widget-list");
+          const status = document.getElementById("widget-order-status");
+          if (!list || !status) return;
+          let dragged = null;
+          let originalOrder = [];
+
+          const items = () => Array.from(list.querySelectorAll(":scope > li[data-widget-id]"));
+          const restoreOrder = () => {
+            const byId = new Map(items().map((item) => [item.dataset.widgetId, item]));
+            originalOrder.forEach((widgetId) => {
+              const item = byId.get(widgetId);
+              if (item) list.appendChild(item);
+            });
+          };
+          const saveOrder = async () => {
+            const body = new URLSearchParams({
+              order_json: JSON.stringify(items().map((item) => item.dataset.widgetId)),
+            });
+            try {
+              const response = await fetch(list.dataset.reorderUrl, {
+                method: "POST",
+                body,
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              });
+              if (!response.ok) throw new Error("save failed");
+              status.textContent = "Component order saved.";
+            } catch (_error) {
+              restoreOrder();
+              status.textContent = "Component order was not saved.";
+            }
+          };
+
+          list.addEventListener("dragstart", (event) => {
+            const item = event.target.closest("li[data-widget-id]");
+            if (!item) return;
+            dragged = item;
+            originalOrder = items().map((entry) => entry.dataset.widgetId);
+            item.classList.add("dragging");
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", item.dataset.widgetId);
+          });
+          list.addEventListener("dragover", (event) => {
+            const target = event.target.closest("li[data-widget-id]");
+            if (!dragged || !target || target === dragged) return;
+            event.preventDefault();
+            const bounds = target.getBoundingClientRect();
+            list.insertBefore(dragged, event.clientY < bounds.top + bounds.height / 2 ? target : target.nextSibling);
+          });
+          list.addEventListener("drop", (event) => {
+            if (!dragged) return;
+            event.preventDefault();
+            void saveOrder();
+          });
+          list.addEventListener("dragend", () => {
+            if (dragged) dragged.classList.remove("dragging");
+            dragged = null;
+          });
+        })();
+      </script>
+    {% endif %}
+  </body>
+</html>

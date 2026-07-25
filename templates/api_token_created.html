@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>API Token Created · AnyDatas</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/i18n.js" defer></script>
+  </head>
+  <body class="auth-body">
+    <header class="topbar">
+      <div>
+        <h1>AnyDatas</h1>
+        <p>API token created</p>
+      </div>
+      <nav><a href="/#account-security">Account</a></nav>
+    </header>
+    <main class="workspace auth-page">
+      <section class="panel auth-panel">
+        <h2>{{ display_name or token_record.name }}</h2>
+        <p>{{ "Read only" if token_record.scope == "read" else "Full access" }} · Expires {{ token_record.expires_at[:19].replace("T", " ") }}</p>
+        <label>
+          Token
+          <input value="{{ token }}" readonly>
+        </label>
+        <a class="button-link" href="{{ done_href or '/#account-security' }}">Done</a>
+      </section>
+    </main>
+  </body>
+</html>

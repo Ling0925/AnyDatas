@@ -1,0 +1,10 @@
+services:
+  anydatas:
+    networks:
+      - default
+      - anydatas-database
+
+networks:
+  anydatas-database:
+    external: true
+    name: ${ANYDATAS_DOCKER_DATABASE_NETWORK}

@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ source.name }}</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/i18n.js" defer></script>
+    <script src="/static/workspace.js" defer></script>
+  </head>
+  <body class="detail-page">
+    {% include "shell_sidebar.html" %}
+
+    <main class="workspace app-main report-flow">
+      <div class="mobile-appbar">
+        <button class="sidebar-toggle" type="button" aria-controls="workspace-nav" aria-expanded="false">Menu</button>
+        <strong>{{ context.workspace_name }}</strong>
+        <span>{{ context.role }}</span>
+      </div>
+      <header class="detail-header">
+        <div>
+          <span class="eyebrow">Data Sources</span>
+          <h1>{{ source.name }}</h1>
+          <p>{{ source.source_type }} · {{ source.row_count }} rows · {{ source.access_level }} access · {{ source.classification }}</p>
+        </div>
+        <nav class="detail-actions">
+          <a class="button-link secondary" href="/#data">Workspace</a>
+        </nav>
+      </header>
+      {% if notice %}
+        <div class="notice">{{ notice }}</div>
+      {% endif %}
+
+      <section class="widget-grid source-metrics">
+        <div class="metric">
+          <span>Rows</span>
+          <strong>{{ source.row_count }}</strong>
+        </div>
+        <div class="metric">
+          <span>Columns</span>
+          <strong>{{ columns|length }}</strong>
+        </div>
+        <div class="metric">
+          <span>Completeness</span>
+          <strong>{{ quality.completeness|default("n/a") }}%</strong>
+        </div>
+      </section>
+
+      {% if s3_connection %}
+        <section class="band">
+          <div class="section-heading">
+            <h2>S3 Snapshot</h2>
+            <span>{{ s3_connection.runtime_format }}</span>
+          </div>
+          <div class="table-wrap compact">
+            <table>
+              <thead>
+                <tr>
+                  <th>Bucket</th>
+                  <th>Object Key</th>
+                  <th>Size</th>
+                  <th>ETag</th>
+                  <th>Version</th>
+                  <th>Modified</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>{{ s3_connection.bucket }}</td>
+                  <td>{{ s3_connection.object_key }}</td>
+                  <td>{{ s3_connection.size_bytes }} bytes</td>
+                  <td>{{ s3_connection.etag or "-" }}</td>
+                  <td>{{ s3_connection.version_id or "-" }}</td>
+                  <td>{{ s3_connection.last_modified or "-" }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          {% if can_manage %}
+            <form action="/data-sources/{{ source.id }}/refresh-s3" method="post">
+              <button type="submit">Refresh Snapshot</button>
+            </form>
+          {% endif %}
+        </section>
+      {% endif %}
+
+      {% if can_manage %}
+        <section class="band">
+          <div class="section-heading">
+            <h2>Access</h2>
+            <span>{{ source.visibility }}</span>
+          </div>
+          <div class="grid two">
+            <form class="panel" action="/data-sources/{{ source.id }}/visibility" method="post">
+              <h3>Visibility</h3>
+              <label>
+                Scope
+                <select name="visibility">
+                  <option value="workspace" {% if source.visibility == "workspace" %}selected{% endif %}>Workspace</option>
+                  <option value="private" {% if source.visibility == "private" %}selected{% endif %}>Private</option>
+                </select>
+              </label>
+              <button type="submit">Save Visibility</button>
+            </form>
+
+            <form class="panel" action="/data-sources/{{ source.id }}/classification" method="post">
+              <h3>Classification</h3>
+              <label>
+                Handling Level
+                <select name="classification">
+                  {% for classification in data_source_classifications %}
+                    <option value="{{ classification }}" {% if source.classification == classification %}selected{% endif %}>{{ classification|capitalize }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <small class="classification-help">Restricted sources can be analyzed by query-authorized members, but derived CSV and JSON exports require source manage access.</small>
+              <button type="submit">Save Classification</button>
+            </form>
+
+            {% if source.visibility == "private" and grantable_members %}
+              <form class="panel" action="/data-sources/{{ source.id }}/grants" method="post">
+                <h3>Member Access</h3>
+                <label>
+                  Member
+                  <select name="user_id" required>
+                    {% for member in grantable_members %}
+                      <option value="{{ member.user_id }}">{{ member.name }} · {{ member.role }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label>
+                  Permission
+                  <select name="permission" required>
+                    {% for permission in data_source_permissions %}
+                      <option value="{{ permission }}">{{ permission }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <button type="submit">Save Member Access</button>
+              </form>
+            {% endif %}
+          </div>
+
+          {% if source_grantees %}
+            <div class="table-wrap compact">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Member</th>
+                    <th>Role</th>
+                    <th>Permission</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for grantee in source_grantees %}
+                    <tr>
+                      <td>{{ grantee.name }} · {{ grantee.email }}</td>
+                      <td>{{ grantee.role }}</td>
+                      <td>{{ grantee.permission }}</td>
+                      <td>
+                        <form action="/data-sources/{{ source.id }}/grants/{{ grantee.user_id }}/delete" method="post">
+                          <button class="small secondary" type="submit">Remove</button>
+                        </form>
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% endif %}
+        </section>
+      {% endif %}
+
+      {% if impact %}
+        <section id="source-impact" class="band">
+          <div class="section-heading">
+            <h2>Impact Analysis</h2>
+            <span>{{ impact.projects|length }} projects</span>
+          </div>
+          <div class="widget-grid source-metrics">
+            <div class="metric">
+              <span>Projects</span>
+              <strong>{{ impact.projects|length }}</strong>
+            </div>
+            <div class="metric">
+              <span>Active Schedules</span>
+              <strong>{{ impact.active_schedule_count }}</strong>
+            </div>
+            <div class="metric">
+              <span>Reports</span>
+              <strong>{{ impact.reports|length }}</strong>
+            </div>
+            <div class="metric">
+              <span>Historical Runs</span>
+              <strong>{{ impact.run_count }}</strong>
+            </div>
+          </div>
+          {% if impact.projects %}
+            <div class="table-wrap compact">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Project</th>
+                    <th>Draft</th>
+                    <th>Published</th>
+                    <th>Versions</th>
+                    <th>Active Schedules</th>
+                    <th>Reports</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for project in impact.projects %}
+                    <tr>
+                      <td><a href="/#project-{{ project.id }}">{{ project.name }}</a></td>
+                      <td>{{ "uses source" if project.draft_uses_source else "other source" }}</td>
+                      <td>
+                        {% if project.published_uses_source %}
+                          v{{ project.published_version_number }}
+                        {% else %}
+                          other source
+                        {% endif %}
+                      </td>
+                      <td>{{ project.version_count }}</td>
+                      <td>{{ project.active_schedule_count }}</td>
+                      <td>{{ project.report_count }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% else %}
+            <p class="empty">No project dependencies.</p>
+          {% endif %}
+
+          {% if impact.schedules %}
+            <h3>Schedules</h3>
+            <div class="table-wrap compact">
+              <table>
+                <thead><tr><th>Name</th><th>Project</th><th>Type</th><th>Status</th><th>Next</th></tr></thead>
+                <tbody>
+                  {% for schedule in impact.schedules %}
+                    <tr>
+                      <td>{{ schedule.name }}</td>
+                      <td><a href="/#project-{{ schedule.project_id }}">{{ schedule.project_name }}</a></td>
+                      <td>{{ schedule.schedule_type }}</td>
+                      <td>{{ "active" if schedule.is_active else "paused" }}</td>
+                      <td>{{ schedule.next_run_at[:19] }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% endif %}
+
+          {% if impact.reports %}
+            <h3>Reports</h3>
+            <div class="table-wrap compact">
+              <table>
+                <thead><tr><th>Report</th><th>Project</th><th>Visibility</th></tr></thead>
+                <tbody>
+                  {% for report in impact.reports %}
+                    <tr>
+                      <td><a href="/reports/{{ report.id }}">{{ report.title }}</a></td>
+                      <td><a href="/#project-{{ report.project_id }}">{{ report.project_name }}</a></td>
+                      <td>{{ report.visibility }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% endif %}
+        </section>
+      {% endif %}
+
+      <section class="band">
+        <div class="section-heading">
+          <h2>Schema</h2>
+          <span>{{ columns|length }} fields</span>
+        </div>
+        {% if can_edit %}
+          <form action="/data-sources/{{ source.id }}/schema" method="post">
+            <div class="table-wrap">
+              <table class="schema-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th>Description</th>
+                    <th>Classification</th>
+                    <th>Export Masking</th>
+                    <th>Empty</th>
+                    <th>Unique</th>
+                    <th>Samples</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for field in fields %}
+                    <tr>
+                      <td>
+                        {{ field.name }}
+                        <input name="field_names" type="hidden" value="{{ field.name }}">
+                      </td>
+                      <td>
+                        <select name="field_types" aria-label="{{ field.name }} type">
+                          {% for type_name in logical_types %}
+                            <option value="{{ type_name }}" {% if field.type == type_name %}selected{% endif %}>{{ type_name }}</option>
+                          {% endfor %}
+                        </select>
+                      </td>
+                      <td><input name="descriptions" value="{{ field.description }}" aria-label="{{ field.name }} description"></td>
+                      <td>
+                        <select name="field_classifications" aria-label="{{ field.name }} classification">
+                          {% for classification in field_classifications %}
+                            <option value="{{ classification }}" {% if field.classification == classification %}selected{% endif %}>{{ classification }}</option>
+                          {% endfor %}
+                        </select>
+                      </td>
+                      <td>
+                        <select name="masking_policies" aria-label="{{ field.name }} export masking">
+                          {% for policy in masking_policies %}
+                            <option value="{{ policy }}" {% if field.masking == policy %}selected{% endif %}>{{ policy }}</option>
+                          {% endfor %}
+                        </select>
+                      </td>
+                      <td>{{ field.empty }}</td>
+                      <td>{{ field.unique }}</td>
+                      <td>{{ field.samples|join(", ") }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            <div class="actions"><button type="submit">Save Schema</button></div>
+          </form>
+        {% else %}
+          <div class="table-wrap">
+            <table class="schema-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Type</th>
+                  <th>Description</th>
+                  <th>Classification</th>
+                  <th>Export Masking</th>
+                  <th>Empty</th>
+                  <th>Unique</th>
+                  <th>Samples</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for field in fields %}
+                  <tr>
+                    <td>{{ field.name }}</td>
+                    <td>{{ field.type }}</td>
+                    <td>{{ field.description }}</td>
+                    <td>{{ field.classification }}</td>
+                    <td>{{ field.masking }}</td>
+                    <td>{{ field.empty }}</td>
+                    <td>{{ field.unique }}</td>
+                    <td>{{ field.samples|join(", ") }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
+      </section>
+
+      <section class="band">
+        <div class="section-heading">
+          <h2>Preview</h2>
+          <span>{{ preview|length }} rows</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                {% for column in columns %}
+                  <th>{{ column }}</th>
+                {% endfor %}
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in preview %}
+                <tr>
+                  {% for column in columns %}
+                    <td>{{ row.get(column, "") }}</td>
+                  {% endfor %}
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

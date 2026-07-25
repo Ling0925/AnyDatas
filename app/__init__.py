@@ -1,0 +1,2 @@
+"""AnyDatas MVP application."""
+

@@ -1,0 +1,1399 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AnyDatas MVP</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/i18n.js" defer></script>
+    <script src="/static/code-editor.js" defer></script>
+    <script src="/static/workspace.js" defer></script>
+  </head>
+  <body class="workspace-page">
+    <header class="app-sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-mark">A</span>
+        <div>
+          <h1>AnyDatas</h1>
+          <p>Analysis workspace</p>
+        </div>
+      </div>
+      <button class="sidebar-toggle" type="button" aria-controls="workspace-nav" aria-expanded="false">Menu</button>
+      <nav id="workspace-nav" class="sidebar-nav">
+        <span class="nav-label">Workspace</span>
+        <a href="#overview">Overview</a>
+        <a href="#data">Data Sources <small>{{ data_sources|length }}</small></a>
+        <a href="#projects">Projects <small>{{ projects|length }}</small></a>
+        <a href="#runs">Runs <small>{{ runs|length }}</small></a>
+        <a href="#schedules">Schedules <small>{{ schedules|length }}</small></a>
+        <a href="#reports">Reports <small>{{ reports|length }}</small></a>
+        <span class="nav-label">Operations</span>
+        <a href="#notifications">Notifications {% if unread_notifications %}<small class="nav-alert">{{ unread_notifications }}</small>{% endif %}</a>
+        {% if context.role in ["owner", "admin"] %}<a href="#run-usage">Usage</a>{% endif %}
+        {% if can_manage_notification_channels %}<a href="#delivery-channels">Delivery</a>{% endif %}
+        <a href="#audit">Audit</a>
+        <span class="nav-label">Administration</span>
+        <a href="#members">Members</a>
+        {% if password_auth %}<a href="#account-security">Account</a>{% endif %}
+        {% if password_auth and context.role in ["owner", "admin"] %}<a href="#service-accounts">Automation</a>{% endif %}
+        {% if can_manage_secrets %}<a href="#secrets">Secrets</a>{% endif %}
+        <a href="#quotas">Limits</a>
+      </nav>
+      <div class="sidebar-user">
+        <span>{{ context.user_email[:1]|upper }}</span>
+        <div>
+          <strong>{{ context.user_email }}</strong>
+          <small>{{ context.role }} · {{ context.workspace_name }}</small>
+        </div>
+        <form action="/logout" method="post">
+          <button class="link-button" type="submit">Sign out</button>
+        </form>
+      </div>
+    </header>
+
+    <main class="workspace app-main">
+      <div class="mobile-appbar">
+        <button class="sidebar-toggle" type="button" aria-controls="workspace-nav" aria-expanded="false">Menu</button>
+        <strong>{{ context.workspace_name }}</strong>
+        <span>{{ context.role }}</span>
+      </div>
+      {% if notice %}
+        <div class="notice">{{ notice }}</div>
+      {% endif %}
+
+      <section id="overview" class="band workspace-overview">
+        <div class="overview-heading">
+          <div>
+            <span class="eyebrow">Workspace overview</span>
+            <h2>{{ context.workspace_name }}</h2>
+            <p>Data operations, scheduled analysis and reporting in one place.</p>
+          </div>
+          <div class="overview-actions">
+            <a class="button-link" href="#data" data-section-link>Connect Data</a>
+            <a class="button-link secondary" href="#projects" data-section-link>New Analysis</a>
+          </div>
+        </div>
+        <div class="overview-metrics">
+          <a href="#data" data-section-link><span>Data sources</span><strong>{{ data_sources|length }}</strong><small>{{ workspace_usage.storage_bytes // 1048576 }} MiB managed</small></a>
+          <a href="#projects" data-section-link><span>Projects</span><strong>{{ projects|length }}</strong><small>{{ schedules|length }} schedules</small></a>
+          <a href="#runs" data-section-link><span>Recent runs</span><strong>{{ runs|length }}</strong><small>{{ workspace_usage.concurrent_runs }} active</small></a>
+          <a href="#reports" data-section-link><span>Reports</span><strong>{{ reports|length }}</strong><small>{{ unread_notifications }} unread updates</small></a>
+        </div>
+        <div class="overview-grid">
+          <div class="overview-list">
+            <div class="section-heading tight"><h3>Recent runs</h3><a href="/runs">View all</a></div>
+            {% for run in runs[:5] %}
+              <a class="activity-row" href="/runs/{{ run.id }}">
+                <span class="status-dot {{ run.status }}"></span>
+                <span><strong>{{ run.project_name }}</strong><small>{{ run.trigger_type }} · {{ run.started_at[:16].replace("T", " ") }}</small></span>
+                <span class="status {{ run.status }}">{{ run.status }}</span>
+              </a>
+            {% else %}
+              <p class="empty">No runs yet.</p>
+            {% endfor %}
+          </div>
+          <div class="overview-list">
+            <div class="section-heading tight"><h3>Data sources</h3><a href="#data" data-section-link>Manage</a></div>
+            {% for source in data_sources[:5] %}
+              <a class="activity-row" href="/data-sources/{{ source.id }}">
+                <span class="source-type">{{ source.source_type[:2]|upper }}</span>
+                <span><strong>{{ source.name }}</strong><small>{{ source.row_count }} rows · {{ source.access_level }}</small></span>
+                <span class="classification-badge {{ source.classification }}">{{ source.classification }}</span>
+              </a>
+            {% else %}
+              <p class="empty">No connected sources.</p>
+            {% endfor %}
+          </div>
+        </div>
+      </section>
+
+      {% if password_auth %}
+        <section id="account-security" class="band">
+          <div class="section-heading">
+            <h2>Account Security</h2>
+            <span>{{ context.user_email }}</span>
+          </div>
+          <form class="panel password-form" action="/account/password" method="post">
+            <input name="username" type="email" value="{{ context.user_email }}" autocomplete="username" hidden>
+            <label>
+              Current password
+              <input name="current_password" type="password" autocomplete="current-password" required>
+            </label>
+            <label>
+              New password
+              <input name="new_password" type="password" autocomplete="new-password" minlength="12" required>
+            </label>
+            <label>
+              Confirm new password
+              <input name="new_password_confirmation" type="password" autocomplete="new-password" minlength="12" required>
+            </label>
+            <button type="submit">Change Password</button>
+          </form>
+          <div class="grid two account-token-grid">
+            <form class="panel" action="/account/api-tokens" method="post">
+              <h3>Create API Token</h3>
+              <label>
+                Name
+                <input name="name" placeholder="automation" maxlength="120" required>
+              </label>
+              <label>
+                Expires in days
+                <input name="expires_days" type="number" min="1" max="365" value="30" required>
+              </label>
+              <label>
+                Scope
+                <select name="scope" required>
+                  <option value="read" selected>Read only</option>
+                  <option value="full">Full access</option>
+                </select>
+              </label>
+              <button type="submit">Create Token</button>
+            </form>
+            <div class="panel">
+              <h3>Active API Tokens</h3>
+              {% if api_tokens %}
+                <div class="table-wrap compact">
+                  <table>
+                    <thead>
+                      <tr><th>Name</th><th>Scope</th><th>Expires</th><th>Last Used</th><th></th></tr>
+                    </thead>
+                    <tbody>
+                      {% for api_token in api_tokens %}
+                        <tr>
+                          <td>{{ api_token.name }}</td>
+                          <td>{{ "Read only" if api_token.scope == "read" else "Full access" }}</td>
+                          <td>{{ api_token.expires_at[:19].replace("T", " ") }}</td>
+                          <td>{{ api_token.last_used_at[:19].replace("T", " ") if api_token.last_used_at else "Never" }}</td>
+                          <td>
+                            <form action="/account/api-tokens/{{ api_token.id }}/revoke" method="post">
+                              <button class="small secondary" type="submit">Revoke</button>
+                            </form>
+                          </td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              {% else %}
+                <p class="empty">No active API tokens.</p>
+              {% endif %}
+            </div>
+          </div>
+        </section>
+      {% endif %}
+
+      {% if password_auth and context.role in ["owner", "admin"] %}
+        <section id="service-accounts" class="band">
+          <div class="section-heading">
+            <h2>Service Accounts</h2>
+            <span>{{ service_accounts|length }} active</span>
+          </div>
+          <div class="grid two">
+            <form class="panel" action="/service-accounts" method="post">
+              <h3>Create Service Account</h3>
+              <label>
+                Name
+                <input name="name" placeholder="daily-report-bot" maxlength="120" required>
+              </label>
+              <label>
+                Role
+                <select name="role" required>
+                  <option value="viewer" selected>Viewer</option>
+                  <option value="analyst">Analyst</option>
+                </select>
+              </label>
+              <label>
+                Initial token scope
+                <select name="scope" required>
+                  <option value="read" selected>Read only</option>
+                  <option value="full">Full access</option>
+                </select>
+              </label>
+              <label>
+                Expires in days
+                <input name="expires_days" type="number" min="1" max="365" value="30" required>
+              </label>
+              <button type="submit">Create Service Account</button>
+            </form>
+            <div class="panel">
+              <h3>Active Service Accounts</h3>
+              {% if service_accounts %}
+                <div class="table-wrap compact">
+                  <table>
+                    <thead>
+                      <tr><th>Name</th><th>Role</th><th>Tokens</th><th>Last Used</th><th></th></tr>
+                    </thead>
+                    <tbody>
+                      {% for service_account in service_accounts %}
+                        <tr>
+                          <td>{{ service_account.name }}</td>
+                          <td>{{ service_account.role }}</td>
+                          <td>{{ service_account.active_token_count }}</td>
+                          <td>{{ service_account.last_used_at[:19].replace("T", " ") if service_account.last_used_at else "Never" }}</td>
+                          <td>
+                            <div class="inline-actions">
+                              <form class="service-token-form" action="/service-accounts/{{ service_account.id }}/tokens" method="post">
+                                <select name="scope" aria-label="New token scope for {{ service_account.name }}">
+                                  <option value="read" selected>Read</option>
+                                  <option value="full">Full</option>
+                                </select>
+                                <input name="expires_days" type="number" min="1" max="365" value="30" aria-label="New token expiry for {{ service_account.name }}">
+                                <button class="small secondary" type="submit">New Token</button>
+                              </form>
+                              <form action="/service-accounts/{{ service_account.id }}/revoke" method="post">
+                                <button class="small danger" type="submit">Revoke</button>
+                              </form>
+                            </div>
+                          </td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              {% else %}
+                <p class="empty">No service accounts.</p>
+              {% endif %}
+            </div>
+          </div>
+        </section>
+      {% endif %}
+
+      <section id="notifications" class="band">
+        <div class="section-heading">
+          <h2>Notifications</h2>
+          <span>{{ unread_notifications }} unread</span>
+        </div>
+        {% if notifications %}
+          <div class="table-wrap compact">
+            <table>
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Message</th>
+                  <th>Resource</th>
+                  <th>Created</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for notification in notifications %}
+                  <tr class="{% if notification.is_read %}muted-row{% endif %}">
+                    <td>
+                      <span class="status {{ 'read' if notification.is_read else notification.severity }}">{{ "read" if notification.is_read else notification.severity }}</span>
+                    </td>
+                    <td>
+                      <strong>{{ notification.title }}</strong>
+                      <small>{{ notification.message }}</small>
+                    </td>
+                    <td>
+                      {% if notification.resource_type == "run" %}
+                        <a href="/runs/{{ notification.resource_id }}">Run {{ notification.resource_id[:8] }}</a>
+                      {% elif notification.resource_type == "report" %}
+                        <a href="/reports/{{ notification.resource_id }}">Report</a>
+                      {% else %}
+                        {{ notification.resource_type }}
+                      {% endif %}
+                    </td>
+                    <td>{{ notification.created_at[:19].replace("T", " ") }}</td>
+                    <td>
+                      {% if not notification.is_read %}
+                        <form action="/notifications/{{ notification.id }}/read" method="post">
+                          <button class="small secondary" type="submit">Mark Read</button>
+                        </form>
+                      {% endif %}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="empty">No notifications.</p>
+        {% endif %}
+      </section>
+
+      {% if can_manage_notification_channels %}
+        <section id="delivery-channels" class="band">
+          <div class="section-heading">
+            <h2>Delivery Channels</h2>
+            <span>{{ notification_channels|length }} channels</span>
+          </div>
+          <div class="grid two">
+            <div class="panel">
+              <h3>Configured Channels</h3>
+              {% if notification_channels %}
+                <div class="table-wrap compact">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>Target</th>
+                        <th>Events</th>
+                        <th>Status</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for channel in notification_channels %}
+                        <tr>
+                          <td>{{ channel.name }}</td>
+                          <td>{{ channel.channel_type }}</td>
+                          <td>
+                            {% if channel.channel_type == "email" %}
+                              {{ channel.destination }}
+                            {% else %}
+                              {{ channel.secret_name or "Unavailable Secret Reference" }}
+                            {% endif %}
+                          </td>
+                          <td>{{ channel.event_types|join(", ") }}</td>
+                          <td><span class="status {{ 'success' if channel.is_active else 'read' }}">{{ "active" if channel.is_active else "paused" }}</span></td>
+                          <td>
+                            <div class="inline-actions">
+                              <form action="/notification-channels/{{ channel.id }}/toggle" method="post">
+                                <button class="small secondary" type="submit">{{ "Pause" if channel.is_active else "Resume" }}</button>
+                              </form>
+                              <form action="/notification-channels/{{ channel.id }}/delete" method="post">
+                                <button class="small danger" type="submit">Remove</button>
+                              </form>
+                            </div>
+                          </td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              {% else %}
+                <p class="empty">No delivery channels.</p>
+              {% endif %}
+            </div>
+            <form class="panel" action="/notification-channels" method="post">
+              <h3>Add Delivery Channel</h3>
+              <label>
+                Name
+                <input name="name" placeholder="operations-alerts" required>
+              </label>
+              <label>
+                Type
+                <select name="channel_type">
+                  <option value="email">Email</option>
+                  <option value="webhook">Webhook</option>
+                  <option value="slack">Slack</option>
+                  <option value="teams">Microsoft Teams</option>
+                </select>
+              </label>
+              <label>
+                Email Recipients
+                <input name="destination" type="email" multiple placeholder="ops@example.com, analyst@example.com">
+              </label>
+              <label>
+                Webhook URL Reference
+                <select name="secret_id">
+                  <option value="">Select Secret Reference</option>
+                  {% for secret in secret_references %}
+                    <option value="{{ secret.id }}">{{ secret.name }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <fieldset class="event-type-picker">
+                <legend>Event Types</legend>
+                <label>
+                  <input name="event_types" type="checkbox" value="run.failed" checked>
+                  Run failures
+                </label>
+                <label>
+                  <input name="event_types" type="checkbox" value="report.refresh_succeeded" checked>
+                  Report refresh succeeded
+                </label>
+                <label>
+                  <input name="event_types" type="checkbox" value="report.refresh_failed" checked>
+                  Report refresh failed
+                </label>
+              </fieldset>
+              <label>
+                Retry Count
+                <input name="max_retries" type="number" min="0" max="10" value="3" required>
+              </label>
+              <button type="submit">Save Channel</button>
+            </form>
+          </div>
+          <div class="panel">
+            <h3>Recent Deliveries</h3>
+            {% if notification_deliveries %}
+              <div class="table-wrap compact">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Status</th>
+                      <th>Channel</th>
+                      <th>Event</th>
+                      <th>Attempts</th>
+                      <th>Last Error</th>
+                      <th>Created</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for delivery in notification_deliveries %}
+                      <tr>
+                        <td><span class="status {{ 'success' if delivery.status == 'sent' else 'error' if delivery.status == 'failed' else 'read' }}">{{ delivery.status }}</span></td>
+                        <td>{{ delivery.channel_name }}</td>
+                        <td>{{ delivery.event_type }}</td>
+                        <td>{{ delivery.attempt }} / {{ delivery.max_attempts }}</td>
+                        <td>{{ delivery.last_error }}</td>
+                        <td>{{ delivery.created_at[:19].replace("T", " ") }}</td>
+                        <td>
+                          {% if delivery.status == "failed" and delivery.current_channel_id and delivery.channel_is_active %}
+                            <form action="/notification-deliveries/{{ delivery.id }}/requeue" method="post">
+                              <button class="small secondary" type="submit">Retry</button>
+                            </form>
+                          {% elif delivery.status == "failed" %}
+                            <span class="report-note">Channel inactive</span>
+                          {% endif %}
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              <p class="empty">No delivery attempts.</p>
+            {% endif %}
+          </div>
+        </section>
+      {% endif %}
+
+      <section id="members" class="band">
+        <div class="section-heading">
+          <h2>Workspace Members</h2>
+          <span>{{ members|length }} members</span>
+        </div>
+        <div class="grid two">
+          <div class="panel">
+            <h3>Members</h3>
+            {% if members %}
+              <div class="table-wrap compact">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Email</th>
+                      <th>Role</th>
+                      {% if password_auth and context.role in ["owner", "admin"] %}<th></th>{% endif %}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for member in members %}
+                      <tr>
+                        <td>{{ member.name }}</td>
+                        <td>{{ member.email }}</td>
+                        <td>{{ member.role }}</td>
+                        {% if password_auth and context.role in ["owner", "admin"] %}
+                          <td>
+                            {% if context.role == "owner" or member.role in ["analyst", "viewer"] %}
+                              <form action="/workspace/members/{{ member.user_id }}/password-reset" method="post">
+                                <button class="small secondary" type="submit">Reset Password</button>
+                              </form>
+                            {% endif %}
+                          </td>
+                        {% endif %}
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              <p class="empty">No members yet.</p>
+            {% endif %}
+          </div>
+          <form class="panel" action="{{ '/workspace/invitations' if password_auth else '/workspace/members' }}" method="post">
+            <h3>{{ "Invite Member" if password_auth else "Add Member" }}</h3>
+            <label>
+              Email
+              <input name="email" type="email" placeholder="analyst@example.com" required>
+            </label>
+            <label>
+              Name
+              <input name="name" placeholder="Analyst">
+            </label>
+            <label>
+              Role
+              <select name="role">
+                <option value="viewer">Viewer</option>
+                <option value="analyst">Analyst</option>
+                <option value="admin">Admin</option>
+              </select>
+            </label>
+            <button type="submit" {% if context.role not in ["owner", "admin"] %}disabled{% endif %}>{{ "Create Invitation" if password_auth else "Save Member" }}</button>
+          </form>
+        </div>
+        {% if password_auth and context.role in ["owner", "admin"] %}
+          <div class="panel">
+            <h3>Pending Invitations</h3>
+            {% if pending_invitations %}
+              <div class="table-wrap compact">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Email</th>
+                      <th>Role</th>
+                      <th>Expires</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for invitation in pending_invitations %}
+                      <tr>
+                        <td>{{ invitation.email }}</td>
+                        <td>{{ invitation.role }}</td>
+                        <td>{{ invitation.expires_at[:19].replace("T", " ") }}</td>
+                        <td>
+                          <form action="/workspace/invitations/{{ invitation.id }}/revoke" method="post">
+                            <button class="small secondary" type="submit">Revoke</button>
+                          </form>
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              <p class="empty">No pending invitations.</p>
+            {% endif %}
+          </div>
+        {% endif %}
+      </section>
+
+      <section id="quotas" class="band">
+        <div class="section-heading">
+          <h2>Workspace Limits</h2>
+          <span>{{ workspace_quota.updated_at[:19].replace("T", " ") }}</span>
+        </div>
+        <div class="grid two">
+          <div class="panel">
+            <h3>Resource Usage</h3>
+            <div class="table-wrap compact">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Resource</th>
+                    <th>Used</th>
+                    <th>Limit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Data Sources</td>
+                    <td>{{ workspace_usage.data_sources }}</td>
+                    <td>{{ workspace_quota.max_data_sources }}</td>
+                  </tr>
+                  <tr>
+                    <td>Projects</td>
+                    <td>{{ workspace_usage.projects }}</td>
+                    <td>{{ workspace_quota.max_projects }}</td>
+                  </tr>
+                  <tr>
+                    <td>Schedules</td>
+                    <td>{{ workspace_usage.schedules }}</td>
+                    <td>{{ workspace_quota.max_schedules }}</td>
+                  </tr>
+                  <tr>
+                    <td>Reports</td>
+                    <td>{{ workspace_usage.reports }}</td>
+                    <td>{{ workspace_quota.max_reports }}</td>
+                  </tr>
+                  <tr>
+                    <td>Concurrent Runs</td>
+                    <td>{{ workspace_usage.concurrent_runs }}</td>
+                    <td>{{ workspace_quota.max_concurrent_runs }}</td>
+                  </tr>
+                  <tr>
+                    <td>Data Source Storage</td>
+                    <td>{{ (workspace_usage.storage_bytes / 1048576)|round(2) }} MiB</td>
+                    <td>{{ (workspace_quota.max_storage_bytes / 1048576)|round(0)|int }} MiB</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <form class="panel quota-form" action="/workspace/quotas" method="post">
+            <h3>Limits</h3>
+            <label>
+              Data Sources
+              <input name="max_data_sources" type="number" min="0" value="{{ workspace_quota.max_data_sources }}" required>
+            </label>
+            <label>
+              Projects
+              <input name="max_projects" type="number" min="0" value="{{ workspace_quota.max_projects }}" required>
+            </label>
+            <label>
+              Schedules
+              <input name="max_schedules" type="number" min="0" value="{{ workspace_quota.max_schedules }}" required>
+            </label>
+            <label>
+              Reports
+              <input name="max_reports" type="number" min="0" value="{{ workspace_quota.max_reports }}" required>
+            </label>
+            <label>
+              Concurrent Runs
+              <input name="max_concurrent_runs" type="number" min="0" value="{{ workspace_quota.max_concurrent_runs }}" required>
+            </label>
+            <label>
+              Storage (MiB)
+              <input name="max_storage_mb" type="number" min="0" value="{{ (workspace_quota.max_storage_bytes / 1048576)|round(0)|int }}" required>
+            </label>
+            <button type="submit" {% if context.role not in ["owner", "admin"] %}disabled{% endif %}>Save Limits</button>
+          </form>
+        </div>
+      </section>
+
+      {% if context.role in ["owner", "admin"] %}
+        <section id="run-usage" class="band">
+          <div class="section-heading">
+            <h2>Runtime Usage</h2>
+            <span>Workspace aggregate</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Period</th>
+                  <th>Runs</th>
+                  <th>Succeeded</th>
+                  <th>Failed</th>
+                  <th>Canceled</th>
+                  <th>Active</th>
+                  <th>Success Rate</th>
+                  <th>Compute Hours</th>
+                  <th>Average Duration</th>
+                  <th>Estimated Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for period in run_usage %}
+                  <tr>
+                    <td><strong>{{ period.label }}</strong></td>
+                    <td>{{ period.total_runs }}</td>
+                    <td>{{ period.succeeded_runs }}</td>
+                    <td>{{ period.failed_runs }}</td>
+                    <td>{{ period.canceled_runs }}</td>
+                    <td>{{ period.active_runs }}</td>
+                    <td>{{ period.success_rate }}%</td>
+                    <td>{{ period.duration_hours }}</td>
+                    <td>{{ period.average_duration_seconds }}s</td>
+                    <td>¥{{ "%.2f"|format(period.estimated_cost_cny) }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <p class="report-note">Cost estimate uses ¥{{ "%.2f"|format(runner_hourly_cost_cny) }} per compute hour from <code>ANYDATAS_RUNNER_COST_PER_HOUR_CNY</code>; it is an operational estimate, not a provider bill.</p>
+        </section>
+      {% endif %}
+
+      {% if can_manage_secrets %}
+        <section id="secrets" class="band">
+          <div class="section-heading">
+            <h2>Secret References</h2>
+            <span>{{ secret_references|length }} references</span>
+          </div>
+          <div class="grid two">
+            <div class="panel">
+              <h3>References</h3>
+              {% if secret_references %}
+                <div class="table-wrap compact">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Source Variable</th>
+                        <th>Description</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for secret in secret_references %}
+                        <tr>
+                          <td>{{ secret.name }}</td>
+                          <td><code>{{ secret.environment_variable }}</code></td>
+                          <td>{{ secret.description }}</td>
+                          <td>
+                            <form action="/secrets/{{ secret.id }}/delete" method="post">
+                              <button class="small secondary" type="submit">Remove</button>
+                            </form>
+                          </td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              {% else %}
+                <p class="empty">No secret references.</p>
+              {% endif %}
+            </div>
+            <form class="panel secret-reference-form" action="/secrets" method="post">
+              <h3>Add Reference</h3>
+              <label>
+                Name
+                <input name="name" placeholder="warehouse-password" required>
+              </label>
+              <label>
+                Source Variable
+                <input name="environment_variable" placeholder="ANYDATAS_SECRET_WAREHOUSE_PASSWORD" required>
+              </label>
+              <label>
+                Description
+                <input name="description" placeholder="Read-only warehouse credential">
+              </label>
+              <button type="submit">Save Reference</button>
+            </form>
+          </div>
+        </section>
+      {% endif %}
+
+      <section id="data" class="band">
+        <div class="section-heading">
+          <h2>Data Sources</h2>
+          <span>{{ data_sources|length }} sources</span>
+        </div>
+        <div class="grid data-source-grid">
+          <form class="panel" action="/data-sources" method="post" enctype="multipart/form-data">
+            <h3>Upload File</h3>
+            <label>
+              Name
+              <input name="name" placeholder="sales_q1" required>
+            </label>
+            <label>
+              Classification
+              <select name="classification">
+                <option value="internal" selected>Internal</option>
+                <option value="public">Public</option>
+                <option value="confidential">Confidential</option>
+                <option value="restricted">Restricted</option>
+              </select>
+            </label>
+            <label>
+              File
+              <input name="file" type="file" accept=".csv,.xlsx,.parquet,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/octet-stream" required>
+              <small>Max {{ "%g"|format(max_upload_mb) }} MB</small>
+            </label>
+            <button type="submit">Upload</button>
+          </form>
+
+          <form class="panel" action="/data-sources/sqlite" method="post">
+            <h3>Connect SQLite</h3>
+            <label>
+              Name
+              <input name="name" placeholder="warehouse_sales" required>
+            </label>
+            <label>
+              Classification
+              <select name="classification">
+                <option value="internal" selected>Internal</option>
+                <option value="public">Public</option>
+                <option value="confidential">Confidential</option>
+                <option value="restricted">Restricted</option>
+              </select>
+            </label>
+            <label>
+              Database path
+              <input name="database_path" placeholder="/data/warehouse.sqlite3" required>
+            </label>
+            <label>
+              Table or view
+              <input name="table_name" placeholder="sales" required>
+            </label>
+            <button type="submit">Connect</button>
+          </form>
+
+          {% if can_bind_secrets and secret_references %}
+            <form class="panel" action="/data-sources/postgres" method="post">
+              <h3>Connect PostgreSQL</h3>
+              <label>
+                Name
+                <input name="name" placeholder="warehouse_sales" required>
+              </label>
+              <label>
+                Classification
+                <select name="classification">
+                  <option value="internal" selected>Internal</option>
+                  <option value="public">Public</option>
+                  <option value="confidential">Confidential</option>
+                  <option value="restricted">Restricted</option>
+                </select>
+              </label>
+              <label>
+                Connection Reference
+                <select name="secret_id" required>
+                  {% for secret in secret_references %}
+                    <option value="{{ secret.id }}">{{ secret.name }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label>
+                Schema
+                <input name="schema_name" value="public" required>
+              </label>
+              <label>
+                Table
+                <input name="table_name" placeholder="sales" required>
+              </label>
+              <button type="submit">Connect</button>
+            </form>
+
+            <form class="panel" action="/data-sources/mysql" method="post">
+              <h3>Connect MySQL</h3>
+              <label>
+                Name
+                <input name="name" placeholder="warehouse_sales" required>
+              </label>
+              <label>
+                Classification
+                <select name="classification">
+                  <option value="internal" selected>Internal</option>
+                  <option value="public">Public</option>
+                  <option value="confidential">Confidential</option>
+                  <option value="restricted">Restricted</option>
+                </select>
+              </label>
+              <label>
+                Connection Reference
+                <select name="secret_id" required>
+                  {% for secret in secret_references %}
+                    <option value="{{ secret.id }}">{{ secret.name }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label>
+                Database
+                <input name="database_name" placeholder="warehouse" required>
+              </label>
+              <label>
+                Table
+                <input name="table_name" placeholder="sales" required>
+              </label>
+              <button type="submit">Connect</button>
+            </form>
+
+            <form class="panel" action="/data-sources/clickhouse" method="post">
+              <h3>Connect ClickHouse</h3>
+              <label>
+                Name
+                <input name="name" placeholder="warehouse_events" required>
+              </label>
+              <label>
+                Classification
+                <select name="classification">
+                  <option value="internal" selected>Internal</option>
+                  <option value="public">Public</option>
+                  <option value="confidential">Confidential</option>
+                  <option value="restricted">Restricted</option>
+                </select>
+              </label>
+              <label>
+                Connection Reference
+                <select name="secret_id" required>
+                  {% for secret in secret_references %}
+                    <option value="{{ secret.id }}">{{ secret.name }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label>
+                Database
+                <input name="database_name" placeholder="analytics" required>
+              </label>
+              <label>
+                Table
+                <input name="table_name" placeholder="events" required>
+              </label>
+              <button type="submit">Connect</button>
+            </form>
+
+            <form class="panel" action="/data-sources/s3" method="post">
+              <h3>Import S3 / MinIO</h3>
+              <label>
+                Name
+                <input name="name" placeholder="monthly_sales" required>
+              </label>
+              <label>
+                Classification
+                <select name="classification">
+                  <option value="internal" selected>Internal</option>
+                  <option value="public">Public</option>
+                  <option value="confidential">Confidential</option>
+                  <option value="restricted">Restricted</option>
+                </select>
+              </label>
+              <label>
+                Connection Reference
+                <select name="secret_id" required>
+                  {% for secret in secret_references %}
+                    <option value="{{ secret.id }}">{{ secret.name }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label>
+                Bucket
+                <input name="bucket_name" placeholder="analytics-data" required>
+              </label>
+              <label>
+                Object Key
+                <input name="object_key" placeholder="exports/monthly-sales.parquet" required>
+              </label>
+              <button type="submit">Import Snapshot</button>
+            </form>
+          {% endif %}
+
+          <div class="panel data-source-table">
+            <div class="panel-heading-row">
+              <h3>Available Tables</h3>
+              <input id="data-source-filter" class="list-filter" type="search" placeholder="Filter data sources" aria-label="Filter data sources">
+            </div>
+            {% if data_sources %}
+              <div class="table-wrap compact">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Type</th>
+                      <th>Rows</th>
+                      <th>Access</th>
+                      <th>Classification</th>
+                      <th>Quality</th>
+                      <th>Issues</th>
+                      <th>Columns</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for source in data_sources %}
+                      <tr data-source-search="{{ source.name }} {{ source.source_type }} {{ source.classification }} {{ source.columns|join(' ') }}">
+                        <td><a href="/data-sources/{{ source.id }}">{{ source.name }}</a></td>
+                        <td>{{ source.source_type }}</td>
+                        <td>{{ source.row_count }}</td>
+                        <td><span class="quality-pill">{{ source.access_level }}</span></td>
+                        <td><span class="classification-badge {{ source.classification }}">{{ source.classification }}</span></td>
+                        <td>
+                          <span class="quality-pill">{{ source.quality.completeness|default("n/a") }}%</span>
+                        </td>
+                        <td>
+                          {{ source.quality.empty_cells|default(0) }} empty / {{ source.quality.duplicate_rows|default(0) }} duplicate
+                        </td>
+                        <td>{{ source.columns|join(", ") }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              <p class="empty">No data sources yet.</p>
+            {% endif %}
+          </div>
+        </div>
+      </section>
+
+      <section id="projects" class="band">
+        <div class="section-heading">
+          <h2>Analysis Projects</h2>
+          <div class="section-tools">
+            <span>{{ projects|length }} projects</span>
+            <input id="project-filter" class="list-filter" type="search" placeholder="Filter projects" aria-label="Filter projects">
+          </div>
+        </div>
+
+        <form class="panel project-editor" action="/projects" method="post">
+          <div class="form-row">
+            <label>
+              Project
+              <input name="name" placeholder="Daily revenue check" required>
+            </label>
+            <label>
+              Language
+              <select name="language">
+                <option value="sql">SQL</option>
+                <option value="python">Python</option>
+              </select>
+            </label>
+            <label>
+              Data source
+              <select name="data_source_id" required>
+                {% for source in queryable_data_sources %}
+                  <option value="{{ source.id }}">{{ source.name }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>
+              Runtime
+              <select name="runtime_profile">
+                {% for profile in runtime_profiles %}
+                  <option value="{{ profile.id }}">{{ profile.label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+          </div>
+          <textarea name="script" spellcheck="false" data-code-editor data-language="sql">{{ default_sql }}</textarea>
+          <label class="parameters-editor">
+            Parameters (JSON; SQL uses $name)
+            <textarea name="parameters_json" rows="3" spellcheck="false">{{ default_parameters_json }}</textarea>
+          </label>
+          <button type="submit" {% if not queryable_data_sources %}disabled{% endif %}>Create Project</button>
+        </form>
+
+        <div class="project-list">
+          {% for project in projects %}
+            <article id="project-{{ project.id }}" class="panel project-editor" data-project-search="{{ project.name }} {{ project.language }} {{ project.data_source_name }} {{ project.runtime_profile }}">
+              <details class="project-disclosure" {% if loop.first %}open{% endif %}>
+                <summary>
+                  <span>
+                    <strong>{{ project.name }}</strong>
+                    <small>{{ project.language|upper }} · {{ project.data_source_name }} · {{ project.runtime_profile }}</small>
+                  </span>
+                  <span class="project-summary-meta">
+                    {% if project.published_version_number %}<span class="status success">v{{ project.published_version_number }} published</span>{% else %}<span class="status warning">Draft</span>{% endif %}
+                    <small>{{ project.reports|length }} reports</small>
+                  </span>
+                </summary>
+                <div class="project-body">
+                  <form action="/projects/{{ project.id }}" method="post">
+                    <div class="form-row">
+                      <label>
+                        Project
+                        <input name="name" value="{{ project.name }}" required>
+                      </label>
+                      <label>
+                        Language
+                        <select name="language">
+                          <option value="sql" {% if project.language == "sql" %}selected{% endif %}>SQL</option>
+                          <option value="python" {% if project.language == "python" %}selected{% endif %}>Python</option>
+                        </select>
+                      </label>
+                      <label>
+                        Data source
+                        <select name="data_source_id" required>
+                          {% for source in queryable_data_sources %}
+                            <option value="{{ source.id }}" {% if source.id == project.data_source_id %}selected{% endif %}>{{ source.name }}</option>
+                          {% endfor %}
+                        </select>
+                      </label>
+                      <label>
+                        Runtime
+                        <select name="runtime_profile">
+                          {% for profile in runtime_profiles %}
+                            <option value="{{ profile.id }}" {% if profile.id == project.runtime_profile %}selected{% endif %}>{{ profile.label }}</option>
+                          {% endfor %}
+                        </select>
+                      </label>
+                    </div>
+                    <textarea name="script" spellcheck="false" data-code-editor data-language="{{ project.language }}">{{ project.script }}</textarea>
+                    <label class="parameters-editor">
+                      Parameters (JSON; SQL uses $name)
+                      <textarea name="parameters_json" rows="3" spellcheck="false">{{ project.parameters_json }}</textarea>
+                    </label>
+                    <button type="submit">Save Version</button>
+                  </form>
+                  <div class="version-strip">
+                    <span>Latest v{{ project.latest_version_number or 0 }}</span>
+                    <span>{{ project.parameter_count }} params</span>
+                    <span>{{ project.secret_bindings|length }} secrets</span>
+                    <span>{{ project.runtime_profile }} runtime</span>
+                    {% if project.published_version_number %}
+                      <span>Published v{{ project.published_version_number }}</span>
+                    {% else %}
+                      <span>Not published</span>
+                    {% endif %}
+                  </div>
+                  <div class="project-lineage">
+                    <div class="project-lineage-heading">
+                      <strong>Linked Reports</strong>
+                      <span>{{ project.reports|length }} visible</span>
+                    </div>
+                    {% if project.reports %}
+                      <ul class="project-report-list">
+                        {% for report in project.reports %}
+                          <li>
+                            <a href="/reports/{{ report.id }}">{{ report.title }}</a>
+                            {% if report.latest_snapshot %}
+                              <span class="status {{ report.latest_snapshot.status }}">{{ report.latest_snapshot.status }}</span>
+                            {% else %}
+                              <span class="report-note">no snapshot</span>
+                            {% endif %}
+                          </li>
+                        {% endfor %}
+                      </ul>
+                    {% else %}
+                      <span class="report-note">No linked reports.</span>
+                    {% endif %}
+                  </div>
+                  {% if can_bind_secrets and secret_references %}
+                    <details class="project-secret-controls">
+                      <summary>
+                        <span>Secret Bindings</span>
+                        <small>{{ project.secret_bindings|length }} configured</small>
+                      </summary>
+                      <div class="project-secret-editor">
+                        {% if project.secret_bindings|length < secret_references|length %}
+                          <form class="project-secret-form" action="/projects/{{ project.id }}/secrets" method="post">
+                            <label class="compact-field">
+                              Reference
+                              <select name="secret_id" required>
+                                {% for secret in secret_references %}
+                                  {% if secret.id not in project.secret_binding_ids %}
+                                    <option value="{{ secret.id }}">{{ secret.name }}</option>
+                                  {% endif %}
+                                {% endfor %}
+                              </select>
+                            </label>
+                            <label class="compact-field">
+                              Runtime Variable
+                              <input name="environment_name" placeholder="ANYDATAS_USER_SECRET_WAREHOUSE_PASSWORD" required>
+                            </label>
+                            <button type="submit">Bind Secret</button>
+                          </form>
+                        {% endif %}
+                        {% if project.secret_bindings %}
+                          <ul class="project-secret-list">
+                            {% for binding in project.secret_bindings %}
+                              <li>
+                                <span>{{ binding.secret_name }} · {{ binding.environment_name }}</span>
+                                <form action="/projects/{{ project.id }}/secrets/{{ binding.secret_id }}/delete" method="post">
+                                  <button class="small secondary" type="submit">Remove</button>
+                                </form>
+                              </li>
+                            {% endfor %}
+                          </ul>
+                        {% endif %}
+                      </div>
+                    </details>
+                  {% endif %}
+                  <div class="actions">
+                    <form action="/projects/{{ project.id }}/publish" method="post">
+                      <button type="submit">Publish</button>
+                    </form>
+                    <form action="/projects/{{ project.id }}/run" method="post">
+                      <button type="submit">Run</button>
+                    </form>
+                    <form class="report-create-form" action="/reports" method="post">
+                      <input type="hidden" name="project_id" value="{{ project.id }}">
+                      <input type="hidden" name="title" value="{{ project.name }} report">
+                      <input type="hidden" name="description" value="Latest successful run">
+                      <label class="compact-field">
+                        Visibility
+                        <select name="visibility">
+                          <option value="workspace">Workspace</option>
+                          <option value="private">Private</option>
+                        </select>
+                      </label>
+                      <button type="submit">Report</button>
+                    </form>
+                  </div>
+                </div>
+              </details>
+            </article>
+          {% else %}
+            <p class="empty">No projects yet. Create an analysis project above.</p>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section id="runs" class="band">
+        <div class="section-heading">
+          <h2>Runs</h2>
+          <span><a href="/runs">Search all</a> · {{ runs|length }} recent</span>
+        </div>
+        {% if runs %}
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Project</th>
+                  <th>Status</th>
+                  <th>Trigger</th>
+                  <th>Attempt</th>
+                  <th>Started</th>
+                  <th>Duration</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for run in runs %}
+                  <tr>
+                    <td>{{ run.project_name }}</td>
+                    <td><span class="status {{ run.status }}">{{ run.status }}</span></td>
+                    <td>
+                      {{ run.trigger_type }}
+                      {% if run.scheduled_for_at %}<small>for {{ run.scheduled_for_at[:19].replace("T", " ") }}</small>{% endif %}
+                    </td>
+                    <td>{{ run.attempt }}</td>
+                    <td>{{ run.started_at[:19].replace("T", " ") }}</td>
+                    <td>{% if run.duration_ms %}{{ run.duration_ms }} ms{% endif %}</td>
+                    <td><a href="/runs/{{ run.id }}">Details</a></td>
+                  </tr>
+                  {% if run.error %}
+                    <tr class="log-row">
+                      <td colspan="7">{{ run.error }}</td>
+                    </tr>
+                  {% endif %}
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="empty">No runs yet.</p>
+        {% endif %}
+      </section>
+
+      <section id="schedules" class="band">
+        <div class="section-heading">
+          <h2>Schedules</h2>
+          <span>{{ schedules|length }} schedules</span>
+        </div>
+        <form class="panel inline-form schedule-form" action="/schedules" method="post">
+          <select name="project_id" required>
+            {% for project in projects %}
+              <option value="{{ project.id }}">{{ project.name }}</option>
+            {% endfor %}
+          </select>
+          <select name="schedule_type" required>
+            <option value="interval">Interval</option>
+            <option value="cron">Cron</option>
+          </select>
+          <input name="name" placeholder="Daily refresh" required>
+          <input name="interval_minutes" type="number" min="1" value="60">
+          <input name="cron_expression" placeholder="0 9 * * 1-5">
+          <input name="timezone_name" value="UTC">
+          <label class="compact-field">
+            Retries
+            <input name="max_retries" type="number" min="0" max="10" value="0">
+          </label>
+          <label class="compact-field">
+            Delay min
+            <input name="retry_delay_minutes" type="number" min="1" max="1440" value="5">
+          </label>
+          <label class="compact-field">
+            Concurrency
+            <select name="concurrency_policy">
+              <option value="skip">Skip</option>
+              <option value="queue_one">Queue one</option>
+              <option value="queue_all">Queue all</option>
+              <option value="cancel_previous">Cancel previous</option>
+            </select>
+          </label>
+          <button type="submit" {% if not projects %}disabled{% endif %}>Create</button>
+        </form>
+        {% if schedules %}
+          <div class="table-wrap compact">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Project</th>
+                  <th>Type</th>
+                  <th>Rule</th>
+                  <th>Retry</th>
+                  <th>Concurrency</th>
+                  <th>Next</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for schedule in schedules %}
+                  <tr>
+                    <td>{{ schedule.name }}</td>
+                    <td>{{ schedule.project_name }}</td>
+                    <td>{{ schedule.schedule_type }}</td>
+                    <td>
+                      {% if schedule.schedule_type == "cron" %}
+                        {{ schedule.cron_expression }} / {{ schedule.timezone }}
+                      {% else %}
+                        Every {{ schedule.interval_minutes }} min
+                      {% endif %}
+                    </td>
+                    <td>{{ schedule.max_retries }} x / {{ schedule.retry_delay_minutes }} min</td>
+                    <td>{{ schedule.concurrency_policy }}</td>
+                    <td>{{ schedule.next_run_at[:19].replace("T", " ") }}</td>
+                    <td>
+                      <div class="row-actions">
+                        <form action="/schedules/{{ schedule.id }}/toggle" method="post">
+                          <button class="small" type="submit">{% if schedule.is_active %}Pause{% else %}Resume{% endif %}</button>
+                        </form>
+                        <form action="/schedules/{{ schedule.id }}/run" method="post">
+                          <button class="small secondary" type="submit">Run Now</button>
+                        </form>
+                        <a href="/schedules/{{ schedule.id }}/backfill">Backfill</a>
+                      </div>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="empty">No schedules yet.</p>
+        {% endif %}
+      </section>
+
+      <section id="reports" class="band">
+        <div class="section-heading">
+          <h2>Reports</h2>
+          <span>{{ reports|length }} reports</span>
+        </div>
+        {% if reports %}
+          <ul class="link-list report-list">
+            {% for report in reports %}
+              <li>
+                <div class="report-link">
+                  <a href="/reports/{{ report.id }}">{{ report.title }}</a>
+                  <span>
+                    {{ report.project_name }} · {{ report.visibility }} ·
+                    {% if report.latest_snapshot %}{{ report.latest_snapshot.status }}{% else %}no snapshot{% endif %}
+                  </span>
+                </div>
+                {% if report.can_manage %}
+                  <form class="report-visibility-form" action="/reports/{{ report.id }}/visibility" method="post">
+                    <select name="visibility" aria-label="Report visibility">
+                      <option value="workspace" {% if report.visibility == "workspace" %}selected{% endif %}>Workspace</option>
+                      <option value="private" {% if report.visibility == "private" %}selected{% endif %}>Private</option>
+                    </select>
+                    <button class="small secondary" type="submit">Save</button>
+                  </form>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="empty">No reports yet.</p>
+        {% endif %}
+      </section>
+
+      <section id="audit" class="band">
+        <div class="section-heading">
+          <h2>Audit</h2>
+          <span>{{ audit_events|length }} recent</span>
+        </div>
+        {% if audit_events %}
+          <div class="table-wrap compact">
+            <table>
+              <thead>
+                <tr>
+                  <th>Action</th>
+                  <th>Resource</th>
+                  <th>Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for event in audit_events %}
+                  <tr>
+                    <td>{{ event.action }}</td>
+                    <td>{{ event.resource_type }} / {{ event.resource_id[:8] }}</td>
+                    <td>{{ event.created_at[:19].replace("T", " ") }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="empty">No audit events yet.</p>
+        {% endif %}
+      </section>
+    </main>
+  </body>
+</html>
