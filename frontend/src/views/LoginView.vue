@@ -17,6 +17,7 @@ import {
 
 import { errorMessage } from '../api'
 import PixelOcean from '../components/PixelOcean.vue'
+import ThemeToggle from '../components/ThemeToggle.vue'
 import { useAuthStore } from '../stores/auth'
 
 const auth = useAuthStore()
@@ -104,6 +105,7 @@ async function submit() {
         </span>
       </div>
       <div class="auth-header-meta">
+        <ThemeToggle variant="login" />
         <span class="auth-system-code">ANALYSIS SYSTEM / 01</span>
         <span class="auth-deployment">
           <span class="auth-status-dot" aria-hidden="true" />
@@ -250,6 +252,22 @@ async function submit() {
 
 <style scoped>
 .auth-page {
+  --auth-bg: #fbfdfc;
+  --auth-header-bg: rgb(255 255 255 / 88%);
+  --auth-header-line: rgb(203 214 209 / 78%);
+  --auth-halo-strong: rgb(251 253 252 / 98%);
+  --auth-halo-medium: rgb(251 253 252 / 91%);
+  --auth-halo-soft: rgb(251 253 252 / 66%);
+  --auth-halo-clear: rgb(251 253 252 / 0%);
+  --auth-body-copy: #506059;
+  --auth-text-shadow: rgb(251 253 252 / 92%);
+  --auth-capability-line: rgb(203 214 209 / 74%);
+  --auth-capability-bg: rgb(255 255 255 / 88%);
+  --auth-panel-bg: #ffffff;
+  --auth-field-text: #405048;
+  --auth-input-bg: #fbfdfc;
+  --auth-input-focus-bg: #ffffff;
+  --auth-footer-text: rgb(64 80 72 / 72%);
   position: relative;
   isolation: isolate;
   height: 100%;
@@ -258,7 +276,26 @@ async function submit() {
   grid-template-rows: 64px minmax(0, 1fr) 38px;
   overflow: hidden;
   color: var(--text);
-  background: #fbfdfc;
+  background: var(--auth-bg);
+}
+
+:global(html[data-theme="dark"] .auth-page) {
+  --auth-bg: #09110e;
+  --auth-header-bg: rgb(11 24 19 / 88%);
+  --auth-header-line: rgb(59 77 70 / 78%);
+  --auth-halo-strong: rgb(9 17 14 / 98%);
+  --auth-halo-medium: rgb(9 17 14 / 91%);
+  --auth-halo-soft: rgb(9 17 14 / 70%);
+  --auth-halo-clear: rgb(9 17 14 / 0%);
+  --auth-body-copy: var(--muted);
+  --auth-text-shadow: rgb(9 17 14 / 94%);
+  --auth-capability-line: rgb(59 77 70 / 78%);
+  --auth-capability-bg: rgb(17 27 23 / 88%);
+  --auth-panel-bg: var(--panel);
+  --auth-field-text: var(--text-secondary);
+  --auth-input-bg: var(--panel-muted);
+  --auth-input-focus-bg: var(--panel-elevated);
+  --auth-footer-text: rgb(167 183 175 / 72%);
 }
 
 .auth-ocean {
@@ -276,8 +313,8 @@ async function submit() {
   align-items: center;
   justify-content: space-between;
   padding: 0 30px;
-  background: rgb(255 255 255 / 88%);
-  border-bottom: 1px solid rgb(203 214 209 / 78%);
+  background: var(--auth-header-bg);
+  border-bottom: 1px solid var(--auth-header-line);
   backdrop-filter: blur(12px);
 }
 
@@ -344,7 +381,7 @@ async function submit() {
   width: 6px;
   height: 6px;
   background: var(--primary);
-  box-shadow: 0 0 0 4px rgb(20 125 100 / 10%);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary-text) 12%, transparent);
 }
 
 .auth-stage {
@@ -376,10 +413,10 @@ async function submit() {
   inset: -54px -76px -48px -58px;
   background: radial-gradient(
     ellipse at 42% 48%,
-    rgb(251 253 252 / 98%) 0%,
-    rgb(251 253 252 / 91%) 48%,
-    rgb(251 253 252 / 66%) 70%,
-    rgb(251 253 252 / 0%) 100%
+    var(--auth-halo-strong) 0%,
+    var(--auth-halo-medium) 48%,
+    var(--auth-halo-soft) 70%,
+    var(--auth-halo-clear) 100%
   );
   pointer-events: none;
 }
@@ -400,7 +437,7 @@ async function submit() {
   padding: 6px 8px;
   color: var(--primary-hover);
   background: var(--primary-soft);
-  border: 1px solid rgb(20 125 100 / 13%);
+  border: 1px solid color-mix(in srgb, var(--primary-text) 18%, transparent);
 }
 
 .auth-kicker i {
@@ -415,7 +452,7 @@ async function submit() {
   line-height: 1.08;
   font-weight: 760;
   letter-spacing: -0.055em;
-  text-shadow: 0 2px 18px rgb(251 253 252 / 92%);
+  text-shadow: 0 2px 18px var(--auth-text-shadow);
 }
 
 .auth-story h1 span {
@@ -426,10 +463,10 @@ async function submit() {
 .auth-story > p {
   max-width: 520px;
   margin-top: 24px;
-  color: #506059;
+  color: var(--auth-body-copy);
   font-size: 15px;
   line-height: 1.8;
-  text-shadow: 0 1px 12px #fbfdfc;
+  text-shadow: 0 1px 12px var(--auth-text-shadow);
 }
 
 .auth-capabilities {
@@ -439,8 +476,8 @@ async function submit() {
   gap: 1px;
   margin-top: 42px;
   padding: 1px;
-  background: rgb(203 214 209 / 74%);
-  border: 1px solid rgb(203 214 209 / 74%);
+  background: var(--auth-capability-line);
+  border: 1px solid var(--auth-capability-line);
 }
 
 .auth-capabilities article {
@@ -449,7 +486,7 @@ async function submit() {
   align-items: center;
   gap: 11px;
   padding: 13px 12px;
-  background: rgb(255 255 255 / 88%);
+  background: var(--auth-capability-bg);
   backdrop-filter: blur(5px);
 }
 
@@ -489,12 +526,12 @@ async function submit() {
   width: 440px;
   padding: 27px 30px 20px;
   overflow: hidden;
-  background: #fff;
+  background: var(--auth-panel-bg);
   border: 1px solid var(--line-strong);
   border-radius: 10px;
   box-shadow:
-    0 28px 70px rgb(25 58 47 / 13%),
-    0 3px 10px rgb(25 58 47 / 5%);
+    var(--shadow-lg),
+    var(--shadow-xs);
 }
 
 .auth-panel::before {
@@ -539,7 +576,7 @@ async function submit() {
   padding: 0 8px;
   color: var(--primary-hover);
   background: var(--primary-soft);
-  border: 1px solid rgb(20 125 100 / 13%);
+  border: 1px solid color-mix(in srgb, var(--primary-text) 18%, transparent);
   font-size: 10px;
   font-weight: 700;
 }
@@ -576,7 +613,7 @@ async function submit() {
   display: flex;
   flex-direction: column;
   gap: 7px;
-  color: #405048;
+  color: var(--auth-field-text);
   font-size: 12px;
   font-weight: 650;
 }
@@ -589,7 +626,7 @@ async function submit() {
 
 .auth-field :deep(.el-input__wrapper) {
   min-height: 43px;
-  background: #fbfdfc;
+  background: var(--auth-input-bg);
   border: 1px solid var(--line);
   border-radius: 6px;
   box-shadow: none;
@@ -604,9 +641,9 @@ async function submit() {
 }
 
 .auth-field :deep(.el-input__wrapper.is-focus) {
-  background: #fff;
+  background: var(--auth-input-focus-bg);
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgb(20 125 100 / 11%);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-text) 14%, transparent);
 }
 
 .auth-field :deep(.el-input__prefix-inner) {
@@ -618,7 +655,7 @@ async function submit() {
   min-height: 45px;
   margin-top: 5px;
   border-radius: 6px;
-  box-shadow: 0 10px 24px rgb(20 125 100 / 18%);
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--primary-solid) 26%, transparent);
 }
 
 .auth-submit :deep(span) {
@@ -652,7 +689,7 @@ async function submit() {
   width: 5px;
   height: 5px;
   background: var(--primary);
-  box-shadow: 0 0 0 3px rgb(20 125 100 / 10%);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-text) 12%, transparent);
 }
 
 .auth-tide-static {
@@ -666,7 +703,7 @@ async function submit() {
   align-items: center;
   justify-content: space-between;
   padding: 0 30px;
-  color: rgb(64 80 72 / 72%);
+  color: var(--auth-footer-text);
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 8px;
   letter-spacing: 0.11em;
@@ -783,9 +820,9 @@ async function submit() {
     font-size: clamp(31px, 9.5vw, 40px);
     background: radial-gradient(
       ellipse at 32% 50%,
-      rgb(251 253 252 / 96%) 0%,
-      rgb(251 253 252 / 74%) 58%,
-      rgb(251 253 252 / 0%) 100%
+      var(--auth-halo-strong) 0%,
+      var(--auth-halo-soft) 58%,
+      var(--auth-halo-clear) 100%
     );
   }
 

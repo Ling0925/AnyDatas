@@ -45,6 +45,7 @@ declare module 'vue' {
     RouterView: typeof import('vue-router')['RouterView']
     SqlEditor: typeof import('./components/SqlEditor.vue')['default']
     TableBindingEditor: typeof import('./components/TableBindingEditor.vue')['default']
+    ThemeToggle: typeof import('./components/ThemeToggle.vue')['default']
   }
   export interface GlobalDirectives {
     vLoading: typeof import('element-plus/es')['ElLoadingDirective']

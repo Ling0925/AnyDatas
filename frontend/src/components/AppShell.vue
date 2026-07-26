@@ -17,6 +17,7 @@ import { errorMessage } from '../api'
 import { useAuthStore } from '../stores/auth'
 import type { WorkspaceRole } from '../types'
 import AiSettingsDialog from './AiSettingsDialog.vue'
+import ThemeToggle from './ThemeToggle.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -92,6 +93,7 @@ async function handleUserCommand(command: string) {
           <Building2 :size="15" />
           {{ auth.user?.workspaceName }}
         </span>
+        <ThemeToggle />
         <el-tooltip v-if="canManageAi" content="工作区 AI 设置" placement="bottom">
           <button
             class="topbar-icon-button"
