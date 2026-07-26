@@ -3,18 +3,15 @@ import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 
-const OCEAN_COLORS = [
-  '#c8e2db',
-  '#acd3c9',
-  '#79b9a9',
-  '#48a08a',
+const WAVE_COLORS = [
   '#147d64',
-  '#106b56',
+  '#48a08a',
+  '#79b9a9',
 ] as const
 
 const MIN_TIDE_DEPTH = 0.28
 const MAX_TIDE_DEPTH = 0.46
-const FRAME_INTERVAL = 1000 / 30
+const FRAME_INTERVAL = 1000 / 60
 
 let context: CanvasRenderingContext2D | null = null
 let resizeObserver: ResizeObserver | null = null
@@ -23,22 +20,31 @@ let animationFrameId = 0
 let canvasWidth = 0
 let canvasHeight = 0
 let canvasScale = 1
-let pixelSize = 16
-let lastFrameAt = 0
+let pixelStep = 7
+let gridColumnCount = 0
+let gridStartRow = 0
+let gridRowCount = 0
+let lastAnimationAt = 0
+let renderAccumulator = 0
+let simulationElapsed = 0
 let nextTideAt = 0
-let nextRippleAt = 0
 let currentTideDepth = 0.34
 let targetTideDepth = 0.38
-let surfaceOffsets = new Float32Array(0)
-let surfaceVelocities = new Float32Array(0)
-let patternSeed = Math.random() * 10_000
-const swellPhaseA = Math.random() * Math.PI * 2
-const swellPhaseB = Math.random() * Math.PI * 2
+let phaseFieldA = new Float32Array(0)
+let phaseFieldB = new Float32Array(0)
+let phaseFieldC = new Float32Array(0)
+let thresholdNoise = new Float32Array(0)
+let spatialBias = new Float32Array(0)
+
+const patternSeed = Math.random() * 10_000
+const wavePhaseA = Math.random() * Math.PI * 2
+const wavePhaseB = Math.random() * Math.PI * 2
+const wavePhaseC = Math.random() * Math.PI * 2
 
 /**
  * 将数值约束在安全区间内。
- * 为什么这么做：弹簧链在窗口尺寸变化或长帧后可能产生瞬时尖峰；
- * 好处：可以避免水面越界，同时让动画恢复过程保持稳定。
+ * 为什么这么做：长帧和尺寸变化可能产生超出预期的中间值；
+ * 好处：潮位、阈值与透明度始终稳定，不会造成突变或越界。
  *
  * @param value 待约束的数值。
  * @param minimum 最小值。
@@ -50,12 +56,12 @@ function clamp(value: number, minimum: number, maximum: number) {
 }
 
 /**
- * 为指定像素生成稳定的伪随机值。
- * 为什么这么做：每帧直接调用随机数会导致像素闪烁；
- * 好处：既能保留海面的颗粒差异，又能让同一格像素在动画中保持连续。
+ * 为二维网格生成稳定伪随机值。
+ * 为什么这么做：每帧重新随机会让单个像素闪烁，破坏海浪的连续感；
+ * 好处：波峰会自然断成像素短簇，同时在流动过程中保持一致纹理。
  *
- * @param column 像素列索引。
- * @param row 像素行索引。
+ * @param column 网格列索引。
+ * @param row 网格行索引。
  * @returns 0 到 1 之间的稳定数值。
  */
 function getCellNoise(column: number, row: number) {
@@ -64,169 +70,172 @@ function getCellNoise(column: number, row: number) {
 }
 
 /**
- * 按当前画布宽度重新创建水面弹簧链。
- * 为什么这么做：像素列数量会随窗口宽度变化，旧数组不能正确映射新列；
- * 好处：缩放窗口后仍能保持整齐的像素尺寸，不会留下拉伸或越界数据。
- */
-function rebuildSurface() {
-  const columnCount = Math.max(1, Math.ceil(canvasWidth / pixelSize) + 1)
-  surfaceOffsets = new Float32Array(columnCount)
-  surfaceVelocities = new Float32Array(columnCount)
-  patternSeed = Math.random() * 10_000
-}
-
-/**
- * 选择下一次潮位目标与变化时间。
- * 为什么这么做：固定正弦波容易显得机械，随机目标更接近自然涨落；
- * 好处：每次进入登录页都能看到节奏不同、但变化缓慢的潮汐。
+ * 选择下一段随机潮位与持续时间。
+ * 为什么这么做：固定周期会让二维海面像循环播放的装饰动画；
+ * 好处：波峰覆盖范围会缓慢随机增减，形成不重复的涨潮与退潮。
  *
  * @param now 当前高精度时间戳。
  */
 function scheduleNextTide(now: number) {
   targetTideDepth = MIN_TIDE_DEPTH + Math.random() * (MAX_TIDE_DEPTH - MIN_TIDE_DEPTH)
-  nextTideAt = now + 6_000 + Math.random() * 7_000
+  nextTideAt = now + 5_500 + Math.random() * 7_500
 }
 
 /**
- * 向随机水面位置注入一个局部波动。
- * 为什么这么做：只改变全局潮位会让水面过于平直；
- * 好处：局部脉冲经相邻弹簧传播后，会形成不重复且连贯的像素浪峰。
- *
- * @param now 当前高精度时间戳。
+ * 预计算俯视海面的二维波场。
+ * 为什么这么做：每帧重复计算椭圆距离与空间遮罩会浪费大量算力；
+ * 好处：动画阶段只需更新三个波相位并筛选波峰，可稳定维持 60 FPS。
  */
-function injectRipple(now: number) {
-  if (surfaceVelocities.length === 0) return
+function rebuildWaveField() {
+  gridColumnCount = Math.ceil(canvasWidth / pixelStep) + 1
+  gridStartRow = 0
+  gridRowCount = Math.max(1, Math.ceil(canvasHeight / pixelStep) - gridStartRow + 1)
 
-  const center = Math.floor(Math.random() * surfaceVelocities.length)
-  const radius = 3 + Math.floor(Math.random() * 6)
-  const direction = Math.random() > 0.28 ? -1 : 1
-  const strength = direction * pixelSize * (0.18 + Math.random() * 0.2)
+  const cellCount = gridColumnCount * gridRowCount
+  phaseFieldA = new Float32Array(cellCount)
+  phaseFieldB = new Float32Array(cellCount)
+  phaseFieldC = new Float32Array(cellCount)
+  thresholdNoise = new Float32Array(cellCount)
+  spatialBias = new Float32Array(cellCount)
 
-  for (let offset = -radius; offset <= radius; offset += 1) {
-    const index = center + offset
-    if (index < 0 || index >= surfaceVelocities.length) continue
+  const sourceBX = canvasWidth * 0.76
+  const sourceBY = canvasHeight * 1.16
 
-    const distanceRatio = Math.abs(offset) / (radius + 1)
-    surfaceVelocities[index] += strength * (1 - distanceRatio) ** 2
+  for (let localRow = 0; localRow < gridRowCount; localRow += 1) {
+    const row = gridStartRow + localRow
+    const y = row * pixelStep
+    const yRatio = y / Math.max(1, canvasHeight)
+
+    for (let column = 0; column < gridColumnCount; column += 1) {
+      const index = localRow * gridColumnCount + column
+      const x = column * pixelStep
+      const xRatio = x / Math.max(1, canvasWidth)
+
+      // 静态二维扭曲会让等高波纹呈现海面弧度，而不是规则同心圆或横向扫描线。
+      const warpedX = x + Math.sin(y * 0.008 + patternSeed) * 34
+      const warpedY = y + Math.sin(x * 0.006 - patternSeed * 0.7) * 28
+      const distanceB = Math.hypot(
+        (warpedX - sourceBX) * 1.05,
+        (warpedY - sourceBY) * 0.76,
+      )
+
+      phaseFieldA[index] = (
+        warpedX * 0.009
+        + warpedY * 0.035
+        + Math.sin(warpedX * 0.005 + patternSeed) * 0.9
+        + wavePhaseA
+      )
+      phaseFieldB[index] = distanceB * 0.034 + wavePhaseB
+      phaseFieldC[index] = (
+        warpedX * 0.012
+        + warpedY * 0.017
+        + Math.sin((warpedX + warpedY) * 0.004) * 0.72
+        + wavePhaseC
+      )
+      thresholdNoise[index] = getCellNoise(column, row)
+
+      // 仅用低幅二维起伏改变局部浪量，不按上下或左右裁切，保证整块画布都属于同一片俯视海面。
+      const densityDrift = (
+        Math.sin(xRatio * Math.PI * 2.6 + yRatio * Math.PI * 1.7 + patternSeed)
+        + Math.sin(xRatio * Math.PI * 5.1 - yRatio * Math.PI * 2.2 - patternSeed * 0.3)
+        + 2
+      ) * 0.25
+      spatialBias[index] = densityDrift * 0.055
+    }
   }
-
-  nextRippleAt = now + 1_800 + Math.random() * 2_700
 }
 
 /**
- * 推进潮位与一维弹簧链模拟。
- * 为什么这么做：将全局涨潮和局部传播分开计算，可以同时获得缓慢潮汐与细小浪峰；
- * 好处：动画具有科技感但不会快速晃动，且计算量只随横向像素列增长。
+ * 推进随机潮位。
+ * 为什么这么做：波形用绝对时间移动，而潮位需要按真实帧间隔平滑追随随机目标；
+ * 好处：偶发掉帧不会让涨潮速度突变，高刷屏也不会重复累计模拟时间。
  *
  * @param now 当前高精度时间戳。
- * @param deltaMs 距离上一绘制帧的毫秒数。
+ * @param deltaMs 自上次实际模拟以来的墙钟毫秒数。
  */
 function updateSimulation(now: number, deltaMs: number) {
   if (now >= nextTideAt) scheduleNextTide(now)
-  if (now >= nextRippleAt) injectRipple(now)
 
   const tideEase = 1 - Math.exp(-deltaMs / 5_200)
   currentTideDepth += (targetTideDepth - currentTideDepth) * tideEase
-
-  const frameFactor = clamp(deltaMs / 16.67, 0.35, 2)
-  const damping = Math.pow(0.935, frameFactor)
-
-  for (let index = 0; index < surfaceOffsets.length; index += 1) {
-    const current = surfaceOffsets[index]
-    const left = surfaceOffsets[index - 1] ?? current
-    const right = surfaceOffsets[index + 1] ?? current
-    const neighborForce = (left + right - current * 2) * 0.095
-    const returnForce = -current * 0.018
-
-    surfaceVelocities[index] = clamp(
-      (surfaceVelocities[index] + (neighborForce + returnForce) * frameFactor) * damping,
-      -pixelSize * 0.8,
-      pixelSize * 0.8,
-    )
-  }
-
-  for (let index = 0; index < surfaceOffsets.length; index += 1) {
-    surfaceOffsets[index] = clamp(
-      surfaceOffsets[index] + surfaceVelocities[index] * frameFactor,
-      -pixelSize * 4.5,
-      pixelSize * 4.5,
-    )
-  }
 }
 
 /**
- * 根据水深选择现有品牌色阶中的颜色。
- * 为什么这么做：海面与深水使用同一主色的不同明度，避免引入新的视觉语言；
- * 好处：像素海洋可以自然融入当前产品，而不是成为独立的装饰主题。
+ * 绘制空中俯视的二维像素海洋。
+ * 为什么这么做：每个网格只在合成波高达到波峰阈值时绘制主题色方块；
+ * 好处：波浪具有清晰像素感，而所有平静网格从未着色，Canvas 底层保持真正透明。
  *
- * @param depthRatio 当前像素相对于该列水深的比例。
- * @returns 对应的十六进制颜色。
+ * @param elapsedSeconds 页面动画已经运行的秒数。
  */
-function getDepthColor(depthRatio: number) {
-  const colorIndex = Math.min(
-    OCEAN_COLORS.length - 1,
-    Math.floor(clamp(depthRatio, 0, 0.999) * OCEAN_COLORS.length),
-  )
-  return OCEAN_COLORS[colorIndex]
-}
-
-/**
- * 将当前模拟状态绘制成带留白的像素海洋。
- * 为什么这么做：Canvas 只绘制水面以下的方格，水面以上保持真正透明；
- * 好处：页面能保留大面积白色空间，同时深度色阶仍然呈现出完整海洋。
- */
-function paintOcean() {
+function paintPixelOcean(elapsedSeconds: number) {
   if (!context || canvasWidth <= 0 || canvasHeight <= 0) return
 
   context.clearRect(0, 0, canvasWidth, canvasHeight)
-  const baseSurface = canvasHeight * (1 - currentTideDepth)
-  const rowCount = Math.ceil(canvasHeight / pixelSize)
-  const elapsedSeconds = performance.now() / 1_000
+
+  const crestPaths = WAVE_COLORS.map(() => new Path2D())
+  const tideRatio = clamp(
+    (currentTideDepth - MIN_TIDE_DEPTH) / (MAX_TIDE_DEPTH - MIN_TIDE_DEPTH),
+    0,
+    1,
+  )
+  const baseThreshold = 0.8 - tideRatio * 0.1
   const cellInset = 1 / canvasScale
 
-  for (let column = 0; column < surfaceOffsets.length; column += 1) {
-    const x = column * pixelSize
-    // 两组不同尺度的慢速涌浪保证任意时刻都有可见轮廓，随机相位则避免每次进入页面都重复同一波形。
-    const slowSwell = Math.sin(column * 0.034 - elapsedSeconds * 0.24 + swellPhaseA)
-      * pixelSize * 1.15
-    const shortSwell = Math.sin(column * 0.11 + elapsedSeconds * 0.58 + swellPhaseB)
-      * pixelSize * 0.72
-    const rawSurface = baseSurface + surfaceOffsets[column] + slowSwell + shortSwell
-    const surface = Math.round(rawSurface / pixelSize) * pixelSize
-    const startRow = Math.max(0, Math.floor(surface / pixelSize))
-    const availableDepth = Math.max(pixelSize, canvasHeight - surface)
-    const horizontalRatio = x / Math.max(1, canvasWidth)
-    const edgeFade = clamp(1 - Math.max(0, horizontalRatio - 0.64) / 0.36, 0, 1)
-    if (edgeFade <= 0.02) continue
+  for (let localRow = 0; localRow < gridRowCount; localRow += 1) {
+    const row = gridStartRow + localRow
+    const y = row * pixelStep
 
-    for (let row = startRow; row <= rowCount; row += 1) {
-      const y = row * pixelSize
-      const depthRatio = clamp((y - surface) / availableDepth, 0, 1)
-      const noise = getCellNoise(column, row)
+    for (let column = 0; column < gridColumnCount; column += 1) {
+      const index = localRow * gridColumnCount + column
+      const fieldWarp = Math.sin(
+        phaseFieldC[index] - elapsedSeconds * 0.18,
+      )
+      const primaryCrest = Math.cos(
+        phaseFieldA[index]
+        - elapsedSeconds * 1.08
+        + Math.sin(phaseFieldB[index] + elapsedSeconds * 0.22) * 0.62
+        + fieldWarp * 0.22,
+      )
+      const secondaryCrest = Math.cos(
+        phaseFieldB[index]
+        + elapsedSeconds * 0.64
+        + fieldWarp * 0.34,
+      ) * 0.78
+      const clusterAmplitude = 0.82 + fieldWarp * 0.18
+      const waveHeight = Math.max(primaryCrest * clusterAmplitude, secondaryCrest)
+      const threshold = (
+        baseThreshold
+        + spatialBias[index]
+        + (thresholdNoise[index] - 0.5) * 0.12
+      )
+      if (waveHeight <= threshold) continue
 
-      // 浪尖保留少量断点，让像素轮廓更轻，不会形成厚重的整齐色带。
-      if (depthRatio < 0.1 && noise < 0.16) continue
+      const crestStrength = clamp((waveHeight - threshold) / 0.34, 0, 1)
+      const colorIndex = crestStrength > 0.58 ? 0 : crestStrength > 0.24 ? 1 : 2
+      const pixelSize = colorIndex === 0 ? pixelStep - 1 : pixelStep - 2
+      const x = column * pixelStep + (pixelStep - pixelSize) * 0.5
+      const centeredY = y + (pixelStep - pixelSize) * 0.5
+      const pixelLeft = Math.round(x * canvasScale) / canvasScale + cellInset
+      const pixelTop = Math.round(centeredY * canvasScale) / canvasScale + cellInset
+      const renderedSize = Math.max(1, pixelSize - cellInset * 2)
 
-      context.fillStyle = getDepthColor(depthRatio)
-      context.globalAlpha = clamp(0.34 + depthRatio * 0.24 + noise * 0.08, 0.24, 0.66)
-        * edgeFade
-
-      // 按物理像素对齐四条边，避免 1.25/1.5 等非整数 DPR 下的方格边缘被浏览器抗锯齿。
-      const cellLeft = Math.round(x * canvasScale) / canvasScale + cellInset
-      const cellTop = Math.round(y * canvasScale) / canvasScale + cellInset
-      const cellRight = Math.round((x + pixelSize) * canvasScale) / canvasScale - cellInset
-      const cellBottom = Math.round((y + pixelSize) * canvasScale) / canvasScale - cellInset
-      context.fillRect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop)
+      crestPaths[colorIndex].rect(pixelLeft, pixelTop, renderedSize, renderedSize)
     }
   }
 
+  const colorOpacity = [0.96, 0.78, 0.58]
+  for (let colorIndex = 0; colorIndex < WAVE_COLORS.length; colorIndex += 1) {
+    context.fillStyle = WAVE_COLORS[colorIndex]
+    context.globalAlpha = colorOpacity[colorIndex]
+    context.fill(crestPaths[colorIndex])
+  }
   context.globalAlpha = 1
 }
 
 /**
- * 根据容器尺寸同步 Canvas 分辨率并重绘。
- * 为什么这么做：直接使用 CSS 拉伸会让像素边缘模糊，高分屏还会出现锯齿；
- * 好处：限制 DPR 后既保持清晰像素，也避免在超高分屏上增加过多绘制成本。
+ * 根据容器尺寸同步 Canvas 和二维网格。
+ * 为什么这么做：CSS 拉伸会模糊方块边缘，DPR 变化也会让像素尺寸失真；
+ * 好处：桌面与移动端都能获得对齐物理像素的清晰方格，并限制高分屏绘制成本。
  */
 function resizeCanvas() {
   const canvas = canvasRef.value
@@ -235,76 +244,92 @@ function resizeCanvas() {
   const bounds = canvas.getBoundingClientRect()
   const nextWidth = Math.max(1, Math.floor(bounds.width))
   const nextHeight = Math.max(1, Math.floor(bounds.height))
-  const nextPixelSize = nextWidth < 760 ? 12 : 16
-  const devicePixelRatio = Math.min(window.devicePixelRatio || 1, 2)
-  const sizeChanged = nextWidth !== canvasWidth
+  const nextPixelStep = nextWidth < 760 ? 6 : 7
+  const nextScale = Math.min(window.devicePixelRatio || 1, 2)
+  const fieldChanged = (
+    nextWidth !== canvasWidth
     || nextHeight !== canvasHeight
-    || nextPixelSize !== pixelSize
+    || nextPixelStep !== pixelStep
+    || nextScale !== canvasScale
+  )
 
   canvasWidth = nextWidth
   canvasHeight = nextHeight
-  canvasScale = devicePixelRatio
-  pixelSize = nextPixelSize
-  canvas.width = Math.floor(canvasWidth * devicePixelRatio)
-  canvas.height = Math.floor(canvasHeight * devicePixelRatio)
+  canvasScale = nextScale
+  pixelStep = nextPixelStep
+
+  const backingWidth = Math.floor(canvasWidth * canvasScale)
+  const backingHeight = Math.floor(canvasHeight * canvasScale)
+  if (canvas.width !== backingWidth) canvas.width = backingWidth
+  if (canvas.height !== backingHeight) canvas.height = backingHeight
 
   context = canvas.getContext('2d', { alpha: true })
-  context?.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0)
+  context?.setTransform(canvasScale, 0, 0, canvasScale, 0, 0)
+  if (context) context.imageSmoothingEnabled = false
 
-  if (sizeChanged) rebuildSurface()
-  paintOcean()
+  if (fieldChanged) rebuildWaveField()
+  paintPixelOcean(performance.now() / 1_000)
 }
 
 /**
- * 以 30 FPS 上限驱动动画。
- * 为什么这么做：像素潮汐不需要高帧率，限制刷新可以减少登录页空闲功耗；
- * 好处：保持视觉连贯的同时，为低功耗设备和后台标签页节省资源。
+ * 以 60 FPS 上限驱动二维海面。
+ * 为什么这么做：绘制节流相位与实际模拟耗时必须分开，否则高刷屏会重复计算余量；
+ * 好处：60Hz 屏逐帧更新，90/120/144Hz 屏保持约 60 次绘制且潮位速度不漂移。
  *
  * @param now 浏览器提供的当前高精度时间戳。
  */
 function animate(now: number) {
-  if (lastFrameAt === 0) lastFrameAt = now - FRAME_INTERVAL
-  const deltaMs = now - lastFrameAt
+  if (lastAnimationAt === 0) lastAnimationAt = now
+  const wallDelta = clamp(now - lastAnimationAt, 0, 34)
+  lastAnimationAt = now
+  renderAccumulator += wallDelta
+  simulationElapsed += wallDelta
 
-  if (deltaMs >= FRAME_INTERVAL) {
-    updateSimulation(now, Math.min(deltaMs, 50))
-    paintOcean()
-    lastFrameAt = now
+  if (renderAccumulator >= FRAME_INTERVAL * 0.9) {
+    updateSimulation(now, simulationElapsed)
+    paintPixelOcean(now / 1_000)
+    simulationElapsed = 0
+    renderAccumulator = renderAccumulator >= FRAME_INTERVAL
+      ? renderAccumulator % FRAME_INTERVAL
+      : 0
   }
 
   animationFrameId = window.requestAnimationFrame(animate)
 }
 
 /**
- * 在允许动态效果且页面可见时启动潮汐。
- * 为什么这么做：重复启动会产生多条 requestAnimationFrame 链；
- * 好处：单一循环更易回收，也能避免动画速度意外叠加。
+ * 在页面可见且允许动态效果时启动动画。
+ * 为什么这么做：重复启动会叠加 requestAnimationFrame 循环；
+ * 好处：始终只有一条动画链，路由切换与偏好变化时容易安全回收。
  */
 function startAnimation() {
   if (animationFrameId || motionPreference?.matches || document.hidden) return
 
   const now = performance.now()
-  lastFrameAt = 0
   if (nextTideAt <= now) scheduleNextTide(now)
-  if (nextRippleAt <= now) nextRippleAt = now + 900
+  lastAnimationAt = 0
+  renderAccumulator = 0
+  simulationElapsed = 0
   animationFrameId = window.requestAnimationFrame(animate)
 }
 
 /**
  * 停止并清理当前动画帧。
- * 为什么这么做：路由切换或页面隐藏后继续绘制没有用户价值；
- * 好处：避免无效 CPU 占用和卸载后的 Canvas 访问。
+ * 为什么这么做：隐藏或卸载后继续绘制没有用户价值；
+ * 好处：避免后台耗电，也不会在组件销毁后继续访问 Canvas。
  */
 function stopAnimation() {
   if (animationFrameId) window.cancelAnimationFrame(animationFrameId)
   animationFrameId = 0
-  lastFrameAt = 0
+  lastAnimationAt = 0
+  renderAccumulator = 0
+  simulationElapsed = 0
 }
 
 /**
  * 响应页面可见性变化。
- * 为什么这么做：浏览器后台标签页不需要持续模拟波浪；
- * 好处：返回页面时可安全续播，并显著降低后台资源使用。
+ * 为什么这么做：后台标签页不需要持续更新二维波场；
+ * 好处：离开页面时暂停，回来后从真实时间安全续播。
  */
 function handleVisibilityChange() {
   if (document.hidden) {
@@ -316,18 +341,16 @@ function handleVisibilityChange() {
 
 /**
  * 响应用户的减少动态效果设置。
- * 为什么这么做：持续涨潮可能让对运动敏感的用户不适；
- * 好处：开启减少动态后仅显示一帧低潮画面，仍保留品牌视觉但不再运动。
+ * 为什么这么做：持续波动可能让对运动敏感的用户不适；
+ * 好处：开启后保留一帧像素海洋，但不再发生任何移动或潮位变化。
  */
 function handleMotionPreferenceChange() {
   stopAnimation()
-  surfaceOffsets.fill(0)
-  surfaceVelocities.fill(0)
 
   if (motionPreference?.matches) {
-    currentTideDepth = 0.32
-    targetTideDepth = 0.32
-    paintOcean()
+    currentTideDepth = 0.34
+    targetTideDepth = 0.34
+    paintPixelOcean(performance.now() / 1_000)
     return
   }
 
@@ -336,9 +359,9 @@ function handleMotionPreferenceChange() {
 }
 
 /**
- * 初始化 Canvas、尺寸监听和动画偏好。
- * 为什么这么做：所有浏览器资源都从同一入口创建；
- * 好处：组件卸载时可以一一对应释放，避免登录页反复进入后累积监听器。
+ * 初始化 Canvas、尺寸监听与动态偏好。
+ * 为什么这么做：浏览器资源需要从统一入口创建；
+ * 好处：组件卸载时可以逐一释放，反复进入登录页也不会累积监听器。
  */
 function initializeOcean() {
   const canvas = canvasRef.value
@@ -347,6 +370,7 @@ function initializeOcean() {
   motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)')
   motionPreference.addEventListener('change', handleMotionPreferenceChange)
   document.addEventListener('visibilitychange', handleVisibilityChange)
+  window.addEventListener('resize', resizeCanvas, { passive: true })
 
   resizeObserver = new ResizeObserver(resizeCanvas)
   resizeObserver.observe(canvas)
@@ -357,13 +381,14 @@ function initializeOcean() {
 /**
  * 释放 Canvas 动画与浏览器监听器。
  * 为什么这么做：登录成功后组件会被路由卸载；
- * 好处：确保工作台不再承担登录背景的绘制和监听成本。
+ * 好处：工作台不再承担登录背景的绘制、尺寸监听和偏好监听成本。
  */
 function disposeOcean() {
   stopAnimation()
   resizeObserver?.disconnect()
   motionPreference?.removeEventListener('change', handleMotionPreferenceChange)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
+  window.removeEventListener('resize', resizeCanvas)
   resizeObserver = null
   motionPreference = null
   context = null

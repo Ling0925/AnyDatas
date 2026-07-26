@@ -241,8 +241,8 @@ async function submit() {
       <span>ANYDATAS / LOCAL-FIRST ANALYTICS</span>
       <span class="auth-tide-status">
         <i />
-        <span class="auth-tide-live">PIXEL TIDE / LIVE</span>
-        <span class="auth-tide-static">PIXEL TIDE / STATIC</span>
+        <span class="auth-tide-live">PIXEL OCEAN / 60 FPS</span>
+        <span class="auth-tide-static">PIXEL OCEAN / STATIC</span>
       </span>
     </footer>
   </div>
@@ -263,10 +263,10 @@ async function submit() {
 
 .auth-ocean {
   position: absolute;
-  inset: 64px 0 0;
+  inset: 0;
   z-index: 0;
   width: 100%;
-  height: calc(100% - 64px);
+  height: 100%;
 }
 
 .auth-header {
@@ -362,9 +362,26 @@ async function submit() {
 }
 
 .auth-story {
+  position: relative;
+  isolation: isolate;
   align-self: center;
   max-width: 620px;
   padding-bottom: 26px;
+}
+
+.auth-story::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: -54px -76px -48px -58px;
+  background: radial-gradient(
+    ellipse at 42% 48%,
+    rgb(251 253 252 / 98%) 0%,
+    rgb(251 253 252 / 91%) 48%,
+    rgb(251 253 252 / 66%) 70%,
+    rgb(251 253 252 / 0%) 100%
+  );
+  pointer-events: none;
 }
 
 .auth-kicker {
@@ -398,6 +415,7 @@ async function submit() {
   line-height: 1.08;
   font-weight: 760;
   letter-spacing: -0.055em;
+  text-shadow: 0 2px 18px rgb(251 253 252 / 92%);
 }
 
 .auth-story h1 span {
@@ -411,6 +429,7 @@ async function submit() {
   color: #506059;
   font-size: 15px;
   line-height: 1.8;
+  text-shadow: 0 1px 12px #fbfdfc;
 }
 
 .auth-capabilities {
@@ -698,8 +717,8 @@ async function submit() {
   }
 
   .auth-ocean {
-    inset: 60px 0 0;
-    height: calc(100% - 60px);
+    inset: 0;
+    height: 100%;
   }
 
   .auth-header {
@@ -724,13 +743,30 @@ async function submit() {
   }
 
   .auth-stage {
+    display: flex;
+    flex-direction: column;
     width: calc(100% - 30px);
-    gap: 32px;
-    padding: 34px 0 70px;
+    gap: 0;
+    padding: 22px 0 44px;
+  }
+
+  .auth-panel {
+    order: 2;
+    margin-bottom: 30px;
+  }
+
+  .auth-story {
+    display: contents;
+  }
+
+  .auth-story::before {
+    content: none;
   }
 
   .auth-kicker {
-    margin-bottom: 18px;
+    order: 3;
+    width: calc(100% - 8px);
+    margin: 0 4px 13px;
     font-size: 8px;
     letter-spacing: 0.08em;
   }
@@ -740,21 +776,28 @@ async function submit() {
   }
 
   .auth-story h1 {
-    font-size: clamp(36px, 12vw, 50px);
+    order: 1;
+    width: calc(100% - 8px);
+    margin: 0 4px 18px;
+    padding: 10px 0;
+    font-size: clamp(31px, 9.5vw, 40px);
+    background: radial-gradient(
+      ellipse at 32% 50%,
+      rgb(251 253 252 / 96%) 0%,
+      rgb(251 253 252 / 74%) 58%,
+      rgb(251 253 252 / 0%) 100%
+    );
   }
 
   .auth-story > p {
-    margin-top: 18px;
+    order: 4;
+    width: calc(100% - 8px);
+    margin: 0 4px;
     font-size: 13px;
   }
 
   .auth-capabilities {
-    margin-top: 28px;
-    grid-template-columns: 1fr;
-  }
-
-  .auth-capabilities article {
-    padding: 10px 12px;
+    display: none;
   }
 
   .auth-panel {
