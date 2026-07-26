@@ -108,6 +108,22 @@ const currentCron = computed(() => {
     ? `0 ${minute} ${hour} * * MON-FRI`
     : `0 ${minute} ${hour} * * *`
 })
+const TZ_LABELS: Record<string, string> = {
+  'Asia/Shanghai': '中国标准时间',
+  UTC: '协调世界时',
+}
+
+/** 把当前计划配置渲染成人类可读的一句话，避免用户面对裸 6 段 cron。 */
+const cronPreview = computed(() => {
+  const tz = TZ_LABELS[scheduleForm.timezone] ?? scheduleForm.timezone
+  if (scheduleForm.preset === 'hourly') return '每小时整点执行一次'
+  if (scheduleForm.preset === 'custom') {
+    return `自定义 Cron：${scheduleForm.customCron.trim() || '（未填写）'}`
+  }
+  const cadence = scheduleForm.preset === 'weekdays' ? '工作日' : '每天'
+  return `${cadence} ${scheduleForm.time}（${tz}）执行`
+})
+
 const displayedResult = computed(() => resultPage.value ?? tasks.selectedJob?.result ?? null)
 
 let pollTimer: ReturnType<typeof setTimeout> | undefined
@@ -285,10 +301,16 @@ async function createJob() {
 
 async function cancelJob(id: string) {
   try {
+    await ElMessageBox.confirm('停止这个任务？正在执行的查询将被中断，已产生的进度会丢失。', '停止任务', {
+      type: 'warning',
+      confirmButtonText: '停止',
+      cancelButtonText: '取消',
+      confirmButtonClass: 'el-button--danger',
+    })
     await tasks.cancelJob(id)
     ElMessage.success('任务已停止')
   } catch (error) {
-    ElMessage.error(errorMessage(error))
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(errorMessage(error))
   }
 }
 
@@ -307,6 +329,7 @@ async function deleteJob(id: string) {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消',
+      confirmButtonClass: 'el-button--danger',
     })
     await tasks.deleteJob(id)
     ElMessage.success('任务记录已删除')
@@ -408,6 +431,7 @@ async function deleteSchedule(id: string) {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消',
+      confirmButtonClass: 'el-button--danger',
     })
     await tasks.deleteSchedule(id)
     ElMessage.success('计划已删除')
@@ -727,13 +751,15 @@ async function deleteSchedule(id: string) {
           <el-form-item v-else-if="scheduleForm.preset === 'custom'" label="Cron 表达式">
             <el-input v-model="scheduleForm.customCron" />
           </el-form-item>
-          <el-form-item v-else label="时区">
+          <!-- 时区决定 每天/工作日/自定义 的实际触发时刻，必须对这些预设常显；仅每小时可省略。 -->
+          <el-form-item v-if="scheduleForm.preset !== 'hourly'" label="时区">
             <el-select v-model="scheduleForm.timezone">
               <el-option label="中国标准时间" value="Asia/Shanghai" />
               <el-option label="协调世界时" value="UTC" />
             </el-select>
           </el-form-item>
         </div>
+        <p v-if="cronPreview" class="schedule-cron-preview">{{ cronPreview }}</p>
         <el-form-item label="SQL">
           <div class="dialog-sql-editor schedule-sql-editor">
             <SqlEditor
@@ -743,7 +769,9 @@ async function deleteSchedule(id: string) {
             />
           </div>
         </el-form-item>
-        <el-checkbox v-model="scheduleForm.enabled">创建后立即启用</el-checkbox>
+        <el-checkbox v-model="scheduleForm.enabled">
+          {{ scheduleForm.id ? '启用此计划' : '创建后立即启用' }}
+        </el-checkbox>
       </el-form>
       <template #footer>
         <el-button @click="scheduleDialogVisible = false">取消</el-button>

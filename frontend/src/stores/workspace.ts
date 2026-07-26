@@ -39,6 +39,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const savedQueries = ref<SavedQuery[]>([])
   const selectedSavedQueryId = ref<string | null>(null)
   const sourceLoading = ref(false)
+  // 空态里的「上传」入口可能在中心区，而文件 input 归属侧栏；用一个自增信号让任意空态
+  // 都能触发侧栏打开文件选择框，无需跨组件传 ref。
+  const uploadRequestId = ref(0)
+  function requestUpload() {
+    uploadRequestId.value += 1
+  }
   const previewLoading = ref(false)
   const queryLoading = ref(false)
   const uploadLoading = ref(false)
@@ -578,6 +584,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     selectedSavedQueryId,
     selectedSavedQuery,
     sourceLoading,
+    uploadRequestId,
+    requestUpload,
     previewLoading,
     queryLoading,
     uploadLoading,
