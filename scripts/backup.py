@@ -42,6 +42,15 @@ def table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
+def column_exists(connection: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    """检查迁移可能新增的列，使新版备份器也能保护升级前的旧数据库。"""
+    row = connection.execute(
+        "SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
+        (table_name, column_name),
+    ).fetchone()
+    return row is not None
+
+
 def validate_active_schema(connection: sqlite3.Connection) -> None:
     """确认快照属于当前 Rust 架构，避免生成看似成功但无法启动的旧版备份。"""
     missing = sorted(table for table in ACTIVE_SCHEMA_TABLES if not table_exists(connection, table))
@@ -80,12 +89,14 @@ def snapshot_database(source: Path, destination: Path) -> dict[str, set[str]]:
                 normalize_leaf(row[0], "upload")
                 for row in snapshot_connection.execute("SELECT stored_path FROM data_sources")
             }
-            job_results = {
-                artifact_filename(row[0], "job result")
-                for row in snapshot_connection.execute(
-                    "SELECT result_artifact_key FROM jobs WHERE result_artifact_key IS NOT NULL"
-                )
-            }
+            job_results = set()
+            if column_exists(snapshot_connection, "jobs", "result_artifact_key"):
+                job_results = {
+                    artifact_filename(row[0], "job result")
+                    for row in snapshot_connection.execute(
+                        "SELECT result_artifact_key FROM jobs WHERE result_artifact_key IS NOT NULL"
+                    )
+                }
             encrypted_ai_keys = 0
             if table_exists(snapshot_connection, "workspace_ai_settings"):
                 encrypted_ai_keys = snapshot_connection.execute(

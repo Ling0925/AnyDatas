@@ -40,6 +40,23 @@ CREATE TABLE staged_imports (id TEXT PRIMARY KEY);
 CREATE TABLE workspace_ai_settings (api_key_ciphertext TEXT);
 """
 
+PRE_ARTIFACT_SCHEMA = """
+CREATE TABLE data_sources (stored_path TEXT NOT NULL);
+CREATE TABLE source_tables (
+    cache_key TEXT,
+    cache_status TEXT NOT NULL,
+    cache_error TEXT
+);
+CREATE TABLE jobs (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    result_json TEXT,
+    finished_at TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE staged_imports (id TEXT PRIMARY KEY);
+"""
+
 
 class BackupRestoreTests(unittest.TestCase):
     """验证当前 Rust 数据模型的备份、恢复及手动保留策略。"""
@@ -174,6 +191,41 @@ class BackupRestoreTests(unittest.TestCase):
             )
         with self.assertRaises(FileNotFoundError):
             create_backup(self.data_dir, self.backup_dir)
+
+    def test_backup_supports_schema_before_job_result_artifact_migration(self) -> None:
+        """升级前备份应兼容尚无任务产物列的旧 Rust 数据库，保证部署可先备份再迁移。"""
+        self.database.unlink()
+        upload = self.data_dir / "uploads" / "before-migration.xlsx"
+        upload.write_bytes(b"pre-migration-upload")
+        with sqlite3.connect(self.database) as connection:
+            connection.executescript(PRE_ARTIFACT_SCHEMA)
+            connection.execute(
+                "INSERT INTO data_sources (stored_path) VALUES (?)",
+                (str(upload),),
+            )
+            connection.execute(
+                """
+                INSERT INTO jobs (id, status, result_json, finished_at, updated_at)
+                VALUES ('old-job', 'succeeded', '{}', NULL, '2026-07-20T00:00:00+00:00')
+                """
+            )
+
+        archive = create_backup(
+            self.data_dir,
+            self.backup_dir,
+            now=datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        extracted = self.root / "pre-artifact-extracted"
+        with tarfile.open(archive, "r:gz") as bundle:
+            bundle.extractall(extracted)
+
+        manifest = json.loads((extracted / "manifest.json").read_text(encoding="utf-8"))
+        paths = {entry["path"] for entry in manifest["files"]}
+        self.assertIn("uploads/before-migration.xlsx", paths)
+        self.assertFalse(any(path.startswith("job-results/") for path in paths))
+        with sqlite3.connect(extracted / "anydatas.db") as connection:
+            self.assertEqual(connection.execute("PRAGMA quick_check").fetchone()[0], "ok")
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1)
 
     def test_retention_previews_then_removes_only_expired_results(self) -> None:
         """保留脚本默认只预览，强制执行后仅清理超过天数的完整结果产物。"""
