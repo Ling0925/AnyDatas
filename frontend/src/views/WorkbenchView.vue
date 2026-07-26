@@ -142,7 +142,6 @@ async function deleteSavedQuery() {
 async function refreshPreview() {
   try {
     await store.refreshPreview()
-    ElMessage.success('预览已刷新')
   } catch (error) {
     ElMessage.error(errorMessage(error))
   }
@@ -401,7 +400,13 @@ function configureSqlCompletion(monaco: any) {
               </span>
             </div>
             <el-tooltip content="刷新预览" placement="bottom">
-              <el-button class="icon-button plain" aria-label="刷新预览" @click="refreshPreview">
+              <el-button
+                class="icon-button plain"
+                aria-label="刷新预览"
+                :loading="store.previewLoading"
+                :disabled="store.previewLoading"
+                @click="refreshPreview"
+              >
                 <RefreshCw :size="15" />
               </el-button>
             </el-tooltip>

@@ -116,12 +116,22 @@ function applySettings(settings: AiSettings) {
 
       <el-form label-position="top">
         <el-form-item label="Base URL">
-          <el-input v-model="form.baseUrl" placeholder="https://api.openai.com/v1" maxlength="500">
+          <el-input
+            v-model="form.baseUrl"
+            placeholder="https://api.openai.com/v1"
+            maxlength="500"
+            @keyup.enter="saveSettings()"
+          >
             <template #prefix><PlugZap :size="15" /></template>
           </el-input>
         </el-form-item>
         <el-form-item label="模型">
-          <el-input v-model="form.model" placeholder="填写接口支持的模型名称" maxlength="160" />
+          <el-input
+            v-model="form.model"
+            placeholder="填写接口支持的模型名称"
+            maxlength="160"
+            @keyup.enter="saveSettings()"
+          />
         </el-form-item>
         <el-form-item label="API Key">
           <el-input
@@ -129,12 +139,18 @@ function applySettings(settings: AiSettings) {
             type="password"
             show-password
             maxlength="4096"
-            :placeholder="current?.apiKeyConfigured ? '已安全保存，留空保持不变' : '可选，本地兼容接口可以留空'"
+            :disabled="form.clearApiKey"
+            :placeholder="form.clearApiKey ? '将清除已保存的密钥' : (current?.apiKeyConfigured ? '已安全保存，留空保持不变' : '可选，本地兼容接口可以留空')"
+            @keyup.enter="saveSettings()"
           >
             <template #prefix><KeyRound :size="15" /></template>
           </el-input>
         </el-form-item>
-        <el-checkbox v-if="current?.apiKeyConfigured" v-model="form.clearApiKey">
+        <el-checkbox
+          v-if="current?.apiKeyConfigured"
+          v-model="form.clearApiKey"
+          :disabled="Boolean(form.apiKey.trim())"
+        >
           清除已保存的 API Key
         </el-checkbox>
       </el-form>

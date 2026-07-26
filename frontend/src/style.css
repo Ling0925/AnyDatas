@@ -4198,6 +4198,19 @@ input:focus-visible {
   text-align: right;
 }
 
+/* 排队态用文字而非 0% 进度条，避免与卡住的运行任务视觉相同。 */
+.job-queued {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* 计划弹窗内的人类可读节奏预览 */
+.schedule-cron-preview {
+  margin: -4px 0 4px;
+  color: var(--muted);
+  font-size: var(--fs-caption);
+}
+
 .task-empty {
   height: 240px;
 }

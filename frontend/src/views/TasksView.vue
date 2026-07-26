@@ -231,6 +231,12 @@ async function setFilter(value: JobStatus | '') {
   await reloadJobs()
 }
 
+async function clearJobFilters() {
+  tasks.statusFilter = ''
+  tasks.search = ''
+  await reloadJobs()
+}
+
 async function selectJob(id: string) {
   try {
     await tasks.selectJob(id)
@@ -280,9 +286,21 @@ function openJobDialog() {
 }
 
 async function createJob() {
+  if (!jobForm.name.trim()) {
+    ElMessage.warning('请输入任务名称')
+    return
+  }
+  if (!jobForm.tables.length) {
+    ElMessage.warning('请至少选择一张查询表')
+    return
+  }
+  if (!jobForm.sql.trim()) {
+    ElMessage.warning('请输入 SQL')
+    return
+  }
   const sourceId = sourceIdForBindings(jobForm.tables)
-  if (!sourceId || !jobForm.tables.length || !jobForm.name.trim() || !jobForm.sql.trim()) {
-    ElMessage.warning('请完整填写任务信息')
+  if (!sourceId) {
+    ElMessage.warning('无法确定数据来源，请重新选择查询表')
     return
   }
   saving.value = true
@@ -363,10 +381,31 @@ function cronPreset(expression: string): 'hourly' | 'daily' | 'weekdays' | 'cust
   return 'custom'
 }
 
+/** 自定义 Cron 的最小结构校验：期望 6 段（秒 分 时 日 月 周），完整语义仍由后端校验。 */
+function isValidCron(expression: string): boolean {
+  return expression.trim().split(/\s+/).length === 6
+}
+
 async function saveSchedule() {
+  if (!scheduleForm.name.trim()) {
+    ElMessage.warning('请输入计划名称')
+    return
+  }
+  if (!scheduleForm.tables.length) {
+    ElMessage.warning('请至少选择一张查询表')
+    return
+  }
+  if (!scheduleForm.sql.trim()) {
+    ElMessage.warning('请输入 SQL')
+    return
+  }
+  if (scheduleForm.preset === 'custom' && !isValidCron(scheduleForm.customCron)) {
+    ElMessage.warning('Cron 需为 6 段（秒 分 时 日 月 周），例如 0 0 9 * * *')
+    return
+  }
   const sourceId = sourceIdForBindings(scheduleForm.tables)
-  if (!sourceId || !scheduleForm.tables.length || !scheduleForm.name.trim() || !scheduleForm.sql.trim() || !currentCron.value) {
-    ElMessage.warning('请完整填写计划信息')
+  if (!sourceId || !currentCron.value) {
+    ElMessage.warning('计划配置不完整')
     return
   }
   const payload: SchedulePayload = {
@@ -523,10 +562,11 @@ async function deleteSchedule(id: string) {
                 {{ job.sourceName }} · {{ job.tables.length }} 张表
               </small>
             </span>
-            <span v-if="job.status === 'running' || job.status === 'queued'" class="job-progress">
+            <span v-if="job.status === 'running'" class="job-progress">
               <span><i :style="{ width: `${job.progress}%` }" /></span>
               <small>{{ job.progress }}%</small>
             </span>
+            <span v-else-if="job.status === 'queued'" class="job-queued">排队中…</span>
             <span v-else class="job-result-count">
               {{ job.resultRowCount === null ? '—' : `${job.resultRowCount.toLocaleString()} 行` }}
             </span>
@@ -534,7 +574,15 @@ async function deleteSchedule(id: string) {
           </button>
           <div v-if="!tasks.jobs.length && !tasks.loading" class="task-empty">
             <ListChecks :size="28" />
-            <span>当前没有任务记录</span>
+            <span v-if="tasks.statusFilter || tasks.search.trim()">没有符合筛选或搜索的任务</span>
+            <span v-else>当前没有任务记录</span>
+            <el-button
+              v-if="tasks.statusFilter || tasks.search.trim()"
+              text
+              @click="clearJobFilters"
+            >
+              清除筛选
+            </el-button>
           </div>
         </div>
       </template>
@@ -710,7 +758,7 @@ async function deleteSchedule(id: string) {
     <el-dialog v-model="jobDialogVisible" title="新建后台任务" width="620px">
       <el-form label-position="top">
         <el-form-item label="任务名称">
-          <el-input v-model="jobForm.name" maxlength="80" />
+          <el-input v-model="jobForm.name" maxlength="80" @keyup.enter="createJob" />
         </el-form-item>
         <el-form-item label="查询表">
           <TableBindingEditor v-model="jobForm.tables" :tables="workspace.sourceTables" />
@@ -734,7 +782,7 @@ async function deleteSchedule(id: string) {
     <el-dialog v-model="scheduleDialogVisible" :title="scheduleForm.id ? '编辑计划' : '新建计划'" width="660px">
       <el-form label-position="top">
         <el-form-item label="计划名称">
-          <el-input v-model="scheduleForm.name" maxlength="80" />
+          <el-input v-model="scheduleForm.name" maxlength="80" @keyup.enter="saveSchedule" />
         </el-form-item>
         <el-form-item label="查询表">
           <TableBindingEditor v-model="scheduleForm.tables" :tables="workspace.sourceTables" />
