@@ -1,12 +1,18 @@
-import { computed, readonly, ref } from 'vue'
+import { computed, nextTick, readonly, ref } from 'vue'
 
 export type ThemePreference = 'system' | 'light' | 'dark'
 export type ResolvedTheme = 'light' | 'dark'
+
+export interface ThemeTransitionOrigin {
+  x: number
+  y: number
+}
 
 const THEME_STORAGE_KEY = 'anydatas.theme'
 
 const preference = ref<ThemePreference>('system')
 const systemPrefersDark = ref(false)
+const isThemeTransitioning = ref(false)
 const resolvedTheme = computed<ResolvedTheme>(() => (
   preference.value === 'system'
     ? systemPrefersDark.value ? 'dark' : 'light'
@@ -70,6 +76,8 @@ function readStoredTheme(): Exclude<ThemePreference, 'system'> | null {
  * @param nextPreference 要保存的主题偏好。
  */
 function persistTheme(nextPreference: ThemePreference) {
+  if (typeof window === 'undefined') return
+
   try {
     if (nextPreference === 'system') {
       window.localStorage.removeItem(THEME_STORAGE_KEY)
@@ -138,12 +146,104 @@ export function setThemePreference(nextPreference: ThemePreference) {
 }
 
 /**
- * 在当前解析主题的相反模式间切换。
- * 为什么这么做：按钮只需要提供一次点击即可完成明暗切换；
- * 好处：即使当前正在跟随系统，首次点击也会保存明确且可预测的用户选择。
+ * 解析主题揭示动画的圆心与最大覆盖半径。
+ * 为什么这么做：按钮可能位于桌面顶栏或移动端登录区，固定圆心无法兼顾不同布局；
+ * 好处：新主题总会从真实交互位置扩散，并完整覆盖任意尺寸的视口。
+ *
+ * @param origin 触发按钮在视口中的中心坐标。
+ * @returns 经过视口边界约束的圆心与最大覆盖半径。
  */
-export function toggleTheme() {
-  setThemePreference(isDark.value ? 'light' : 'dark')
+function resolveThemeTransitionGeometry(origin?: ThemeTransitionOrigin) {
+  const x = Math.min(Math.max(origin?.x ?? window.innerWidth / 2, 0), window.innerWidth)
+  const y = Math.min(Math.max(origin?.y ?? window.innerHeight / 2, 0), window.innerHeight)
+  const radius = Math.hypot(
+    Math.max(x, window.innerWidth - x),
+    Math.max(y, window.innerHeight - y),
+  )
+
+  return { x, y, radius }
+}
+
+/**
+ * 判断当前用户是否要求减少动态效果。
+ * 为什么这么做：大范围扩散动画可能让动态敏感用户感到不适；
+ * 好处：尊重系统无障碍偏好，同时仍保留即时、可用的主题切换。
+ *
+ * @returns 是否应跳过主题动画。
+ */
+function shouldReduceThemeMotion() {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
+/**
+ * 从用户触发位置播放根页面主题揭示动画。
+ * 为什么这么做：根快照可以一次覆盖 Element Plus 浮层、Canvas、图表和编辑器，避免组件逐个变色造成闪烁；
+ * 好处：旧画面保持稳定，新主题从按钮位置平滑扩散，并在 Vue 更新完成后统一呈现。
+ *
+ * @param nextPreference 即将应用的显式主题偏好。
+ * @param origin 主题按钮在视口中的中心坐标。
+ */
+function runViewThemeTransition(
+  nextPreference: Exclude<ThemePreference, 'system'>,
+  origin?: ThemeTransitionOrigin,
+) {
+  const root = document.documentElement
+  const geometry = resolveThemeTransitionGeometry(origin)
+  root.style.setProperty('--theme-transition-x', `${geometry.x}px`)
+  root.style.setProperty('--theme-transition-y', `${geometry.y}px`)
+  root.style.setProperty('--theme-transition-radius', `${geometry.radius}px`)
+  isThemeTransitioning.value = true
+
+  try {
+    const transition = document.startViewTransition(async () => {
+      setThemePreference(nextPreference)
+      await nextTick()
+    })
+
+    void transition.finished
+      .catch(() => undefined)
+      .finally(() => {
+        root.style.removeProperty('--theme-transition-x')
+        root.style.removeProperty('--theme-transition-y')
+        root.style.removeProperty('--theme-transition-radius')
+        isThemeTransitioning.value = false
+      })
+  } catch {
+    root.style.removeProperty('--theme-transition-x')
+    root.style.removeProperty('--theme-transition-y')
+    root.style.removeProperty('--theme-transition-radius')
+    isThemeTransitioning.value = false
+    setThemePreference(nextPreference)
+  }
+}
+
+/**
+ * 在当前解析主题的相反模式间切换。
+ * 为什么这么做：主题按钮需要统一处理动画、持久化和快速连点，不能由组件各自直接改根节点；
+ * 好处：支持新浏览器的定向扩散动画，也能在旧浏览器和减少动态效果模式下安全降级。
+ *
+ * @param origin 触发按钮在视口中的中心坐标；省略时从视口中心扩散。
+ */
+export function toggleTheme(origin?: ThemeTransitionOrigin) {
+  if (isThemeTransitioning.value) return
+
+  const nextPreference = isDark.value ? 'light' : 'dark'
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    setThemePreference(nextPreference)
+    return
+  }
+
+  if (shouldReduceThemeMotion()) {
+    setThemePreference(nextPreference)
+    return
+  }
+
+  if (typeof document.startViewTransition !== 'function') {
+    setThemePreference(nextPreference)
+    return
+  }
+
+  runViewThemeTransition(nextPreference, origin)
 }
 
 /**
@@ -159,6 +259,7 @@ export function useTheme() {
     preference: readonly(preference),
     resolvedTheme,
     isDark,
+    isThemeTransitioning: readonly(isThemeTransitioning),
     setThemePreference,
     toggleTheme,
   }

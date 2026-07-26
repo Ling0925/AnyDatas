@@ -10,8 +10,24 @@ withDefaults(defineProps<{
   variant: 'shell',
 })
 
-const { isDark, toggleTheme } = useTheme()
+const { isDark, isThemeTransitioning, toggleTheme } = useTheme()
 const actionLabel = computed(() => (isDark.value ? '切换到亮色模式' : '切换到夜间模式'))
+
+/**
+ * 从主题按钮中心触发全页主题动画。
+ * 为什么这么做：鼠标点击与键盘触发都应从同一稳定位置扩散，不能依赖可能为零的事件坐标；
+ * 好处：桌面顶栏和移动端登录页会得到一致、可预测的视觉反馈。
+ *
+ * @param event 主题按钮点击事件。
+ */
+function handleThemeToggle(event: MouseEvent) {
+  const button = event.currentTarget as HTMLElement
+  const bounds = button.getBoundingClientRect()
+  toggleTheme({
+    x: bounds.left + bounds.width / 2,
+    y: bounds.top + bounds.height / 2,
+  })
+}
 </script>
 
 <template>
@@ -21,8 +37,10 @@ const actionLabel = computed(() => (isDark.value ? '切换到亮色模式' : '�
       :class="`theme-toggle-button--${variant}`"
       type="button"
       :aria-label="actionLabel"
+      :aria-busy="isThemeTransitioning"
+      :aria-disabled="isThemeTransitioning"
       :title="actionLabel"
-      @click="toggleTheme"
+      @click="handleThemeToggle"
     >
       <Sun v-if="isDark" :size="16" />
       <Moon v-else :size="16" />
@@ -59,5 +77,9 @@ const actionLabel = computed(() => (isDark.value ? '切换到亮色模式' : '�
   background: color-mix(in srgb, var(--panel) 78%, transparent);
   border-color: var(--line);
   backdrop-filter: blur(8px);
+}
+
+.theme-toggle-button[aria-busy="true"] {
+  cursor: wait;
 }
 </style>
