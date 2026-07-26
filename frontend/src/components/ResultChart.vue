@@ -26,6 +26,7 @@ import {
 import { init, use, type ECharts, type EChartsCoreOption } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 
+import { useTheme } from '../theme'
 import type { FieldDefinition } from '../types'
 
 use([
@@ -61,11 +62,24 @@ interface GroupDescriptor {
   label: string
 }
 
+interface ChartVisualTheme {
+  palette: string[]
+  text: string
+  textStrong: string
+  axis: string
+  split: string
+  radarAreas: string[]
+  tooltipBackground: string
+  tooltipBorder: string
+  tooltipText: string
+}
+
 const props = defineProps<{
   columns: FieldDefinition[]
   rows: unknown[][]
 }>()
 
+const { isDark } = useTheme()
 const chartElement = ref<HTMLDivElement | null>(null)
 const chartType = ref<ChartType>('bar')
 const categoryIndex = ref(0)
@@ -92,7 +106,31 @@ const aggregationOptions = [
   { value: 'min' as const, label: '最小值' },
 ]
 
-const palette = ['#147d64', '#2563eb', '#d28a16', '#c34a52', '#6c5ce7', '#398b9d']
+const chartVisualTheme = computed<ChartVisualTheme>(() => (
+  isDark.value
+    ? {
+        palette: ['#59c9a6', '#78a8ff', '#e3b35a', '#ef7a80', '#a78bfa', '#55c2d6'],
+        text: '#a7b7af',
+        textStrong: '#d8e5df',
+        axis: '#3b4d46',
+        split: '#293831',
+        radarAreas: ['rgba(89, 201, 166, 0.035)', 'rgba(255, 255, 255, 0.018)'],
+        tooltipBackground: 'rgba(17, 27, 23, 0.96)',
+        tooltipBorder: '#3b4d46',
+        tooltipText: '#e8f0ec',
+      }
+    : {
+        palette: ['#147d64', '#2563eb', '#d28a16', '#c34a52', '#6c5ce7', '#398b9d'],
+        text: '#687770',
+        textStrong: '#4b5b54',
+        axis: '#cbd6d1',
+        split: '#e8edeb',
+        radarAreas: ['#fbfcfb', '#f4f7f5'],
+        tooltipBackground: 'rgba(255, 255, 255, 0.96)',
+        tooltipBorder: '#d8e1dd',
+        tooltipText: '#1c2924',
+      }
+))
 const MAX_GROUP_COMBINATIONS = 16
 const OTHER_GROUP_KEY = '__anydatas_other_groups__'
 
@@ -159,7 +197,8 @@ watch(categoryIndex, () => resetSelections())
 
 watch(valueIndexes, normalizeGroupSelections, { deep: true })
 
-watch(chartOption, renderChart, { deep: true })
+// 主题本身作为独立监听源，确保空数据与同构配置场景也会清理旧画布并立即重绘。
+watch([chartOption, isDark], renderChart, { deep: true })
 
 onMounted(() => {
   if (!chartElement.value) return
@@ -256,11 +295,14 @@ function aggregateRows(limit: number) {
 function cartesianOption(categories: string[], series: AggregatedSeries[]): EChartsCoreOption {
   const isBar = chartType.value === 'bar' || chartType.value === 'stacked-bar'
   const isArea = chartType.value === 'area'
+  const visual = chartVisualTheme.value
   return {
     animationDuration: 280,
-    color: palette,
-    tooltip: { trigger: 'axis', valueFormatter: formatNumber },
-    legend: { type: 'scroll', top: 6, right: 18, textStyle: { color: '#687770', fontSize: 10 } },
+    backgroundColor: 'transparent',
+    color: visual.palette,
+    textStyle: { color: visual.text },
+    tooltip: { ...tooltipStyle('axis'), valueFormatter: formatNumber },
+    legend: { type: 'scroll', top: 6, right: 18, textStyle: { color: visual.text, fontSize: 10 } },
     grid: { top: 42, right: 24, bottom: 54, left: 62 },
     xAxis: {
       type: 'category',
@@ -268,13 +310,17 @@ function cartesianOption(categories: string[], series: AggregatedSeries[]): ECha
       nameLocation: 'middle',
       nameGap: 34,
       data: categories,
-      axisLabel: { color: '#687770', fontSize: 10, hideOverlap: true },
-      axisLine: { lineStyle: { color: '#cbd6d1' } },
+      nameTextStyle: { color: visual.textStrong },
+      axisLabel: { color: visual.text, fontSize: 10, hideOverlap: true },
+      axisLine: { lineStyle: { color: visual.axis } },
+      axisTick: { lineStyle: { color: visual.axis } },
     },
     yAxis: {
       type: 'value',
-      axisLabel: { color: '#687770', fontSize: 10 },
-      splitLine: { lineStyle: { color: '#e8edeb' } },
+      axisLabel: { color: visual.text, fontSize: 10 },
+      axisLine: { lineStyle: { color: visual.axis } },
+      axisTick: { lineStyle: { color: visual.axis } },
+      splitLine: { lineStyle: { color: visual.split } },
     },
     series: series.map((item) => ({
       name: item.name,
@@ -294,11 +340,14 @@ function cartesianOption(categories: string[], series: AggregatedSeries[]): ECha
 function pieOption(categories: string[], series: AggregatedSeries[]): EChartsCoreOption {
   const count = Math.min(series.length, 4)
   const ringWidth = Math.max(10, Math.floor(52 / count))
+  const visual = chartVisualTheme.value
   return {
     animationDuration: 280,
-    color: palette,
-    tooltip: { trigger: 'item', valueFormatter: formatNumber },
-    legend: { type: 'scroll', bottom: 3, textStyle: { color: '#687770', fontSize: 10 } },
+    backgroundColor: 'transparent',
+    color: visual.palette,
+    textStyle: { color: visual.text },
+    tooltip: { ...tooltipStyle('item'), valueFormatter: formatNumber },
+    legend: { type: 'scroll', bottom: 3, textStyle: { color: visual.text, fontSize: 10 } },
     series: series.slice(0, count).map((item, metricIndex) => {
       const outer = 30 + ringWidth * (metricIndex + 1)
       return {
@@ -307,8 +356,9 @@ function pieOption(categories: string[], series: AggregatedSeries[]): EChartsCor
         radius: [`${outer - ringWidth + 2}%`, `${outer}%`],
         center: ['50%', '46%'],
         label: count === 1
-          ? { color: '#4b5b54', fontSize: 10, formatter: '{b}: {d}%' }
+          ? { color: visual.textStrong, fontSize: 10, formatter: '{b}: {d}%' }
           : { show: false },
+        labelLine: { lineStyle: { color: visual.axis } },
         data: categories.map((name, categoryIndex) => ({
           name,
           value: item.values[categoryIndex] ?? 0,
@@ -321,6 +371,7 @@ function pieOption(categories: string[], series: AggregatedSeries[]): EChartsCor
 /** 雷达图以分类作为指标轴、数值列作为系列，限制十二个分类以保持标签可辨认。 */
 function radarOption(categories: string[], series: AggregatedSeries[]): EChartsCoreOption {
   const range = radarValueRange(series)
+  const visual = chartVisualTheme.value
   const indicators = categories.map((name) => ({
     name,
     min: range.min,
@@ -328,16 +379,19 @@ function radarOption(categories: string[], series: AggregatedSeries[]): EChartsC
   }))
   return {
     animationDuration: 280,
-    color: palette,
-    tooltip: { trigger: 'item' },
-    legend: { type: 'scroll', top: 5, right: 18, textStyle: { color: '#687770', fontSize: 10 } },
+    backgroundColor: 'transparent',
+    color: visual.palette,
+    textStyle: { color: visual.text },
+    tooltip: tooltipStyle('item'),
+    legend: { type: 'scroll', top: 5, right: 18, textStyle: { color: visual.text, fontSize: 10 } },
     radar: {
       center: ['50%', '54%'],
       radius: '66%',
       indicator: indicators,
-      axisName: { color: '#687770', fontSize: 10 },
-      splitLine: { lineStyle: { color: '#dfe7e3' } },
-      splitArea: { areaStyle: { color: ['#fbfcfb', '#f4f7f5'] } },
+      axisName: { color: visual.text, fontSize: 10 },
+      axisLine: { lineStyle: { color: visual.axis } },
+      splitLine: { lineStyle: { color: visual.axis } },
+      splitArea: { areaStyle: { color: visual.radarAreas } },
     },
     series: [{
       type: 'radar',
@@ -371,6 +425,7 @@ function radarValueRange(series: AggregatedSeries[]): { min: number; max: number
 
 /** 散点图支持数值、日期或分类 X 轴，并可按至多两个额外字段拆分多个 Y 序列。 */
 function scatterOption(): EChartsCoreOption {
+  const visual = chartVisualTheme.value
   const yIndexes = valueIndexes.value.filter((index) => index !== categoryIndex.value)
   const xColumn = props.columns[categoryIndex.value]
   const numericX = numericIndexes.value.includes(categoryIndex.value)
@@ -405,9 +460,11 @@ function scatterOption(): EChartsCoreOption {
 
   return {
     animationDuration: 220,
-    color: palette,
-    tooltip: { trigger: 'item' },
-    legend: { type: 'scroll', top: 6, right: 18, textStyle: { color: '#687770', fontSize: 10 } },
+    backgroundColor: 'transparent',
+    color: visual.palette,
+    textStyle: { color: visual.text },
+    tooltip: tooltipStyle('item'),
+    legend: { type: 'scroll', top: 6, right: 18, textStyle: { color: visual.text, fontSize: 10 } },
     grid: { top: 42, right: 24, bottom: 50, left: 62 },
     xAxis: {
       type: xAxisType,
@@ -415,13 +472,18 @@ function scatterOption(): EChartsCoreOption {
       nameLocation: 'middle',
       nameGap: 30,
       data: xAxisType === 'category' ? categories : undefined,
-      axisLabel: { color: '#687770', fontSize: 10 },
-      splitLine: { lineStyle: { color: '#e8edeb' } },
+      nameTextStyle: { color: visual.textStrong },
+      axisLabel: { color: visual.text, fontSize: 10 },
+      axisLine: { lineStyle: { color: visual.axis } },
+      axisTick: { lineStyle: { color: visual.axis } },
+      splitLine: { lineStyle: { color: visual.split } },
     },
     yAxis: {
       type: 'value',
-      axisLabel: { color: '#687770', fontSize: 10 },
-      splitLine: { lineStyle: { color: '#e8edeb' } },
+      axisLabel: { color: visual.text, fontSize: 10 },
+      axisLine: { lineStyle: { color: visual.axis } },
+      axisTick: { lineStyle: { color: visual.axis } },
+      splitLine: { lineStyle: { color: visual.split } },
     },
     series: groups.flatMap((group) => yIndexes.map((columnIndex) => ({
       name: chartSeriesName(group.label, props.columns[columnIndex]?.name ?? '指标'),
@@ -429,6 +491,24 @@ function scatterOption(): EChartsCoreOption {
       symbolSize: 8,
       data: points.get(group.key)?.get(columnIndex) ?? [],
     }))),
+  }
+}
+
+/**
+ * 生成与当前明暗模式一致的提示框外观。
+ * 为什么这么做：ECharts 提示框由自身渲染，无法只依赖页面 CSS 继承主题；
+ * 好处：鼠标悬停时的背景、边框和文字也能与画布保持一致，并兼顾可读性。
+ *
+ * @param trigger 提示框的触发粒度。
+ * @returns 可复用于各类图表的提示框配置。
+ */
+function tooltipStyle(trigger: 'axis' | 'item') {
+  const visual = chartVisualTheme.value
+  return {
+    trigger,
+    backgroundColor: visual.tooltipBackground,
+    borderColor: visual.tooltipBorder,
+    textStyle: { color: visual.tooltipText },
   }
 }
 

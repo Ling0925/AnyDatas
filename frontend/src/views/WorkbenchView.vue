@@ -333,7 +333,6 @@ function configureSqlCompletion(monaco: any) {
               <SqlEditor
                 v-model="store.currentSql"
                 language="sql"
-                theme="vs"
                 :options="editorOptions"
                 @before-mount="configureSqlCompletion"
               />

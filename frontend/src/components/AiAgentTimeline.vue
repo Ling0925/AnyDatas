@@ -233,9 +233,9 @@ function stepDuration(step: AiAgentRunStep): string | null {
 .agent-run-timeline {
   min-width: 0;
   overflow: hidden;
-  border: 1px solid #c8dcd4;
+  border: 1px solid var(--line-strong);
   border-radius: 7px;
-  background: #fcfdfc;
+  background: var(--panel);
 }
 
 .agent-run-summary {
@@ -245,8 +245,8 @@ function stepDuration(step: AiAgentRunStep): string | null {
   align-items: center;
   gap: 9px;
   padding: 7px 12px;
-  color: #34564c;
-  background: #edf5f2;
+  color: var(--text-secondary);
+  background: var(--primary-soft);
   cursor: pointer;
   list-style: none;
 }
@@ -261,9 +261,9 @@ function stepDuration(step: AiAgentRunStep): string | null {
   height: 28px;
   display: grid;
   place-items: center;
-  border: 1px solid #bcd4cb;
+  border: 1px solid var(--primary-border);
   border-radius: 6px;
-  background: #f8fbfa;
+  background: var(--panel-muted);
 }
 
 .agent-run-summary-copy {
@@ -282,7 +282,7 @@ function stepDuration(step: AiAgentRunStep): string | null {
 
 .agent-run-summary-copy small,
 .agent-run-model {
-  color: #77877f;
+  color: var(--muted);
   font-size: 11px;
   line-height: 1.35;
 }
@@ -298,10 +298,10 @@ function stepDuration(step: AiAgentRunStep): string | null {
 .agent-run-meta em {
   flex: 0 0 auto;
   padding: 2px 6px;
-  border: 1px solid #bfd7ce;
+  border: 1px solid var(--primary-border);
   border-radius: 4px;
-  color: #37665a;
-  background: #f7fbf9;
+  color: var(--primary-text);
+  background: var(--panel-muted);
   font-size: 10px;
   font-style: normal;
   line-height: 1.35;
@@ -353,7 +353,7 @@ function stepDuration(step: AiAgentRunStep): string | null {
   bottom: 0;
   left: 13px;
   width: 1px;
-  background: #cad8d3;
+  background: var(--line-strong);
   content: "";
 }
 
@@ -364,17 +364,17 @@ function stepDuration(step: AiAgentRunStep): string | null {
   height: 28px;
   display: grid;
   place-items: center;
-  border: 1px solid #9fc3b6;
+  border: 1px solid var(--primary-border);
   border-radius: 50%;
-  color: #147d64;
-  background: #f8fbfa;
+  color: var(--primary-text);
+  background: var(--panel-muted);
 }
 
 .agent-step.failed .agent-step-marker,
 .agent-step.canceled .agent-step-marker {
-  border-color: #dda9aa;
-  color: #bd3f44;
-  background: #fff7f7;
+  border-color: var(--red-border);
+  color: var(--red);
+  background: var(--red-soft);
 }
 
 .agent-step-content {
@@ -399,14 +399,14 @@ function stepDuration(step: AiAgentRunStep): string | null {
 }
 
 .agent-step-header strong {
-  color: #2d4038;
+  color: var(--text);
   font-size: 14px;
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
 
 .agent-step-header > div:first-child > span {
-  color: #63776e;
+  color: var(--muted);
   font-size: 11px;
 }
 
@@ -415,7 +415,7 @@ function stepDuration(step: AiAgentRunStep): string | null {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #839089;
+  color: var(--subtle);
   font-size: 11px;
   line-height: 1.55;
   white-space: nowrap;
@@ -431,13 +431,13 @@ function stepDuration(step: AiAgentRunStep): string | null {
   gap: 7px;
   margin-top: 7px;
   padding: 9px 10px;
-  color: #50625a;
-  background: #f3f7f5;
+  color: var(--text-secondary);
+  background: var(--panel-muted);
 }
 
 .agent-step-reasoning > svg {
   margin-top: 2px;
-  color: #4d7668;
+  color: var(--primary-text);
 }
 
 .agent-step-reasoning p {
@@ -450,7 +450,7 @@ function stepDuration(step: AiAgentRunStep): string | null {
 .agent-step-reasoning p strong {
   display: block;
   margin-bottom: 2px;
-  color: #38564b;
+  color: var(--text);
   font-size: 11px;
 }
 
@@ -461,7 +461,7 @@ function stepDuration(step: AiAgentRunStep): string | null {
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 5px;
-  color: #73837b;
+  color: var(--muted);
   font-size: 11px;
 }
 
@@ -480,7 +480,7 @@ function stepDuration(step: AiAgentRunStep): string | null {
   align-items: center;
   gap: 5px;
   margin-top: 5px;
-  color: #63776e;
+  color: var(--muted);
   font-size: 11px;
 }
 
@@ -489,7 +489,7 @@ function stepDuration(step: AiAgentRunStep): string | null {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  color: #547067;
+  color: var(--text-secondary);
   font-size: 11px;
   cursor: pointer;
   list-style: none;
@@ -504,9 +504,9 @@ function stepDuration(step: AiAgentRunStep): string | null {
   margin: 8px 0 0;
   overflow: auto;
   padding: 10px 11px;
-  border: 1px solid #dfe7e3;
-  color: #384b43;
-  background: #f7f9f8;
+  border: 1px solid var(--line);
+  color: var(--text);
+  background: var(--code-bg);
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 11px;
   line-height: 1.55;
@@ -518,7 +518,7 @@ function stepDuration(step: AiAgentRunStep): string | null {
   grid-template-columns: 15px minmax(0, 1fr);
   gap: 6px;
   margin-top: 7px;
-  color: #bd3f44;
+  color: var(--red);
   font-size: 12px;
   line-height: 1.55;
 }
@@ -533,7 +533,7 @@ function stepDuration(step: AiAgentRunStep): string | null {
   align-items: center;
   gap: 13px;
   margin-top: 14px;
-  color: #4c655b;
+  color: var(--text-secondary);
 }
 
 .agent-thinking-state > span {
@@ -541,7 +541,7 @@ function stepDuration(step: AiAgentRunStep): string | null {
   height: 28px;
   display: grid;
   place-items: center;
-  border: 1px solid #b8d0c7;
+  border: 1px solid var(--primary-border);
   border-radius: 50%;
 }
 
@@ -555,7 +555,7 @@ function stepDuration(step: AiAgentRunStep): string | null {
 }
 
 .agent-thinking-state small {
-  color: #829088;
+  color: var(--subtle);
   font-size: 11px;
 }
 
@@ -566,9 +566,9 @@ function stepDuration(step: AiAgentRunStep): string | null {
   gap: 10px;
   margin: 14px -18px -16px;
   padding: 10px 12px;
-  border-top: 1px solid #ecd0d1;
-  color: #bd3f44;
-  background: #fff6f6;
+  border-top: 1px solid var(--red-border);
+  color: var(--red);
+  background: var(--red-soft);
   font-size: 11px;
   line-height: 1.5;
 }

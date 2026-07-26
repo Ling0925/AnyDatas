@@ -1,13 +1,24 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
+import { useTheme } from '../theme'
+
+const { isDark } = useTheme()
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 
-const WAVE_COLORS = [
+const LIGHT_WAVE_COLORS = [
   '#147d64',
   '#48a08a',
   '#79b9a9',
 ] as const
+const DARK_WAVE_COLORS = [
+  '#59c9a6',
+  '#3eab8d',
+  '#277e6b',
+] as const
+const waveColors = computed(() => (
+  isDark.value ? DARK_WAVE_COLORS : LIGHT_WAVE_COLORS
+))
 
 const MIN_TIDE_DEPTH = 0.28
 const MAX_TIDE_DEPTH = 0.46
@@ -170,9 +181,11 @@ function updateSimulation(now: number, deltaMs: number) {
 function paintPixelOcean(elapsedSeconds: number) {
   if (!context || canvasWidth <= 0 || canvasHeight <= 0) return
 
+  // 每帧先清空透明画布，且只为达到波峰阈值的网格着色，平静区域不会留下任何底色。
   context.clearRect(0, 0, canvasWidth, canvasHeight)
 
-  const crestPaths = WAVE_COLORS.map(() => new Path2D())
+  const activeWaveColors = waveColors.value
+  const crestPaths = activeWaveColors.map(() => new Path2D())
   const tideRatio = clamp(
     (currentTideDepth - MIN_TIDE_DEPTH) / (MAX_TIDE_DEPTH - MIN_TIDE_DEPTH),
     0,
@@ -224,8 +237,8 @@ function paintPixelOcean(elapsedSeconds: number) {
   }
 
   const colorOpacity = [0.96, 0.78, 0.58]
-  for (let colorIndex = 0; colorIndex < WAVE_COLORS.length; colorIndex += 1) {
-    context.fillStyle = WAVE_COLORS[colorIndex]
+  for (let colorIndex = 0; colorIndex < activeWaveColors.length; colorIndex += 1) {
+    context.fillStyle = activeWaveColors[colorIndex]
     context.globalAlpha = colorOpacity[colorIndex]
     context.fill(crestPaths[colorIndex])
   }
@@ -393,6 +406,9 @@ function disposeOcean() {
   motionPreference = null
   context = null
 }
+
+// 主题变化时立即重绘当前波峰，无需等待下一次动画帧，减少动态偏好模式下的视觉延迟。
+watch(isDark, () => paintPixelOcean(performance.now() / 1_000))
 
 onMounted(initializeOcean)
 onBeforeUnmount(disposeOcean)

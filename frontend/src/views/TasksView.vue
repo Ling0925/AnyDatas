@@ -679,7 +679,6 @@ async function deleteSchedule(id: string) {
             <SqlEditor
               v-model="jobForm.sql"
               language="sql"
-              theme="vs"
               :options="editorOptions"
             />
           </div>
@@ -726,7 +725,6 @@ async function deleteSchedule(id: string) {
             <SqlEditor
               v-model="scheduleForm.sql"
               language="sql"
-              theme="vs"
               :options="editorOptions"
             />
           </div>
