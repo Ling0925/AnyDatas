@@ -171,6 +171,9 @@ export interface ImportSheetInspection {
   columnCount: number
   fields: FieldDefinition[]
   rows: unknown[][]
+  startCell: string
+  endCell: string | null
+  firstRowAsHeader: boolean
 }
 
 export interface ImportInspection {
@@ -189,6 +192,13 @@ export interface ImportTableConfig {
   endCell: string | null
   firstRowAsHeader: boolean
   fields: FieldDefinition[]
+}
+
+export interface InspectImportTablePayload {
+  sheetName: string
+  startCell: string
+  endCell: string | null
+  firstRowAsHeader: boolean
 }
 
 export interface DataSource {

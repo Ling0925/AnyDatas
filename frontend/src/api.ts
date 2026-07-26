@@ -15,6 +15,7 @@ import type {
   AiSqlResponse,
   DataSource,
   ImportInspection,
+  InspectImportTablePayload,
   ImportTableConfig,
   Job,
   JobSummary,
@@ -167,6 +168,13 @@ export const api = {
     const form = new FormData()
     form.append('file', file)
     return (await client.post<ImportInspection>('/data-sources/inspect', form, { timeout: 0 })).data
+  },
+  async previewSourceImport(token: string, payload: InspectImportTablePayload) {
+    return (await client.post<ImportInspection['sheets'][number]>(
+      `/data-sources/imports/${token}/preview`,
+      payload,
+      { timeout: 0 },
+    )).data
   },
   async commitSourceImport(token: string, tables: ImportTableConfig[]) {
     return (await client.post<DataSource>('/data-sources/import', { token, tables })).data

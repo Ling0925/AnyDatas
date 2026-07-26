@@ -20,8 +20,8 @@ use crate::{
     error::{AppError, AppResult},
     models::{
         CommitImportRequest, DataSource, DataSourceRow, FieldDefinition, ImportInspection,
-        ImportSheetInspection, ImportTableConfig, PreviewParams, PreviewResponse, SharedState,
-        TableData, UpdateSourceConfig,
+        ImportSheetInspection, ImportTableConfig, InspectImportTableRequest, PreviewParams,
+        PreviewResponse, SharedState, TableData, UpdateSourceConfig,
     },
     services::spreadsheet,
 };
@@ -34,6 +34,10 @@ pub fn router() -> Router<SharedState> {
         .route(
             "/data-sources/imports/{token}",
             axum::routing::delete(discard_import),
+        )
+        .route(
+            "/data-sources/imports/{token}/preview",
+            axum::routing::post(preview_import),
         )
         .route("/data-sources/{id}", get(get_one).delete(delete_one))
         .route("/data-sources/{id}/config", patch(update_config))
@@ -116,25 +120,11 @@ async fn inspect_upload(
             let workbook = spreadsheet::inspect_file(&inspect_path, &file_kind)?;
             let mut sheets = Vec::with_capacity(workbook.sheets.len());
             for sheet in workbook.sheets {
-                let table = spreadsheet::read_table_range(
-                    &inspect_path,
-                    &file_kind,
-                    &sheet.name,
-                    "A1",
-                    None,
-                    true,
-                    Some(2_000),
-                )?;
-                if table.columns.is_empty() {
-                    continue;
+                let inspection =
+                    inspect_import_table(&inspect_path, &file_kind, &sheet.name, "A1", None, true)?;
+                if !inspection.fields.is_empty() {
+                    sheets.push(inspection);
                 }
-                sheets.push(ImportSheetInspection {
-                    name: sheet.name,
-                    row_count: table.total_rows,
-                    column_count: table.columns.len(),
-                    fields: table.columns,
-                    rows: table.rows.into_iter().take(20).collect(),
-                });
             }
             anyhow::ensure!(!sheets.is_empty(), "文件中没有可导入的数据表");
             Ok(sheets)
@@ -188,6 +178,60 @@ async fn inspect_upload(
             expires_at: expires_at.to_rfc3339(),
         }),
     ))
+}
+
+/// 根据暂存文件和用户输入的范围重新生成字段与样本，让导入前的类型设置基于真实读取区域。
+async fn preview_import(
+    State(state): State<SharedState>,
+    auth: AuthContext,
+    AxumPath(token): AxumPath<String>,
+    Json(request): Json<InspectImportTableRequest>,
+) -> AppResult<Json<ImportSheetInspection>> {
+    auth.require_analyst()?;
+    let staged = sqlx::query_as::<_, StagedImportRow>(
+        r#"
+        SELECT id, original_filename, stored_path, media_type, file_kind,
+               size_bytes, expires_at
+        FROM staged_imports
+        WHERE id = ? AND workspace_id = ? AND user_id = ?
+        "#,
+    )
+    .bind(&token)
+    .bind(&auth.workspace_id)
+    .bind(&auth.user_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("导入预检已失效，请重新上传".to_owned()))?;
+    let expires_at = DateTime::parse_from_rfc3339(&staged.expires_at)
+        .map_err(|_| AppError::Internal("暂存记录时间无效".to_owned()))?;
+    if expires_at < Utc::now() {
+        discard_staged_file(&state, &staged.id, &staged.stored_path).await?;
+        return Err(AppError::BadRequest(
+            "导入预检已过期，请重新上传".to_owned(),
+        ));
+    }
+
+    let path = PathBuf::from(staged.stored_path);
+    let file_kind = staged.file_kind;
+    let inspection = tokio::task::spawn_blocking(move || {
+        inspect_import_table(
+            &path,
+            &file_kind,
+            &request.sheet_name,
+            &request.start_cell,
+            request.end_cell.as_deref(),
+            request.first_row_as_header,
+        )
+    })
+    .await
+    .map_err(|error| AppError::Internal(format!("范围预检线程异常: {error}")))?
+    .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    if inspection.fields.is_empty() {
+        return Err(AppError::BadRequest(
+            "所选范围中没有可读取的数据".to_owned(),
+        ));
+    }
+    Ok(Json(inspection))
 }
 
 /// 根据用户确认的字段类型创建正式数据源；文件和元数据均成功后才消费暂存记录。
@@ -794,6 +838,45 @@ fn prepare_import_tables(
     Ok((sheet_names, prepared))
 }
 
+/// 使用与正式导入相同的范围语义生成字段样本，避免弹窗预览和提交结果出现偏差。
+fn inspect_import_table(
+    path: &Path,
+    file_kind: &str,
+    sheet_name: &str,
+    start_cell: &str,
+    end_cell: Option<&str>,
+    first_row_as_header: bool,
+) -> anyhow::Result<ImportSheetInspection> {
+    anyhow::ensure!(!sheet_name.is_empty(), "工作表名称不能为空");
+    if file_kind == "csv" {
+        anyhow::ensure!(sheet_name == "数据", "所选工作表不存在");
+    }
+    let start_cell = start_cell.trim().to_ascii_uppercase();
+    let end_cell = end_cell
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_uppercase);
+    let table = spreadsheet::read_table_range(
+        path,
+        file_kind,
+        sheet_name,
+        &start_cell,
+        end_cell.as_deref(),
+        first_row_as_header,
+        Some(2_000),
+    )?;
+    Ok(ImportSheetInspection {
+        name: sheet_name.to_owned(),
+        row_count: table.total_rows,
+        column_count: table.columns.len(),
+        fields: table.columns,
+        rows: table.rows.into_iter().take(20).collect(),
+        start_cell,
+        end_cell,
+        first_row_as_header,
+    })
+}
+
 /// 清理超过 24 小时仍未确认的暂存文件，按需执行可避免额外后台服务和运维负担。
 async fn cleanup_expired_imports(state: &SharedState) -> AppResult<()> {
     let now = Utc::now().to_rfc3339();
@@ -857,5 +940,26 @@ fn file_metadata(extension: &str) -> AppResult<(&'static str, &'static str)> {
         _ => Err(AppError::BadRequest(
             "仅支持 .xlsx、.xls、.xlsb、.ods 和 .csv 文件".to_owned(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspects_a_custom_start_cell_before_import() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("expenses.csv");
+        std::fs::write(&path, "报销数据,\n费用项目,金额\n差旅费,120\n办公费,80\n").unwrap();
+
+        let inspection = inspect_import_table(&path, "csv", "数据", "A2", None, true).unwrap();
+
+        assert_eq!(inspection.start_cell, "A2");
+        assert_eq!(inspection.row_count, 2);
+        assert_eq!(inspection.column_count, 2);
+        assert_eq!(inspection.fields[0].name, "费用项目");
+        assert_eq!(inspection.fields[1].name, "金额");
+        assert_eq!(inspection.rows[0], vec!["差旅费", "120"]);
     }
 }

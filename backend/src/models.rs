@@ -251,6 +251,9 @@ pub struct ImportSheetInspection {
     pub column_count: usize,
     pub fields: Vec<FieldDefinition>,
     pub rows: Vec<Vec<Value>>,
+    pub start_cell: String,
+    pub end_cell: Option<String>,
+    pub first_row_as_header: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -273,6 +276,15 @@ pub struct ImportTableConfig {
     pub end_cell: Option<String>,
     pub first_row_as_header: bool,
     pub fields: Vec<FieldDefinition>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectImportTableRequest {
+    pub sheet_name: String,
+    pub start_cell: String,
+    pub end_cell: Option<String>,
+    pub first_row_as_header: bool,
 }
 
 #[derive(Debug, Deserialize)]

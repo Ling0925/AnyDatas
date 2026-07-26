@@ -1135,7 +1135,7 @@ input:focus-visible {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: 48px 190px minmax(0, 1fr);
+  grid-template-rows: 48px 66px 176px minmax(0, 1fr);
 }
 
 .import-config-heading {
@@ -1162,6 +1162,54 @@ input:focus-visible {
 .import-preview-heading {
   color: var(--subtle);
   font-size: 10px;
+}
+
+.import-range-config {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 132px 148px minmax(126px, 1fr) auto auto;
+  align-items: end;
+  gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: #fafbfa;
+}
+
+.import-range-config label {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.import-range-config label > span {
+  color: var(--subtle);
+  font-size: 9px;
+  font-weight: 620;
+}
+
+.import-range-config .el-checkbox {
+  height: 28px;
+  margin: 0;
+}
+
+.import-range-config .el-button {
+  height: 28px;
+  gap: 5px;
+}
+
+.import-range-dirty,
+.import-footer-hint {
+  color: #a36708;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.import-range-dirty {
+  align-self: center;
+}
+
+.import-footer-hint {
+  margin-right: 8px;
 }
 
 .import-field-table {

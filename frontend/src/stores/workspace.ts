@@ -5,6 +5,7 @@ import { api } from '../api'
 import type {
   DataSource,
   ImportInspection,
+  InspectImportTablePayload,
   ImportTableConfig,
   PreviewResponse,
   QueryResponse,
@@ -110,6 +111,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     } finally {
       uploadLoading.value = false
     }
+  }
+
+  /** 按用户在导入弹窗中设置的范围重新读取暂存文件，字段类型因此始终基于真实表头和数据样本。 */
+  async function inspectImportRange(token: string, payload: InspectImportTablePayload) {
+    return api.previewSourceImport(token, payload)
   }
 
   /**
@@ -418,6 +424,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     selectSource,
     selectTable,
     inspectUpload,
+    inspectImportRange,
     commitImport,
     discardImport,
     refreshPreview,
