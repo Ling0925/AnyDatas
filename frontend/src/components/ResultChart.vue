@@ -27,7 +27,7 @@ import { init, use, type ECharts, type EChartsCoreOption } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 
 import { useTheme } from '../theme'
-import type { FieldDefinition } from '../types'
+import type { AgentChartSpec, FieldDefinition } from '../types'
 
 use([
   BarChart,
@@ -77,6 +77,8 @@ interface ChartVisualTheme {
 const props = defineProps<{
   columns: FieldDefinition[]
   rows: unknown[][]
+  appliedConfig?: AgentChartSpec | null
+  compact?: boolean
 }>()
 
 const { isDark } = useTheme()
@@ -199,6 +201,38 @@ watch(valueIndexes, normalizeGroupSelections, { deep: true })
 
 // 主题本身作为独立监听源，确保空数据与同构配置场景也会清理旧画布并立即重绘。
 watch([chartOption, isDark], renderChart, { deep: true })
+
+const CHART_TYPE_SET = new Set<ChartType>([
+  'bar', 'stacked-bar', 'line', 'area', 'pie', 'scatter', 'radar',
+])
+
+/**
+ * 把 AI 建议的图表配置（按列名引用）映射到当前结果的列索引并覆盖默认推断。
+ * 维度与全部度量都匹配不到时保持默认；匹配到的按需生效，用户仍可继续手调。
+ */
+function applyExternalConfig() {
+  const spec = props.appliedConfig
+  if (!spec) return
+  const nameToIndex = (name: string) => props.columns.findIndex((column) => column.name === name)
+  const categoryMapped = nameToIndex(spec.category)
+  const mappedValues = (spec.values ?? [])
+    .map(nameToIndex)
+    .filter((index) => index >= 0)
+    .slice(0, 4)
+  if (categoryMapped < 0 && !mappedValues.length) return
+  if (CHART_TYPE_SET.has(spec.type as ChartType)) chartType.value = spec.type as ChartType
+  if (categoryMapped >= 0) categoryIndex.value = categoryMapped
+  if (mappedValues.length) valueIndexes.value = mappedValues
+  groupIndexes.value = (spec.groups ?? []).map(nameToIndex).filter((index) => index >= 0)
+  if (spec.aggregation) aggregation.value = spec.aggregation
+}
+
+// 声明顺序晚于上面的列监听，确保 AI 图表配置在默认列推断之后应用。
+watch(
+  () => [props.appliedConfig, props.columns.map((column) => column.name).join('|')] as const,
+  () => applyExternalConfig(),
+  { immediate: true },
+)
 
 onMounted(() => {
   if (!chartElement.value) return
@@ -585,8 +619,9 @@ function formatNumber(value: unknown): string {
 </script>
 
 <template>
-  <div class="result-chart-panel">
+  <div class="result-chart-panel" :class="{ compact }">
     <div
+      v-if="!compact"
       class="chart-controls"
       :class="{
         'with-grouping': supportsGrouping,

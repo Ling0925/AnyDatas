@@ -14,6 +14,7 @@ declare module 'vue' {
     AgentTableSelector: typeof import('./components/AgentTableSelector.vue')['default']
     AiAgentTimeline: typeof import('./components/AiAgentTimeline.vue')['default']
     AiAssistantPanel: typeof import('./components/AiAssistantPanel.vue')['default']
+    AiChartPreview: typeof import('./components/AiChartPreview.vue')['default']
     AiMarkdown: typeof import('./components/AiMarkdown.vue')['default']
     AiResultPreview: typeof import('./components/AiResultPreview.vue')['default']
     AiSettingsDialog: typeof import('./components/AiSettingsDialog.vue')['default']

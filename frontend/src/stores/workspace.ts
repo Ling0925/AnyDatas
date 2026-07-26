@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 
 import { api } from '../api'
 import type {
+  AgentChartSpec,
   DataSource,
   ImportInspection,
   InspectImportTablePayload,
@@ -36,6 +37,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const currentSql = ref(DEFAULT_SQL)
   const preview = ref<PreviewResponse | null>(null)
   const queryResult = ref<QueryResponse | null>(null)
+  // AI 建议的图表配置：由 Agent「应用」候选 SQL 时写入，供结果区按列名渲染；
+  // runQuery 不清除它（应用图表触发的那次运行需要保留），手动切换上下文时清空。
+  const appliedChart = ref<AgentChartSpec | null>(null)
+  function setAppliedChart(spec: AgentChartSpec | null) {
+    appliedChart.value = spec
+  }
   const savedQueries = ref<SavedQuery[]>([])
   const selectedSavedQueryId = ref<string | null>(null)
   const sourceLoading = ref(false)
@@ -430,6 +437,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const query = savedQueries.value.find((item) => item.id === id)
     if (!query) return
     currentSql.value = query.sql
+    appliedChart.value = null
     await setQueryContext(query.tables)
   }
 
@@ -490,6 +498,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const escapedName = name.replaceAll('"', '""')
     const tableAlias = queryBindings.value[0]?.alias ?? 'data'
     currentSql.value = `SELECT *,\n  ${expression} AS "${escapedName}"\nFROM ${tableAlias}\nLIMIT 200;`
+    appliedChart.value = null
   }
 
   /** 返回文件的默认逻辑表，旧 SQL 和首次打开都以它作为 data 绑定。 */
@@ -572,6 +581,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     selectedTable,
     preview,
     queryResult,
+    appliedChart,
+    setAppliedChart,
     queryBindings,
     boundTables,
     primarySourceId,

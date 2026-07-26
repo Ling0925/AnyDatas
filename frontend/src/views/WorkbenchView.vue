@@ -67,6 +67,8 @@ onUnmounted(() => completionDisposable?.dispose())
 async function runQuery() {
   try {
     await store.runQuery()
+    // AI 建议了图表时，结果默认以该图表呈现（用户仍可切回表格或手调）。
+    if (store.appliedChart && store.queryResult) resultMode.value = 'chart'
   } catch (error) {
     ElMessage.error(errorMessage(error))
   }
@@ -386,6 +388,7 @@ function configureSqlCompletion(monaco: any) {
               v-else-if="store.queryResult"
               :columns="store.queryResult.columns"
               :rows="store.queryResult.rows"
+              :applied-config="store.appliedChart"
             />
           </section>
         </div>

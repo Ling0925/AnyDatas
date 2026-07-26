@@ -27,6 +27,7 @@ import { api, errorMessage } from '../api'
 import { useAuthStore } from '../stores/auth'
 import { useWorkspaceStore } from '../stores/workspace'
 import type {
+  AgentChartSpec,
   AiAgentConversationDetail,
   AiAgentConversationSummary,
   AiAgentMessage,
@@ -38,10 +39,11 @@ import type {
 import AiMarkdown from './AiMarkdown.vue'
 import AiAgentTimeline from './AiAgentTimeline.vue'
 import AiResultPreview from './AiResultPreview.vue'
+import AiChartPreview from './AiChartPreview.vue'
 
 const emit = defineEmits<{
-  applySql: [sql: string]
-  runSql: [sql: string]
+  applySql: [payload: { sql: string; chart?: AgentChartSpec }]
+  runSql: [payload: { sql: string; chart?: AgentChartSpec }]
 }>()
 
 const auth = useAuthStore()
@@ -637,21 +639,21 @@ async function previewSql(message: AiAgentMessage) {
 }
 
 /** 将候选 SQL 交给父工作台应用，编辑器和正式结果区仍保持单一状态来源。 */
-function applySql(sql: string) {
+function applySql(sql: string, chart?: AgentChartSpec) {
   if (!canUseAgentSql.value) {
     ElMessage.warning('请先恢复这段对话的有效表格上下文')
     return
   }
-  emit('applySql', sql)
+  emit('applySql', { sql, chart })
 }
 
 /** 将候选 SQL 应用并运行，Agent 的小样本工具结果不会替代正式查询结果。 */
-function runSql(sql: string) {
+function runSql(sql: string, chart?: AgentChartSpec) {
   if (!canUseAgentSql.value) {
     ElMessage.warning('请先恢复这段对话的有效表格上下文')
     return
   }
-  emit('runSql', sql)
+  emit('runSql', { sql, chart })
 }
 
 /**
@@ -1006,7 +1008,7 @@ async function scrollToBottom(force = true) {
                   size="small"
                   aria-label="应用候选 SQL"
                   :disabled="!canUseAgentSql"
-                  @click="applySql(message.sql)"
+                  @click="applySql(message.sql, message.chart)"
                 >
                   <Check :size="14" />应用
                 </el-button>
@@ -1024,7 +1026,7 @@ async function scrollToBottom(force = true) {
                   type="primary"
                   aria-label="应用候选 SQL 并运行"
                   :disabled="!canUseAgentSql"
-                  @click="runSql(message.sql)"
+                  @click="runSql(message.sql, message.chart)"
                 >
                   <Play :size="14" />应用并运行
                 </el-button>
@@ -1032,6 +1034,11 @@ async function scrollToBottom(force = true) {
               </el-tooltip>
 
               <AiResultPreview v-if="messagePreview(message)" :result="messagePreview(message)!" />
+              <AiChartPreview
+                v-if="message.chart && messagePreview(message)"
+                :spec="message.chart"
+                :result="messagePreview(message)!"
+              />
               <div v-else-if="previewErrors[message.id]" class="ai-preview-error">
                 {{ previewErrors[message.id] }}
               </div>

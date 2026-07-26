@@ -68,11 +68,26 @@ export interface AiAgentConversationSummary {
   updatedAt: string
 }
 
+export type AgentChartType = 'bar' | 'stacked-bar' | 'line' | 'area' | 'pie' | 'scatter' | 'radar'
+export type AgentChartAggregation = 'sum' | 'average' | 'max' | 'min'
+
+/** AI 随候选 SQL 给出的图表建议：按结果列名引用，映射到现有 ResultChart 渲染。 */
+export interface AgentChartSpec {
+  type: AgentChartType
+  category: string
+  values: string[]
+  groups?: string[]
+  aggregation?: AgentChartAggregation
+  title?: string
+  rationale?: string
+}
+
 export interface AiAgentMessage {
   id: string
   role: AiChatRole
   content: string
   sql: string | null
+  chart?: AgentChartSpec
   model: string | null
   toolRuns: AiToolRun[]
   sequence: number
