@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { defineAsyncComponent, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { VueMonacoEditor } from '@guolao/vue-monaco-editor'
 import { useRouter } from 'vue-router'
 import {
   BarChart3,
@@ -22,6 +21,7 @@ import { api, errorMessage } from '../api'
 import DataGrid from '../components/DataGrid.vue'
 import FileSidebar from '../components/FileSidebar.vue'
 import InspectorPanel from '../components/InspectorPanel.vue'
+import SqlEditor from '../components/SqlEditor.vue'
 import { downloadQueryCsv } from '../export'
 import { useWorkspaceStore } from '../stores/workspace'
 
@@ -330,16 +330,13 @@ function configureSqlCompletion(monaco: any) {
               <span v-else class="binding-empty">从左侧工作表点击 + 加入查询</span>
             </div>
             <div class="editor-host">
-              <VueMonacoEditor
-                v-model:value="store.currentSql"
+              <SqlEditor
+                v-model="store.currentSql"
                 language="sql"
                 theme="vs"
                 :options="editorOptions"
                 @before-mount="configureSqlCompletion"
-              >
-                <div class="editor-loading">正在加载编辑器</div>
-                <template #failure><div class="editor-loading">编辑器加载失败</div></template>
-              </VueMonacoEditor>
+              />
             </div>
           </section>
 

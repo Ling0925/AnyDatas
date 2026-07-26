@@ -1671,6 +1671,15 @@ input:focus-visible {
   background: #f8faf9;
 }
 
+.data-grid .data-grid-spacer td {
+  height: 0;
+  min-width: 0;
+  max-width: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
 .data-grid .row-number {
   position: sticky;
   left: 0;

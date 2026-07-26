@@ -569,7 +569,8 @@ function runSql(sql: string) {
 }
 
 /** Enter 发送、Shift+Enter 换行，同时避开中文输入法组合阶段。 */
-function handleComposerKeydown(event: KeyboardEvent) {
+function handleComposerKeydown(event: Event | KeyboardEvent) {
+  if (!(event instanceof KeyboardEvent)) return
   if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return
   event.preventDefault()
   void sendMessage()

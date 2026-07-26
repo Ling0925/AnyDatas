@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { VueMonacoEditor } from '@guolao/vue-monaco-editor'
 import {
   CalendarClock,
   CircleCheck,
@@ -23,6 +22,7 @@ import {
 
 import { api, errorMessage } from '../api'
 import DataGrid from '../components/DataGrid.vue'
+import SqlEditor from '../components/SqlEditor.vue'
 import TableBindingEditor from '../components/TableBindingEditor.vue'
 import { useTasksStore } from '../stores/tasks'
 import { useWorkspaceStore } from '../stores/workspace'
@@ -641,6 +641,7 @@ async function deleteSchedule(id: string) {
           <DataGrid
             :columns="displayedResult.columns"
             :rows="displayedResult.rows"
+            :row-offset="(resultPageNumber - 1) * resultPageSize"
           />
           <el-pagination
             v-if="tasks.selectedJob.resultAvailable && (tasks.selectedJob.resultRowCount ?? 0) > resultPageSize"
@@ -675,15 +676,12 @@ async function deleteSchedule(id: string) {
         </el-form-item>
         <el-form-item label="SQL">
           <div class="dialog-sql-editor">
-            <VueMonacoEditor
-              v-model:value="jobForm.sql"
+            <SqlEditor
+              v-model="jobForm.sql"
               language="sql"
               theme="vs"
               :options="editorOptions"
-            >
-              <div class="editor-loading">正在加载编辑器</div>
-              <template #failure><div class="editor-loading">编辑器加载失败</div></template>
-            </VueMonacoEditor>
+            />
           </div>
         </el-form-item>
       </el-form>
@@ -725,15 +723,12 @@ async function deleteSchedule(id: string) {
         </div>
         <el-form-item label="SQL">
           <div class="dialog-sql-editor schedule-sql-editor">
-            <VueMonacoEditor
-              v-model:value="scheduleForm.sql"
+            <SqlEditor
+              v-model="scheduleForm.sql"
               language="sql"
               theme="vs"
               :options="editorOptions"
-            >
-              <div class="editor-loading">正在加载编辑器</div>
-              <template #failure><div class="editor-loading">编辑器加载失败</div></template>
-            </VueMonacoEditor>
+            />
           </div>
         </el-form-item>
         <el-checkbox v-model="scheduleForm.enabled">创建后立即启用</el-checkbox>

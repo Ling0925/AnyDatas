@@ -1,11 +1,13 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
-import AppShell from './components/AppShell.vue'
 import { useAuthStore } from './stores/auth'
-import AgentView from './views/AgentView.vue'
-import LoginView from './views/LoginView.vue'
-import TasksView from './views/TasksView.vue'
-import WorkbenchView from './views/WorkbenchView.vue'
+
+// 页面级动态导入让登录、工作台、Agent 和任务管理形成独立加载边界。
+const AppShell = () => import('./components/AppShell.vue')
+const AgentView = () => import('./views/AgentView.vue')
+const LoginView = () => import('./views/LoginView.vue')
+const TasksView = () => import('./views/TasksView.vue')
+const WorkbenchView = () => import('./views/WorkbenchView.vue')
 
 const router = createRouter({
   history: createWebHistory(),
