@@ -9,6 +9,9 @@ export interface ThemeTransitionOrigin {
 }
 
 const THEME_STORAGE_KEY = 'anydatas.theme'
+const THEME_TRANSITION_DURATION = 360
+const THEME_TRANSITION_EASING = 'cubic-bezier(0.4, 0, 0.2, 1)'
+const THEME_TRANSITION_START_RADIUS = 12
 
 const preference = ref<ThemePreference>('system')
 const systemPrefersDark = ref(false)
@@ -189,9 +192,7 @@ function runViewThemeTransition(
 ) {
   const root = document.documentElement
   const geometry = resolveThemeTransitionGeometry(origin)
-  root.style.setProperty('--theme-transition-x', `${geometry.x}px`)
-  root.style.setProperty('--theme-transition-y', `${geometry.y}px`)
-  root.style.setProperty('--theme-transition-radius', `${geometry.radius}px`)
+  let revealAnimation: Animation | null = null
   isThemeTransitioning.value = true
 
   try {
@@ -200,18 +201,33 @@ function runViewThemeTransition(
       await nextTick()
     })
 
+    // 将按钮坐标直接写入伪元素并从 12px 慢启动，让首个可见帧贴着按钮而不是突然铺到页面中部。
+    void transition.ready
+      .then(() => {
+        revealAnimation = root.animate(
+          {
+            clipPath: [
+              `circle(${THEME_TRANSITION_START_RADIUS}px at ${geometry.x}px ${geometry.y}px)`,
+              `circle(${geometry.radius}px at ${geometry.x}px ${geometry.y}px)`,
+            ],
+          },
+          {
+            duration: THEME_TRANSITION_DURATION,
+            easing: THEME_TRANSITION_EASING,
+            fill: 'both',
+            pseudoElement: '::view-transition-new(root)',
+          },
+        )
+      })
+      .catch(() => undefined)
+
     void transition.finished
       .catch(() => undefined)
       .finally(() => {
-        root.style.removeProperty('--theme-transition-x')
-        root.style.removeProperty('--theme-transition-y')
-        root.style.removeProperty('--theme-transition-radius')
+        revealAnimation?.cancel()
         isThemeTransitioning.value = false
       })
   } catch {
-    root.style.removeProperty('--theme-transition-x')
-    root.style.removeProperty('--theme-transition-y')
-    root.style.removeProperty('--theme-transition-radius')
     isThemeTransitioning.value = false
     setThemePreference(nextPreference)
   }
