@@ -112,6 +112,8 @@ const displayedResult = computed(() => resultPage.value ?? tasks.selectedJob?.re
 
 let pollTimer: ReturnType<typeof setTimeout> | undefined
 let stopped = false
+let pollFailures = 0
+let refreshPaused = false
 
 onMounted(async () => {
   try {
@@ -143,8 +145,20 @@ function schedulePoll() {
       try {
         if (tasks.activeCount > 0) await tasks.loadJobs()
         else await tasks.loadSummary()
+        // 恢复成功：若此前提示过“自动刷新中断”，明确告知已恢复，避免用户误判数据仍是陈旧的。
+        if (refreshPaused) {
+          refreshPaused = false
+          ElMessage.success('后台任务自动刷新已恢复')
+        }
+        pollFailures = 0
       } catch {
-        // A transient refresh failure should not interrupt the current screen.
+        // 轮询失败不能中断循环（否则将永久停更），但也不该完全静默。连续失败到阈值时
+        // 提示一次“自动刷新已暂停”，让用户知道当前列表可能不是最新的，随后继续静默重试。
+        pollFailures += 1
+        if (pollFailures >= 3 && !refreshPaused) {
+          refreshPaused = true
+          ElMessage.warning('后台任务自动刷新暂时中断，正在后台重试…')
+        }
       }
     }
     schedulePoll()

@@ -22,7 +22,9 @@ const waveColors = computed(() => (
 
 const MIN_TIDE_DEPTH = 0.28
 const MAX_TIDE_DEPTH = 0.46
-const FRAME_INTERVAL = 1000 / 60
+// 纯装饰背景按 30 FPS 绘制：潮汐移动很慢，30 FPS 与 60 FPS 观感几乎无差，但每帧对整片网格
+// 的三角函数计算与重绘减半，明显降低登录页 CPU 占用与移动端电量。
+const FRAME_INTERVAL = 1000 / 30
 
 let context: CanvasRenderingContext2D | null = null
 let resizeObserver: ResizeObserver | null = null
@@ -285,9 +287,9 @@ function resizeCanvas() {
 }
 
 /**
- * 以 60 FPS 上限驱动二维海面。
+ * 以 30 FPS 上限驱动二维海面。
  * 为什么这么做：绘制节流相位与实际模拟耗时必须分开，否则高刷屏会重复计算余量；
- * 好处：60Hz 屏逐帧更新，90/120/144Hz 屏保持约 60 次绘制且潮位速度不漂移。
+ * 好处：各种刷新率的屏幕都稳定在约 30 次绘制，潮位速度不随刷新率漂移，且绘制成本可控。
  *
  * @param now 浏览器提供的当前高精度时间戳。
  */

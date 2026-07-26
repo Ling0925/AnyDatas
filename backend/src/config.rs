@@ -110,14 +110,22 @@ impl Config {
         if !(20_000..=500_000).contains(&agent_context_chars) {
             anyhow::bail!("ANYDATAS_AGENT_CONTEXT_CHARS must be between 20000 and 500000");
         }
+        let max_upload_bytes = parse_usize("ANYDATAS_MAX_UPLOAD_BYTES", 100 * 1024 * 1024)?;
+        if !(1_048_576..=5_368_709_120).contains(&max_upload_bytes) {
+            anyhow::bail!("ANYDATAS_MAX_UPLOAD_BYTES must be between 1048576 and 5368709120");
+        }
+        let session_ttl_days = parse_usize("ANYDATAS_SESSION_TTL_DAYS", 7)?;
+        if !(1..=3_650).contains(&session_ttl_days) {
+            anyhow::bail!("ANYDATAS_SESSION_TTL_DAYS must be between 1 and 3650");
+        }
 
         Ok(Self {
             bind: env::var("ANYDATAS_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_owned()),
             web_dir: PathBuf::from(
                 env::var("ANYDATAS_WEB_DIR").unwrap_or_else(|_| "frontend/dist".to_owned()),
             ),
-            max_upload_bytes: parse_usize("ANYDATAS_MAX_UPLOAD_BYTES", 100 * 1024 * 1024)?,
-            session_ttl_days: parse_usize("ANYDATAS_SESSION_TTL_DAYS", 7)? as i64,
+            max_upload_bytes,
+            session_ttl_days: session_ttl_days as i64,
             cookie_secure: parse_bool("ANYDATAS_COOKIE_SECURE", false)?,
             metrics_token: read_optional_secret(
                 "ANYDATAS_METRICS_TOKEN",

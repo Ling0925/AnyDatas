@@ -95,8 +95,8 @@ function displayValue(value: unknown): string {
     >
       <thead>
         <tr>
-          <th class="row-number">#</th>
-          <th v-for="column in columns" :key="column.name">
+          <th class="row-number" scope="col">#</th>
+          <th v-for="column in columns" :key="column.name" scope="col">
             <span>{{ column.name }}</span>
             <small>{{ column.dataType }}</small>
           </th>
