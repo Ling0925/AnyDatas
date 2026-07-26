@@ -3,19 +3,27 @@ mod ai;
 pub(crate) mod auth;
 mod data_sources;
 pub(crate) mod jobs;
+mod metrics;
 mod queries;
 mod saved_queries;
 pub(crate) mod schedules;
 pub(crate) mod source_tables;
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::Ordering};
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Request, State},
+    http::{
+        HeaderValue,
+        header::{HeaderName, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS},
+    },
+    middleware::{self, Next},
+    response::Response,
     routing::get,
 };
 use tower_http::{
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
@@ -35,12 +43,18 @@ pub fn router(state: Arc<AppState>, config: &Config) -> Router {
         .merge(auth::router())
         .merge(ai::router())
         .merge(agent::router())
-        .merge(data_sources::router())
+        .merge(data_sources::router(config.max_upload_bytes))
         .merge(source_tables::router())
         .merge(queries::router())
         .merge(saved_queries::router())
         .merge(jobs::router())
+        .merge(metrics::router())
         .merge(schedules::router())
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            observe_request,
+        ))
         .with_state(state);
     let static_files =
         ServeDir::new(&config.web_dir).fallback(ServeFile::new(config.web_dir.join("index.html")));
@@ -48,8 +62,56 @@ pub fn router(state: Arc<AppState>, config: &Config) -> Router {
     Router::new()
         .nest("/api", api)
         .fallback_service(static_files)
-        .layer(DefaultBodyLimit::max(config.max_upload_bytes))
+        .layer(middleware::from_fn(security_headers))
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(TraceLayer::new_for_http())
+}
+
+/// 记录低基数 HTTP 计数；请求详情继续交给 TraceLayer，指标不会暴露路径或租户信息。
+async fn observe_request(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    state
+        .metrics
+        .http_requests_total
+        .fetch_add(1, Ordering::Relaxed);
+    let response = next.run(request).await;
+    if response.status().is_server_error() {
+        state
+            .metrics
+            .http_server_errors_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    response
+}
+
+/// 为 API 和静态页面统一添加浏览器安全边界，同时保留 Monaco 所需的 Blob Worker。
+async fn security_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(
+            "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; \
+             form-action 'self'; img-src 'self' data: blob:; font-src 'self' data:; \
+             style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; \
+             connect-src 'self'",
+        ),
+    );
+    response
 }
 
 /// 存活探针只证明进程事件循环仍可响应，避免数据库短暂忙碌触发无意义重启。

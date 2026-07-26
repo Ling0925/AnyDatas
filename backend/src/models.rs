@@ -19,18 +19,23 @@ pub struct AppState {
     pub max_upload_bytes: usize,
     pub session_ttl_days: i64,
     pub cookie_secure: bool,
+    pub metrics_token: Option<String>,
+    pub allow_private_ai_endpoints: bool,
     pub secret_key: [u8; 32],
     pub http_client: reqwest::Client,
     pub query_control: Mutex<QueryControl>,
     pub cache_build_locks: CacheBuildLocks,
     pub query_semaphore: Arc<Semaphore>,
     pub file_parse_semaphore: Arc<Semaphore>,
+    pub query_max_concurrency: usize,
+    pub file_parse_max_concurrency: usize,
     pub resource_queue_timeout_seconds: u64,
     pub query_timeout_seconds: u64,
     pub background_query_timeout_seconds: u64,
     pub file_parse_timeout_seconds: u64,
     pub query_runtime: QueryRuntimeLimits,
     pub job_result_retention_days: i64,
+    pub metrics: RuntimeMetrics,
     pub agent_control: Mutex<HashMap<String, Arc<AgentRunControl>>>,
     pub agent_max_steps: usize,
     pub agent_timeout_seconds: u64,
@@ -38,6 +43,29 @@ pub struct AppState {
 }
 
 pub type SharedState = Arc<AppState>;
+
+pub struct RuntimeMetrics {
+    pub started_at: std::time::Instant,
+    pub http_requests_total: std::sync::atomic::AtomicU64,
+    pub http_server_errors_total: std::sync::atomic::AtomicU64,
+    pub job_worker_heartbeat: std::sync::atomic::AtomicI64,
+    pub schedule_worker_heartbeat: std::sync::atomic::AtomicI64,
+    pub maintenance_worker_heartbeat: std::sync::atomic::AtomicI64,
+}
+
+impl RuntimeMetrics {
+    /// 初始化进程内指标；原子计数让请求中间件和 Worker 更新时不需要额外锁。
+    pub fn new() -> Self {
+        Self {
+            started_at: std::time::Instant::now(),
+            http_requests_total: std::sync::atomic::AtomicU64::new(0),
+            http_server_errors_total: std::sync::atomic::AtomicU64::new(0),
+            job_worker_heartbeat: std::sync::atomic::AtomicI64::new(0),
+            schedule_worker_heartbeat: std::sync::atomic::AtomicI64::new(0),
+            maintenance_worker_heartbeat: std::sync::atomic::AtomicI64::new(0),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct QueryRuntimeLimits {

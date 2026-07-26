@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use sqlx::Row;
@@ -20,6 +23,10 @@ pub fn spawn_job_worker(state: Arc<AppState>) {
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            state
+                .metrics
+                .job_worker_heartbeat
+                .store(Utc::now().timestamp(), Ordering::Relaxed);
             if let Err(error) = claim_and_run_job(state.clone()).await {
                 tracing::error!(?error, "background job worker failed");
             }
@@ -33,6 +40,10 @@ pub fn spawn_schedule_worker(state: Arc<AppState>) {
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            state
+                .metrics
+                .schedule_worker_heartbeat
+                .store(Utc::now().timestamp(), Ordering::Relaxed);
             if let Err(error) = enqueue_due_schedules(state.clone()).await {
                 tracing::error!(?error, "schedule worker failed");
             }
@@ -46,8 +57,16 @@ pub fn spawn_maintenance_worker(state: Arc<AppState>) {
         let mut interval = tokio::time::interval(Duration::from_secs(60 * 60));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         interval.tick().await;
+        state
+            .metrics
+            .maintenance_worker_heartbeat
+            .store(Utc::now().timestamp(), Ordering::Relaxed);
         loop {
             interval.tick().await;
+            state
+                .metrics
+                .maintenance_worker_heartbeat
+                .store(Utc::now().timestamp(), Ordering::Relaxed);
             match crate::services::maintenance::cleanup_expired_job_results(&state).await {
                 Ok(removed) if removed > 0 => {
                     tracing::info!(removed, "expired background results cleaned");

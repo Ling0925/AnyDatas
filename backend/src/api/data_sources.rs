@@ -26,10 +26,13 @@ use crate::{
     services::{job_results, maintenance, resource_control, spreadsheet},
 };
 
-pub fn router() -> Router<SharedState> {
-    Router::new()
+pub fn router(max_upload_bytes: usize) -> Router<SharedState> {
+    let upload_routes = Router::new()
         .route("/data-sources", get(list).post(upload))
         .route("/data-sources/inspect", axum::routing::post(inspect_upload))
+        .layer(axum::extract::DefaultBodyLimit::max(max_upload_bytes));
+    Router::new()
+        .merge(upload_routes)
         .route("/data-sources/import", axum::routing::post(commit_import))
         .route(
             "/data-sources/imports/{token}",

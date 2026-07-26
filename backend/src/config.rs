@@ -11,6 +11,8 @@ pub struct Config {
     pub max_upload_bytes: usize,
     pub session_ttl_days: i64,
     pub cookie_secure: bool,
+    pub metrics_token: Option<String>,
+    pub allow_private_ai_endpoints: bool,
     pub query_max_concurrency: usize,
     pub file_parse_max_concurrency: usize,
     pub resource_queue_timeout_seconds: u64,
@@ -117,6 +119,11 @@ impl Config {
             max_upload_bytes: parse_usize("ANYDATAS_MAX_UPLOAD_BYTES", 100 * 1024 * 1024)?,
             session_ttl_days: parse_usize("ANYDATAS_SESSION_TTL_DAYS", 7)? as i64,
             cookie_secure: parse_bool("ANYDATAS_COOKIE_SECURE", false)?,
+            metrics_token: read_optional_secret(
+                "ANYDATAS_METRICS_TOKEN",
+                "ANYDATAS_METRICS_TOKEN_FILE",
+            )?,
+            allow_private_ai_endpoints: parse_bool("ANYDATAS_AI_ALLOW_PRIVATE_NETWORK", false)?,
             query_max_concurrency,
             file_parse_max_concurrency,
             resource_queue_timeout_seconds: resource_queue_timeout_seconds as u64,
@@ -165,4 +172,28 @@ fn parse_usize(name: &str, default: usize) -> Result<usize> {
             .with_context(|| format!("{name} must be a positive integer")),
         Err(_) => Ok(default),
     }
+}
+
+/// 从环境变量或挂载文件读取可选密钥，文件方式可避免令牌出现在 Compose 进程环境中。
+fn read_optional_secret(value_name: &str, file_name: &str) -> Result<Option<String>> {
+    if let Ok(value) = env::var(value_name) {
+        let value = value.trim().to_owned();
+        if !value.is_empty() {
+            return Ok(Some(value));
+        }
+    }
+    let Ok(path) = env::var(file_name) else {
+        return Ok(None);
+    };
+    let path = path.trim();
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let value = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read secret file configured by {file_name}"))?;
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        anyhow::bail!("{file_name} points to an empty secret file");
+    }
+    Ok(Some(value))
 }

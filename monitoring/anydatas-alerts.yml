@@ -8,24 +8,38 @@ groups:
           severity: critical
         annotations:
           summary: AnyDatas metrics endpoint is unavailable.
-      - alert: AnyDatasSchedulerDown
-        expr: anydatas_scheduler_up == 0
+      - alert: AnyDatasJobWorkerDown
+        expr: anydatas_worker_up{worker="jobs"} == 0
         for: 2m
         labels:
           severity: critical
         annotations:
-          summary: AnyDatas scheduler task is not active.
-      - alert: AnyDatasFailedNotificationDeliveries
-        expr: sum(anydatas_notification_deliveries{status="failed"}) > 0
+          summary: AnyDatas background job worker is not active.
+      - alert: AnyDatasScheduleWorkerDown
+        expr: anydatas_worker_up{worker="schedules"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: AnyDatas schedule worker is not active.
+      - alert: AnyDatasFailedJobs
+        expr: anydatas_jobs{status="failed"} > 0
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: AnyDatas has notification deliveries that exhausted their retries.
-      - alert: AnyDatasNotificationDeliveryBacklog
-        expr: sum(anydatas_notification_deliveries{status="queued"}) > 20
+          summary: AnyDatas has failed background jobs.
+      - alert: AnyDatasJobBacklog
+        expr: anydatas_jobs{status="queued"} > 20
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: AnyDatas has more than 20 queued notification deliveries.
+          summary: AnyDatas has more than 20 queued background jobs.
+      - alert: AnyDatasStorageLow
+        expr: anydatas_storage_available_bytes < 1073741824
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: AnyDatas data volume has less than 1 GiB available.

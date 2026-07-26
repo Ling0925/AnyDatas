@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
@@ -357,7 +358,7 @@ pub async fn call_chat(
     reasoning_effort: &str,
     stream_sink: Option<mpsc::UnboundedSender<AssistantStreamUpdate>>,
 ) -> AppResult<AssistantTurn> {
-    let endpoint = chat_endpoint(&settings.base_url)?;
+    let endpoint = validate_base_url_network(state, &settings.base_url).await?;
     let request_chars = messages
         .iter()
         .filter_map(|message| message.content.as_deref())
@@ -624,6 +625,89 @@ fn chat_endpoint(base_url: &str) -> AppResult<Url> {
     Url::parse(&endpoint).map_err(|_| AppError::BadRequest("Chat 接口地址无效".to_owned()))
 }
 
+/// 解析 OpenAI-compatible 地址并拒绝默认不可访问的本机、私网和保留网段。
+///
+/// DNS 校验与禁止重定向共同缩小 SSRF 面；确需连接局域网模型时必须由部署者显式
+/// 开启环境变量，工作区管理员不能自行扩大服务器网络权限。
+pub async fn validate_base_url_network(state: &SharedState, base_url: &str) -> AppResult<Url> {
+    let endpoint = chat_endpoint(base_url)?;
+    let host = endpoint
+        .host_str()
+        .ok_or_else(|| AppError::BadRequest("Chat 接口地址缺少主机名".to_owned()))?;
+    let port = endpoint
+        .port_or_known_default()
+        .ok_or_else(|| AppError::BadRequest("Chat 接口地址端口无效".to_owned()))?;
+    let addresses = if let Ok(address) = host.parse::<IpAddr>() {
+        vec![address]
+    } else {
+        tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|_| AppError::BadRequest("无法解析 AI 接口主机名".to_owned()))?
+            .map(|address| address.ip())
+            .collect::<Vec<_>>()
+    };
+    if addresses.is_empty() {
+        return Err(AppError::BadRequest("AI 接口主机名没有可用地址".to_owned()));
+    }
+    let hostname_is_local = host.eq_ignore_ascii_case("localhost")
+        || host.to_ascii_lowercase().ends_with(".localhost")
+        || host.to_ascii_lowercase().ends_with(".local");
+    let contains_restricted =
+        hostname_is_local || addresses.iter().copied().any(is_restricted_address);
+    if contains_restricted && !state.allow_private_ai_endpoints {
+        return Err(AppError::BadRequest(
+            "AI 接口解析到本机或私有网络；部署者需显式开启 ANYDATAS_AI_ALLOW_PRIVATE_NETWORK"
+                .to_owned(),
+        ));
+    }
+    if endpoint.scheme() == "http"
+        && addresses
+            .iter()
+            .copied()
+            .any(|address| !is_restricted_address(address))
+    {
+        return Err(AppError::BadRequest(
+            "公网 AI 接口必须使用 HTTPS".to_owned(),
+        ));
+    }
+    Ok(endpoint)
+}
+
+fn is_restricted_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => is_restricted_ipv4(address),
+        IpAddr::V6(address) => is_restricted_ipv6(address),
+    }
+}
+
+fn is_restricted_ipv4(address: Ipv4Addr) -> bool {
+    let [a, b, c, _] = address.octets();
+    address.is_private()
+        || address.is_loopback()
+        || address.is_link_local()
+        || address.is_unspecified()
+        || address.is_broadcast()
+        || a >= 224
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 0 && c == 2)
+        || (a == 198 && (b == 18 || b == 19))
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || a == 0
+}
+
+fn is_restricted_ipv6(address: Ipv6Addr) -> bool {
+    let first = address.segments()[0];
+    address.is_loopback()
+        || address.is_unspecified()
+        || address.is_multicast()
+        || first & 0xfe00 == 0xfc00
+        || first & 0xffc0 == 0xfe80
+        || address.segments()[..2] == [0x2001, 0x0db8]
+        || address.to_ipv4_mapped().is_some_and(is_restricted_ipv4)
+}
+
 /// 按字符压缩上游错误，避免代理返回整页 HTML 时污染 API 响应。
 fn truncate_chars(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
@@ -690,6 +774,19 @@ mod tests {
             chat_endpoint("https://api.openai.com/v1").unwrap().as_str(),
             "https://api.openai.com/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn classifies_private_and_public_ai_addresses() {
+        assert!(is_restricted_address("127.0.0.1".parse().unwrap()));
+        assert!(is_restricted_address("10.0.0.8".parse().unwrap()));
+        assert!(is_restricted_address("169.254.169.254".parse().unwrap()));
+        assert!(is_restricted_address("::1".parse().unwrap()));
+        assert!(is_restricted_address("fd00::1".parse().unwrap()));
+        assert!(!is_restricted_address("8.8.8.8".parse().unwrap()));
+        assert!(!is_restricted_address(
+            "2606:4700:4700::1111".parse().unwrap()
+        ));
     }
 
     #[test]

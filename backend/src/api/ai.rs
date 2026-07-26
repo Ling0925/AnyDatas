@@ -20,7 +20,7 @@ use crate::{
     db,
     error::{AppError, AppResult},
     models::{FieldDefinition, QueryRequest, QueryResponse, QueryTableBinding, SharedState},
-    services::{execution, query_bindings, query_engine, secrets, spreadsheet},
+    services::{agent_provider, execution, query_bindings, query_engine, secrets, spreadsheet},
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -249,6 +249,7 @@ async fn update_settings(
 ) -> AppResult<Json<AiSettingsResponse>> {
     auth.require_admin()?;
     let base_url = normalize_base_url(&request.base_url)?;
+    agent_provider::validate_base_url_network(&state, &base_url).await?;
     let model = normalize_model(&request.model, request.enabled)?;
     let existing = load_settings(&state, &auth.workspace_id).await?;
     let api_key_ciphertext = if request.clear_api_key {
@@ -852,7 +853,7 @@ async fn call_chat(
     api_key: Option<&str>,
     messages: Vec<ChatMessage>,
 ) -> AppResult<String> {
-    let endpoint = chat_endpoint(&settings.base_url)?;
+    let endpoint = agent_provider::validate_base_url_network(state, &settings.base_url).await?;
     let message_count = messages.len();
     let request_chars = messages
         .iter()
@@ -1083,6 +1084,7 @@ fn normalize_model(value: &str, required: bool) -> AppResult<String> {
 }
 
 /// 同时兼容 `/v1` 基址和完整 Chat 地址，减少不同 OpenAI-compatible 服务的配置差异。
+#[cfg(test)]
 fn chat_endpoint(base_url: &str) -> AppResult<Url> {
     let normalized = normalize_base_url(base_url)?;
     if normalized.ends_with("/chat/completions") {

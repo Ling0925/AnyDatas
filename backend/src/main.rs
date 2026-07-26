@@ -6,11 +6,11 @@ mod models;
 mod services;
 mod workers;
 
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::Context;
 use config::Config;
-use models::{AppState, QueryRuntimeLimits};
+use models::{AppState, QueryRuntimeLimits, RuntimeMetrics};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tracing::info;
@@ -33,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
     let secret_key = services::secrets::load_or_create(&config.data_dir)?;
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(90))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let pool = db::connect(&config.database_url).await?;
     db::recover_interrupted_jobs(&pool).await?;
@@ -44,12 +45,16 @@ async fn main() -> anyhow::Result<()> {
         max_upload_bytes: config.max_upload_bytes,
         session_ttl_days: config.session_ttl_days,
         cookie_secure: config.cookie_secure,
+        metrics_token: config.metrics_token.clone(),
+        allow_private_ai_endpoints: config.allow_private_ai_endpoints,
         secret_key,
         http_client,
         query_control: Default::default(),
         cache_build_locks: Default::default(),
         query_semaphore: Arc::new(Semaphore::new(config.query_max_concurrency)),
         file_parse_semaphore: Arc::new(Semaphore::new(config.file_parse_max_concurrency)),
+        query_max_concurrency: config.query_max_concurrency,
+        file_parse_max_concurrency: config.file_parse_max_concurrency,
         resource_queue_timeout_seconds: config.resource_queue_timeout_seconds,
         query_timeout_seconds: config.query_timeout_seconds,
         background_query_timeout_seconds: config.background_query_timeout_seconds,
@@ -62,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
             max_artifact_bytes: (config.job_result_max_mb as u64) * 1024 * 1024,
         },
         job_result_retention_days: config.job_result_retention_days,
+        metrics: RuntimeMetrics::new(),
         agent_control: Default::default(),
         agent_max_steps: config.agent_max_steps,
         agent_timeout_seconds: config.agent_timeout_seconds,
@@ -88,9 +94,12 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind {}", config.bind))?;
     info!(address = %config.bind, "AnyDatas API started");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 

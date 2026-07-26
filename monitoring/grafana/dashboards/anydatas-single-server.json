@@ -26,8 +26,8 @@
       "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
       "id": 1,
       "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
-      "targets": [{"expr": "anydatas_up", "legendFormat": "Control plane", "refId": "A"}],
-      "title": "Control Plane",
+      "targets": [{"expr": "up{job=\"anydatas\"}", "legendFormat": "API", "refId": "A"}],
+      "title": "API Availability",
       "type": "stat"
     },
     {
@@ -48,8 +48,8 @@
       "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0},
       "id": 2,
       "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
-      "targets": [{"expr": "anydatas_database_up", "legendFormat": "SQLite", "refId": "A"}],
-      "title": "Metadata Database",
+      "targets": [{"expr": "anydatas_build_info", "legendFormat": "Process", "refId": "A"}],
+      "title": "Process",
       "type": "stat"
     },
     {
@@ -70,8 +70,8 @@
       "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
       "id": 3,
       "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
-      "targets": [{"expr": "anydatas_scheduler_up", "legendFormat": "Scheduler", "refId": "A"}],
-      "title": "Scheduler",
+      "targets": [{"expr": "anydatas_worker_up{worker=\"schedules\"}", "legendFormat": "Scheduler", "refId": "A"}],
+      "title": "Schedule Worker",
       "type": "stat"
     },
     {
@@ -95,8 +95,8 @@
       "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
       "id": 4,
       "options": {"minVizHeight": 75, "minVizWidth": 75, "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showThresholdLabels": false, "showThresholdMarkers": true, "sizing": "auto"},
-      "targets": [{"expr": "100 * sum(anydatas_runs{status=\"succeeded\"}) / clamp_min(sum(anydatas_runs{status=~\"succeeded|failed|canceled\"}), 1)", "legendFormat": "Success rate", "refId": "A"}],
-      "title": "Retained Run Success Rate",
+      "targets": [{"expr": "100 * sum(anydatas_jobs{status=\"succeeded\"}) / clamp_min(sum(anydatas_jobs{status=~\"succeeded|failed|canceled\"}), 1)", "legendFormat": "Success rate", "refId": "A"}],
+      "title": "Background Job Success Rate",
       "type": "gauge"
     },
     {
@@ -105,8 +105,8 @@
       "gridPos": {"h": 9, "w": 16, "x": 0, "y": 5},
       "id": 5,
       "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"hideZeros": false, "mode": "multi", "sort": "desc"}},
-      "targets": [{"expr": "anydatas_runs", "legendFormat": "{{status}}", "refId": "A"}],
-      "title": "Retained Runs by Status",
+      "targets": [{"expr": "anydatas_jobs", "legendFormat": "{{status}}", "refId": "A"}],
+      "title": "Background Jobs by Status",
       "type": "timeseries"
     },
     {
@@ -115,8 +115,8 @@
       "gridPos": {"h": 9, "w": 8, "x": 16, "y": 5},
       "id": 6,
       "options": {"displayLabels": ["name", "value"], "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "values": ["value"]}, "pieType": "donut", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "tooltip": {"hideZeros": false, "mode": "single", "sort": "none"}},
-      "targets": [{"expr": "anydatas_notification_deliveries", "legendFormat": "{{status}}", "refId": "A"}],
-      "title": "Notification Deliveries",
+      "targets": [{"expr": "anydatas_agent_runs", "legendFormat": "{{status}}", "refId": "A"}],
+      "title": "Agent Runs",
       "type": "piechart"
     },
     {
@@ -126,10 +126,10 @@
       "id": 7,
       "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
       "targets": [
-        {"expr": "anydatas_workspaces", "legendFormat": "Workspaces", "refId": "A"},
-        {"expr": "anydatas_workspace_members", "legendFormat": "Memberships", "refId": "B"},
-        {"expr": "anydatas_projects", "legendFormat": "Projects", "refId": "C"},
-        {"expr": "anydatas_reports", "legendFormat": "Reports", "refId": "D"}
+        {"expr": "anydatas_data_sources", "legendFormat": "Data sources", "refId": "A"},
+        {"expr": "anydatas_source_rows", "legendFormat": "Logical rows", "refId": "B"},
+        {"expr": "anydatas_storage_bytes{kind=\"table_cache\"}", "legendFormat": "Table cache bytes", "refId": "C"},
+        {"expr": "anydatas_storage_bytes{kind=\"job_results\"}", "legendFormat": "Result bytes", "refId": "D"}
       ],
       "title": "Platform Resources",
       "type": "stat"
@@ -140,8 +140,8 @@
       "gridPos": {"h": 7, "w": 12, "x": 12, "y": 14},
       "id": 8,
       "options": {"displayMode": "gradient", "legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": false}, "maxVizHeight": 300, "minVizHeight": 16, "minVizWidth": 8, "namePlacement": "auto", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showUnfilled": true, "sizing": "auto", "text": {}, "valueMode": "color"},
-      "targets": [{"expr": "anydatas_schedules", "legendFormat": "{{state}}", "refId": "A"}],
-      "title": "Schedules",
+      "targets": [{"expr": "anydatas_query_slots", "legendFormat": "{{state}}", "refId": "A"}],
+      "title": "Query Slots",
       "type": "bargauge"
     }
   ],

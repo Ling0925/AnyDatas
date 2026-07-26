@@ -1,4 +1,4 @@
-use std::sync::LazyLock;
+use std::{net::SocketAddr, sync::LazyLock};
 
 use argon2::{
     Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
@@ -6,7 +6,7 @@ use argon2::{
 };
 use axum::{
     Json, Router,
-    extract::{FromRequestParts, State},
+    extract::{ConnectInfo, FromRequestParts, State},
     http::{StatusCode, request::Parts},
     routing::{get, post},
 };
@@ -27,6 +27,7 @@ const SESSION_COOKIE_NAME: &str = "anydatas_session";
 const PASSWORD_MIN_LENGTH: usize = 12;
 const PASSWORD_MAX_LENGTH: usize = 1_024;
 const LOGIN_FAILURE_LIMIT: i64 = 5;
+const LOGIN_IP_FAILURE_LIMIT: i64 = 25;
 const LOGIN_WINDOW_MINUTES: i64 = 15;
 const LOGIN_LOCK_MINUTES: i64 = 15;
 
@@ -240,13 +241,16 @@ async fn setup(
 
 async fn login(
     State(state): State<SharedState>,
+    ConnectInfo(remote_address): ConnectInfo<SocketAddr>,
     jar: CookieJar,
     Json(request): Json<LoginRequest>,
 ) -> AppResult<(CookieJar, Json<AuthContext>)> {
     let email = normalize_email(&request.email)
         .map_err(|_| AppError::Unauthorized("邮箱或密码错误".to_owned()))?;
-    let attempt_key = token_hash(&email);
-    check_login_limit(&state, &attempt_key).await?;
+    let pair_attempt_key = token_hash(&format!("email-ip:{email}:{}", remote_address.ip()));
+    let ip_attempt_key = token_hash(&format!("ip:{}", remote_address.ip()));
+    check_login_limit(&state, &pair_attempt_key).await?;
+    check_login_limit(&state, &ip_attempt_key).await?;
 
     let row = sqlx::query_as::<_, LoginUserRow>(
         r#"
@@ -275,11 +279,12 @@ async fn login(
             .await
             .map_err(|error| AppError::Internal(format!("密码检查线程异常: {error}")))?;
     let Some(row) = row.filter(|_| password_matches) else {
-        record_login_failure(&state, &attempt_key).await?;
+        record_login_failure(&state, &pair_attempt_key, LOGIN_FAILURE_LIMIT).await?;
+        record_login_failure(&state, &ip_attempt_key, LOGIN_IP_FAILURE_LIMIT).await?;
         return Err(AppError::Unauthorized("邮箱或密码错误".to_owned()));
     };
     sqlx::query("DELETE FROM auth_login_attempts WHERE key_hash = ?")
-        .bind(&attempt_key)
+        .bind(&pair_attempt_key)
         .execute(&state.pool)
         .await?;
 
@@ -400,7 +405,11 @@ async fn check_login_limit(state: &SharedState, key: &str) -> AppResult<()> {
     Ok(())
 }
 
-async fn record_login_failure(state: &SharedState, key: &str) -> AppResult<()> {
+/// 按调用方指定阈值记录失败，邮箱与 IP 组合使用较低阈值，IP 总量使用较高阈值。
+///
+/// 攻击者只能锁住自己来源 IP 下的邮箱组合，无法仅凭知道邮箱就在所有网络位置阻止
+/// 真实用户登录，同时单个来源仍不能无限枚举账号。
+async fn record_login_failure(state: &SharedState, key: &str, failure_limit: i64) -> AppResult<()> {
     let existing = sqlx::query_as::<_, LoginAttemptRow>(
         "SELECT failed_count, first_failed_at, locked_until FROM auth_login_attempts WHERE key_hash = ?",
     )
@@ -417,7 +426,7 @@ async fn record_login_failure(state: &SharedState, key: &str) -> AppResult<()> {
         }
         _ => (now.to_rfc3339(), 1),
     };
-    let locked_until = (failed_count >= LOGIN_FAILURE_LIMIT)
+    let locked_until = (failed_count >= failure_limit)
         .then(|| (now + Duration::minutes(LOGIN_LOCK_MINUTES)).to_rfc3339());
     sqlx::query(
         r#"
