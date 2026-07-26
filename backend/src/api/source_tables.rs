@@ -18,7 +18,7 @@ use crate::{
         SharedState, SourceTable, SourceTableListParams, SourceTableRow, TableData,
         UpdateSourceTableRequest,
     },
-    services::spreadsheet,
+    services::{maintenance, resource_control, spreadsheet},
 };
 
 /// 注册逻辑表路由，使 Sheet、范围配置和预览拥有独立于物理文件的生命周期。
@@ -85,6 +85,7 @@ async fn create(
         .await?
         .ok_or_else(|| AppError::NotFound("数据文件不存在".to_owned()))?;
     let validated = validate_config(
+        &state,
         &source,
         &request.name,
         &request.sheet_name,
@@ -142,10 +143,16 @@ async fn update(
 ) -> AppResult<Json<SourceTable>> {
     auth.require_analyst()?;
     let current = required_table(&state, &id, &auth.workspace_id).await?;
+    let previous_cache_key =
+        sqlx::query_scalar::<_, Option<String>>("SELECT cache_key FROM source_tables WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&state.pool)
+            .await?;
     let source = db::get_data_source(&state.pool, &current.source_id, Some(&auth.workspace_id))
         .await?
         .ok_or_else(|| AppError::NotFound("数据文件不存在".to_owned()))?;
     let validated = validate_config(
+        &state,
         &source,
         &request.name,
         &request.sheet_name,
@@ -183,6 +190,11 @@ async fn update(
     .bind(&id)
     .execute(&state.pool)
     .await?;
+    if let Some(cache_key) = previous_cache_key {
+        maintenance::remove_cache_keys_if_unreferenced(&state, [cache_key])
+            .await
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+    }
     Ok(Json(
         required_table(&state, &id, &auth.workspace_id)
             .await?
@@ -208,7 +220,7 @@ async fn preview(
     let query_sheet = sheet.clone();
     let query_start = start_cell.clone();
     let query_end = end_cell.clone();
-    let mut table = tokio::task::spawn_blocking(move || {
+    let mut table = resource_control::run_file_task(&state, "逻辑表预览", move || {
         spreadsheet::read_table_range(
             &path,
             &kind,
@@ -219,9 +231,7 @@ async fn preview(
             Some(limit),
         )
     })
-    .await
-    .map_err(|error| AppError::Internal(format!("预览线程异常: {error}")))?
-    .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    .await?;
     let persisted_fields: Vec<FieldDefinition> =
         serde_json::from_str(&source_table.schema_json).unwrap_or_default();
     table.columns = spreadsheet::apply_field_overrides(
@@ -253,10 +263,20 @@ async fn delete_one(
             "默认逻辑表不能单独删除，请删除对应数据文件".to_owned(),
         ));
     }
+    let cache_key =
+        sqlx::query_scalar::<_, Option<String>>("SELECT cache_key FROM source_tables WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&state.pool)
+            .await?;
     sqlx::query("DELETE FROM source_tables WHERE id = ?")
-        .bind(id)
+        .bind(&id)
         .execute(&state.pool)
         .await?;
+    if let Some(cache_key) = cache_key {
+        maintenance::remove_cache_keys_if_unreferenced(&state, [cache_key])
+            .await
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -281,6 +301,7 @@ struct ValidatedTableConfig {
 
 /// 校验 Sheet 与范围并读取样本，保存时即得到可信字段结构，查询阶段不再猜测配置是否合法。
 async fn validate_config(
+    state: &SharedState,
     source: &DataSourceRow,
     name: &str,
     sheet_name: &str,
@@ -306,7 +327,7 @@ async fn validate_config(
     let sheet = sheet_name.to_owned();
     let query_start = start_cell.clone();
     let query_end = end_cell.clone();
-    let table = tokio::task::spawn_blocking(move || {
+    let table = resource_control::run_file_task(state, "逻辑表配置检查", move || {
         spreadsheet::read_table_range(
             &path,
             &kind,
@@ -317,9 +338,7 @@ async fn validate_config(
             Some(2_000),
         )
     })
-    .await
-    .map_err(|error| AppError::Internal(format!("文件检查线程异常: {error}")))?
-    .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    .await?;
     if table.columns.is_empty() {
         return Err(AppError::BadRequest(
             "所选范围中没有可读取的数据".to_owned(),

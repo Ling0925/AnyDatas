@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -11,7 +11,7 @@ use duckdb::InterruptHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{FromRow, SqlitePool};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 
 pub struct AppState {
     pub pool: SqlitePool,
@@ -22,7 +22,14 @@ pub struct AppState {
     pub secret_key: [u8; 32],
     pub http_client: reqwest::Client,
     pub query_control: Mutex<QueryControl>,
-    pub cache_build_lock: Mutex<()>,
+    pub cache_build_locks: CacheBuildLocks,
+    pub query_semaphore: Arc<Semaphore>,
+    pub file_parse_semaphore: Arc<Semaphore>,
+    pub resource_queue_timeout_seconds: u64,
+    pub query_timeout_seconds: u64,
+    pub background_query_timeout_seconds: u64,
+    pub file_parse_timeout_seconds: u64,
+    pub query_runtime: QueryRuntimeLimits,
     pub agent_control: Mutex<HashMap<String, Arc<AgentRunControl>>>,
     pub agent_max_steps: usize,
     pub agent_timeout_seconds: u64,
@@ -30,6 +37,36 @@ pub struct AppState {
 }
 
 pub type SharedState = Arc<AppState>;
+
+#[derive(Debug, Clone)]
+pub struct QueryRuntimeLimits {
+    pub memory_limit_mb: usize,
+    pub threads: usize,
+    pub temp_limit_mb: usize,
+    pub min_free_space_bytes: u64,
+}
+
+/// 按缓存键维护互斥量，避免不同 Sheet 的首次查询被一把全局锁串行化。
+#[derive(Default)]
+pub struct CacheBuildLocks {
+    locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
+}
+
+impl CacheBuildLocks {
+    /// 获取指定缓存键的共享锁；弱引用可让不再使用的键自动退出注册表。
+    ///
+    /// 同一缓存仍只构建一次，而互不相关的文件可以并行准备，提升多文件工作区的吞吐。
+    pub fn lock_for(&self, key: &str) -> Result<Arc<Mutex<()>>, &'static str> {
+        let mut locks = self.locks.lock().map_err(|_| "缓存锁注册表不可用")?;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
+            return Ok(lock);
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(key.to_owned(), Arc::downgrade(&lock));
+        Ok(lock)
+    }
+}
 
 #[derive(Default)]
 pub struct QueryControl {

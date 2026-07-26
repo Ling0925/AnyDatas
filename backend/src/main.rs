@@ -10,8 +10,9 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use config::Config;
-use models::AppState;
+use models::{AppState, QueryRuntimeLimits};
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -46,13 +47,33 @@ async fn main() -> anyhow::Result<()> {
         secret_key,
         http_client,
         query_control: Default::default(),
-        cache_build_lock: Default::default(),
+        cache_build_locks: Default::default(),
+        query_semaphore: Arc::new(Semaphore::new(config.query_max_concurrency)),
+        file_parse_semaphore: Arc::new(Semaphore::new(config.file_parse_max_concurrency)),
+        resource_queue_timeout_seconds: config.resource_queue_timeout_seconds,
+        query_timeout_seconds: config.query_timeout_seconds,
+        background_query_timeout_seconds: config.background_query_timeout_seconds,
+        file_parse_timeout_seconds: config.file_parse_timeout_seconds,
+        query_runtime: QueryRuntimeLimits {
+            memory_limit_mb: config.duckdb_memory_limit_mb,
+            threads: config.duckdb_threads,
+            temp_limit_mb: config.duckdb_temp_limit_mb,
+            min_free_space_bytes: (config.min_free_space_mb as u64) * 1024 * 1024,
+        },
         agent_control: Default::default(),
         agent_max_steps: config.agent_max_steps,
         agent_timeout_seconds: config.agent_timeout_seconds,
         agent_context_chars: config.agent_context_chars,
     });
 
+    let cleanup = services::maintenance::cleanup_startup_storage(&state).await?;
+    info!(
+        query_directories = cleanup.query_directories,
+        temporary_caches = cleanup.temporary_caches,
+        orphaned_caches = cleanup.orphaned_caches,
+        expired_imports = cleanup.expired_imports,
+        "startup storage cleanup completed"
+    );
     workers::spawn_job_worker(state.clone());
     workers::spawn_schedule_worker(state.clone());
 

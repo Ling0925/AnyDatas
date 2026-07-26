@@ -1,10 +1,12 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, path::PathBuf, time::Duration};
+
+use uuid::Uuid;
 
 use crate::{
     db,
     error::{AppError, AppResult},
     models::{QueryRequest, QueryResponse, QueryTableBinding, SharedState, SourceTableRow},
-    services::query_engine,
+    services::{query_engine, resource_control},
 };
 
 /// 执行当前工作区的交互式查询，工作区参数确保每个绑定都经过租户权限校验。
@@ -38,30 +40,54 @@ async fn execute_request_inner(
     let cache_root = state.data_dir.join("table-cache");
     let work_root = state.data_dir.join("query-work");
     let query_state = state.clone();
-    let query_job_id = job_id.clone();
+    let execution_id = job_id
+        .clone()
+        .unwrap_or_else(|| format!("interactive-{}", Uuid::new_v4()));
+    let timeout_seconds = if job_id.is_some() {
+        state.background_query_timeout_seconds
+    } else {
+        state.query_timeout_seconds
+    };
+    let query_execution_id = execution_id.clone();
+    let permit = resource_control::acquire_permit(
+        state.query_semaphore.clone(),
+        state.resource_queue_timeout_seconds,
+        "查询执行器",
+    )
+    .await?;
 
-    let result = tokio::task::spawn_blocking(move || {
+    let handle = tokio::task::spawn_blocking(move || {
+        // 许可必须由真实查询线程持有，HTTP 超时返回后也不会错误释放并发名额。
+        let _permit = permit;
         query_engine::execute_query(
             sources,
             &sql,
             limit,
-            &cache_root,
-            &work_root,
-            &query_state.cache_build_lock,
-            query_job_id
-                .as_deref()
-                .map(|id| (&query_state.query_control, id)),
+            query_engine::QueryExecutionContext {
+                cache_root: &cache_root,
+                work_root: &work_root,
+                cache_build_locks: &query_state.cache_build_locks,
+                runtime: &query_state.query_runtime,
+                execution_control: Some((&query_state.query_control, &query_execution_id)),
+            },
         )
-    })
-    .await
-    .map_err(|error| AppError::Internal(format!("查询线程异常: {error}")))?;
-
-    if let Some(job_id) = &job_id
-        && let Ok(mut control) = state.query_control.lock()
-    {
-        control.active.remove(job_id);
-        control.canceled.remove(job_id);
-    }
+    });
+    let result = match tokio::time::timeout(Duration::from_secs(timeout_seconds), handle).await {
+        Ok(result) => {
+            result.map_err(|error| AppError::Internal(format!("查询线程异常: {error}")))?
+        }
+        Err(_) => {
+            cancel_execution(&state, &execution_id);
+            let advice = if job_id.is_some() {
+                "后台任务已发送中断信号"
+            } else {
+                "已发送中断信号；可改为后台任务执行"
+            };
+            return Err(AppError::Timeout(format!(
+                "查询超过 {timeout_seconds} 秒，{advice}"
+            )));
+        }
+    };
 
     let execution = result.map_err(|error| AppError::BadRequest(error.to_string()))?;
     for update in execution.cache_updates {
@@ -86,6 +112,17 @@ async fn execute_request_inner(
         .await?;
     }
     Ok(execution.response)
+}
+
+/// 同时记录取消状态并中断已建立的 DuckDB 连接，覆盖缓存导入和 SQL 两个阶段。
+fn cancel_execution(state: &SharedState, execution_id: &str) {
+    let handle = state.query_control.lock().ok().and_then(|mut control| {
+        control.canceled.insert(execution_id.to_owned());
+        control.active.get(execution_id).cloned()
+    });
+    if let Some(handle) = handle {
+        handle.interrupt();
+    }
 }
 
 /// 将兼容的 sourceId 或新的 tables 绑定解析为执行源，并阻止重复及非法别名。

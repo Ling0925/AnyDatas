@@ -2,7 +2,6 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
     time::Instant,
 };
 
@@ -18,8 +17,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    models::{FieldDefinition, QueryControl, QueryResponse},
-    services::spreadsheet,
+    models::{CacheBuildLocks, FieldDefinition, QueryControl, QueryResponse, QueryRuntimeLimits},
+    services::{maintenance, spreadsheet},
 };
 
 const SCHEMA_SAMPLE_ROWS: usize = 2_000;
@@ -55,6 +54,14 @@ pub struct QueryExecution {
     pub cache_updates: Vec<QueryCacheUpdate>,
 }
 
+pub struct QueryExecutionContext<'a> {
+    pub cache_root: &'a Path,
+    pub work_root: &'a Path,
+    pub cache_build_locks: &'a CacheBuildLocks,
+    pub runtime: &'a QueryRuntimeLimits,
+    pub execution_control: Option<(&'a std::sync::Mutex<QueryControl>, &'a str)>,
+}
+
 struct PreparedSource {
     alias: String,
     cache_path: PathBuf,
@@ -65,35 +72,41 @@ pub fn execute_query(
     sources: Vec<QuerySource>,
     sql: &str,
     limit: usize,
-    cache_root: &Path,
-    work_root: &Path,
-    cache_build_lock: &Mutex<()>,
-    job_control: Option<(&std::sync::Mutex<QueryControl>, &str)>,
+    context: QueryExecutionContext<'_>,
 ) -> Result<QueryExecution> {
     validate_read_only_sql(sql)?;
     validate_sources(&sources)?;
+    let active_query = context
+        .execution_control
+        .map(|(control, execution_id)| ActiveQueryGuard::register(control, execution_id))
+        .transpose()?;
+    if let Some(query) = &active_query {
+        query.ensure_running()?;
+    }
     let started = Instant::now();
     let mut prepared_sources = Vec::with_capacity(sources.len());
     let mut cache_updates = Vec::with_capacity(sources.len());
     for source in &sources {
-        ensure_job_running(job_control)?;
-        let (prepared, update) =
-            prepare_source_cache(source, cache_root, cache_build_lock, job_control)?;
+        ensure_query_running(context.execution_control)?;
+        let (prepared, update) = prepare_source_cache(
+            source,
+            context.cache_root,
+            context.cache_build_locks,
+            context.runtime,
+            context.execution_control,
+        )
+        .with_context(|| format!("逻辑表 {} 缓存构建失败", source.alias))?;
         prepared_sources.push(prepared);
         cache_updates.push(update);
     }
 
-    let workspace = QueryWorkspace::create(work_root)?;
+    let workspace = QueryWorkspace::create(context.work_root)?;
     let connection = Connection::open(workspace.database_path()).context("无法初始化 DuckDB")?;
-    connection.execute_batch(
-        "SET autoinstall_known_extensions = false; SET autoload_known_extensions = false;",
-    )?;
+    configure_connection(&connection, context.runtime, Some(&workspace.temp_path()))?;
     attach_cached_sources(&connection, &prepared_sources)?;
     connection.execute_batch("SET enable_external_access = false;")?;
-    let active_query = job_control
-        .map(|(control, job_id)| ActiveQueryGuard::register(control, job_id, &connection))
-        .transpose()?;
     if let Some(query) = &active_query {
+        query.attach(&connection)?;
         query.ensure_running()?;
     }
     let clean_sql = sql.trim().trim_end_matches(';').trim();
@@ -206,8 +219,9 @@ fn source_cache_key(source: &QuerySource) -> String {
 fn prepare_source_cache(
     source: &QuerySource,
     cache_root: &Path,
-    cache_build_lock: &Mutex<()>,
-    job_control: Option<(&std::sync::Mutex<QueryControl>, &str)>,
+    cache_build_locks: &CacheBuildLocks,
+    runtime: &QueryRuntimeLimits,
+    execution_control: Option<(&std::sync::Mutex<QueryControl>, &str)>,
 ) -> Result<(PreparedSource, QueryCacheUpdate)> {
     fs::create_dir_all(cache_root)
         .with_context(|| format!("无法创建表缓存目录 {}", cache_root.display()))?;
@@ -216,14 +230,17 @@ fn prepare_source_cache(
     let mut columns = source.columns.clone();
     let mut row_count = source.row_count;
     {
-        let _guard = cache_build_lock
+        let cache_lock = cache_build_locks
+            .lock_for(&cache_key)
+            .map_err(anyhow::Error::msg)?;
+        let _guard = cache_lock
             .lock()
             .map_err(|_| anyhow::anyhow!("表缓存构建器不可用"))?;
         if !cache_path.exists() || columns.is_empty() {
             if cache_path.exists() {
                 fs::remove_file(&cache_path)?;
             }
-            let metadata = build_source_cache(source, &cache_path, job_control)?;
+            let metadata = build_source_cache(source, &cache_path, runtime, execution_control)?;
             columns = metadata.0;
             row_count = metadata.1;
         }
@@ -247,8 +264,14 @@ fn prepare_source_cache(
 fn build_source_cache(
     source: &QuerySource,
     cache_path: &Path,
-    job_control: Option<(&std::sync::Mutex<QueryControl>, &str)>,
+    runtime: &QueryRuntimeLimits,
+    execution_control: Option<(&std::sync::Mutex<QueryControl>, &str)>,
 ) -> Result<(Vec<FieldDefinition>, usize)> {
+    maintenance::ensure_free_space(
+        cache_path.parent().unwrap_or_else(|| Path::new(".")),
+        runtime.min_free_space_bytes,
+        0,
+    )?;
     let sample = spreadsheet::read_table_range(
         &source.path,
         &source.file_kind,
@@ -268,9 +291,8 @@ fn build_source_cache(
     let temporary_path = cache_path.with_extension(format!("{}.tmp", Uuid::new_v4()));
     let result = (|| -> Result<usize> {
         let connection = Connection::open(&temporary_path).context("无法初始化表缓存")?;
-        connection.execute_batch(
-            "SET enable_external_access = false; SET autoinstall_known_extensions = false; SET autoload_known_extensions = false;",
-        )?;
+        configure_connection(&connection, runtime, None)?;
+        connection.execute_batch("SET enable_external_access = false;")?;
         create_cache_table(&connection, &columns)?;
         let mut appender = connection.appender("cached_data")?;
         let mut imported_rows = 0usize;
@@ -286,12 +308,23 @@ fn build_source_cache(
             columns.len(),
             |row| {
                 if imported_rows.is_multiple_of(CANCEL_CHECK_INTERVAL) {
-                    ensure_job_running(job_control)?;
+                    ensure_query_running(execution_control)?;
                 }
                 let values = row
                     .iter()
                     .zip(&columns)
-                    .map(|(value, column)| json_to_duck(value, &column.data_type));
+                    .map(|(value, column)| {
+                        json_to_duck(value, &column.data_type).with_context(|| {
+                            format!(
+                                "第 {} 条数据的字段“{}”无法转换为{}，原始值为 {}",
+                                imported_rows + 1,
+                                column.name,
+                                column.data_type,
+                                display_value(value)
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 appender.append_row(appender_params_from_iter(values))?;
                 imported_rows += 1;
                 Ok(())
@@ -341,13 +374,15 @@ fn attach_cached_sources(connection: &Connection, sources: &[PreparedSource]) ->
     Ok(())
 }
 
-/// 检查后台任务取消标记，缓存导入期间也能及时停止而不必等待 SQL 阶段。
-fn ensure_job_running(job_control: Option<(&std::sync::Mutex<QueryControl>, &str)>) -> Result<()> {
-    if let Some((control, job_id)) = job_control {
+/// 检查查询取消标记，缓存导入期间也能及时停止而不必等待 SQL 阶段。
+fn ensure_query_running(
+    execution_control: Option<(&std::sync::Mutex<QueryControl>, &str)>,
+) -> Result<()> {
+    if let Some((control, execution_id)) = execution_control {
         let queries = control
             .lock()
             .map_err(|_| anyhow::anyhow!("任务控制器不可用"))?;
-        if queries.canceled.contains(job_id) {
+        if queries.canceled.contains(execution_id) {
             bail!("任务已取消");
         }
     }
@@ -360,21 +395,30 @@ struct ActiveQueryGuard<'a> {
 }
 
 impl<'a> ActiveQueryGuard<'a> {
-    fn register(
-        control: &'a std::sync::Mutex<QueryControl>,
-        job_id: &str,
-        connection: &Connection,
-    ) -> Result<Self> {
-        let mut queries = control
+    /// 在读取源文件前注册执行 id，超时发生在缓存构建阶段时也能传播取消信号。
+    fn register(control: &'a std::sync::Mutex<QueryControl>, execution_id: &str) -> Result<Self> {
+        let queries = control
+            .lock()
+            .map_err(|_| anyhow::anyhow!("任务控制器不可用"))?;
+        if queries.canceled.contains(execution_id) {
+            bail!("任务已取消");
+        }
+        Ok(Self {
+            control,
+            job_id: execution_id.to_owned(),
+        })
+    }
+
+    /// DuckDB 连接建立后注册中断句柄，使 API 超时和用户取消能立即停止正在执行的 SQL。
+    fn attach(&self, connection: &Connection) -> Result<()> {
+        let mut queries = self
+            .control
             .lock()
             .map_err(|_| anyhow::anyhow!("任务控制器不可用"))?;
         queries
             .active
-            .insert(job_id.to_owned(), connection.interrupt_handle());
-        Ok(Self {
-            control,
-            job_id: job_id.to_owned(),
-        })
+            .insert(self.job_id.clone(), connection.interrupt_handle());
+        Ok(())
     }
 
     fn ensure_running(&self) -> Result<()> {
@@ -433,6 +477,10 @@ impl QueryWorkspace {
     fn database_path(&self) -> PathBuf {
         self.path.join("query.duckdb")
     }
+
+    fn temp_path(&self) -> PathBuf {
+        self.path.join("temp")
+    }
 }
 
 impl Drop for QueryWorkspace {
@@ -441,6 +489,35 @@ impl Drop for QueryWorkspace {
             tracing::warn!(?error, path = %self.path.display(), "failed to remove query workspace");
         }
     }
+}
+
+/// 为每个 DuckDB 连接应用同一组单机资源边界，并关闭自动扩展下载。
+///
+/// 内存、线程和临时盘限制都由服务端生成，用户 SQL 无法通过 SET 覆盖这些值；
+/// 查询超出预算时会明确失败，而不会把整台服务器拖入交换或磁盘占满状态。
+fn configure_connection(
+    connection: &Connection,
+    runtime: &QueryRuntimeLimits,
+    temp_directory: Option<&Path>,
+) -> Result<()> {
+    let mut statements = format!(
+        "SET memory_limit = '{}MB';\
+         SET threads = {};\
+         SET max_temp_directory_size = '{}MB';\
+         SET autoinstall_known_extensions = false;\
+         SET autoload_known_extensions = false;",
+        runtime.memory_limit_mb, runtime.threads, runtime.temp_limit_mb
+    );
+    if let Some(temp_directory) = temp_directory {
+        fs::create_dir_all(temp_directory)
+            .with_context(|| format!("无法创建 DuckDB 临时目录 {}", temp_directory.display()))?;
+        statements.push_str(&format!(
+            "SET temp_directory = {};",
+            quote_string_literal(&temp_directory.to_string_lossy())
+        ));
+    }
+    connection.execute_batch(&statements)?;
+    Ok(())
 }
 
 /// 创建缓存数据表并根据采样类型选择 DuckDB 列类型，兼顾聚合性能与原始值兼容性。
@@ -481,31 +558,51 @@ fn duck_column_type(data_type: &str) -> &'static str {
     }
 }
 
-fn json_to_duck(value: &Value, data_type: &str) -> DuckValue {
+/// 将原始值转换为用户确认的字段类型，失败必须上抛而不能静默替换为 NULL。
+///
+/// 明确失败可以防止聚合结果在不知情的情况下少算数据，并让用户回到导入配置把
+/// 混合列改为文本类型。
+fn json_to_duck(value: &Value, data_type: &str) -> Result<DuckValue> {
     if value.is_null() {
-        return DuckValue::Null;
+        return Ok(DuckValue::Null);
     }
-    match data_type {
+    let converted = match data_type {
         "整数" => integer_value(value)
             .map(DuckValue::BigInt)
-            .unwrap_or(DuckValue::Null),
+            .context("不是有效整数")?,
         "小数" => decimal_value(value)
             .map(DuckValue::Double)
-            .unwrap_or(DuckValue::Null),
+            .context("不是有效小数")?,
         "布尔" => boolean_value(value)
             .map(DuckValue::Boolean)
-            .unwrap_or(DuckValue::Null),
+            .context("不是有效布尔值")?,
         "日期" => date_value(value)
             .map(DuckValue::Date32)
-            .unwrap_or(DuckValue::Null),
+            .context("不是有效日期")?,
         "日期时间" => datetime_value(value)
             .map(|value| DuckValue::Timestamp(TimeUnit::Microsecond, value))
-            .unwrap_or(DuckValue::Null),
+            .context("不是有效日期时间")?,
         _ => value
             .as_str()
             .map(str::to_owned)
             .map(DuckValue::Text)
             .unwrap_or_else(|| DuckValue::Text(value.to_string())),
+    };
+    Ok(converted)
+}
+
+/// 限制错误消息中的原始值长度，保留定位信息同时避免异常单元格撑大响应和日志。
+fn display_value(value: &Value) -> String {
+    let value = match value {
+        Value::String(value) => value.clone(),
+        _ => value.to_string(),
+    };
+    let mut characters = value.chars();
+    let preview = characters.by_ref().take(120).collect::<String>();
+    if characters.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
     }
 }
 
@@ -691,6 +788,44 @@ mod tests {
     }
 
     #[test]
+    fn rejects_late_values_that_do_not_match_the_confirmed_type() {
+        let test_dir = test_directory();
+        let source_path = test_dir.join("mixed-values.csv");
+        let mut writer = BufWriter::new(fs::File::create(&source_path).unwrap());
+        writeln!(writer, "amount").unwrap();
+        for value in 0..SCHEMA_SAMPLE_ROWS {
+            writeln!(writer, "{value}").unwrap();
+        }
+        writeln!(writer, "not-a-number").unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+
+        let cache_root = test_dir.join("cache");
+        let work_root = test_dir.join("work");
+        let locks = CacheBuildLocks::default();
+        let runtime = test_runtime();
+        let error = execute_query(
+            vec![csv_source(&source_path, "mixed-values", "data")],
+            "SELECT SUM(amount) FROM data",
+            100,
+            QueryExecutionContext {
+                cache_root: &cache_root,
+                work_root: &work_root,
+                cache_build_locks: &locks,
+                runtime: &runtime,
+                execution_control: None,
+            },
+        )
+        .unwrap_err();
+        fs::remove_dir_all(test_dir).unwrap();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("第 2001 条数据"));
+        assert!(message.contains("amount"));
+        assert!(message.contains("not-a-number"));
+    }
+
+    #[test]
     fn queries_more_than_the_previous_source_row_limit() {
         let test_dir = test_directory();
         let source_path = test_dir.join("large.csv");
@@ -767,14 +902,21 @@ mod tests {
         let test_dir = test_directory();
         let source_path = test_dir.join("compile-error.csv");
         fs::write(&source_path, "amount\n20\n").unwrap();
+        let cache_root = test_dir.join("cache");
+        let work_root = test_dir.join("work");
+        let locks = CacheBuildLocks::default();
+        let runtime = test_runtime();
         let error = execute_query(
             vec![csv_source(&source_path, "compile-error", "data")],
             "SELECT missing_column FROM data",
             100,
-            &test_dir.join("cache"),
-            &test_dir.join("work"),
-            &Mutex::new(()),
-            None,
+            QueryExecutionContext {
+                cache_root: &cache_root,
+                work_root: &work_root,
+                cache_build_locks: &locks,
+                runtime: &runtime,
+                execution_control: None,
+            },
         )
         .unwrap_err();
         fs::remove_dir_all(test_dir).unwrap();
@@ -809,15 +951,29 @@ mod tests {
     fn execute_test_query(sources: Vec<QuerySource>, sql: &str, test_dir: &Path) -> QueryExecution {
         let cache_root = test_dir.join("cache");
         let work_root = test_dir.join("work");
+        let locks = CacheBuildLocks::default();
+        let runtime = test_runtime();
         execute_query(
             sources,
             sql,
             100,
-            &cache_root,
-            &work_root,
-            &Mutex::new(()),
-            None,
+            QueryExecutionContext {
+                cache_root: &cache_root,
+                work_root: &work_root,
+                cache_build_locks: &locks,
+                runtime: &runtime,
+                execution_control: None,
+            },
         )
         .unwrap()
+    }
+
+    fn test_runtime() -> QueryRuntimeLimits {
+        QueryRuntimeLimits {
+            memory_limit_mb: 256,
+            threads: 2,
+            temp_limit_mb: 1_024,
+            min_free_space_bytes: 16 * 1024 * 1024,
+        }
     }
 }

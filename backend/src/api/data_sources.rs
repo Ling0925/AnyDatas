@@ -23,7 +23,7 @@ use crate::{
         ImportSheetInspection, ImportTableConfig, InspectImportTableRequest, PreviewParams,
         PreviewResponse, SharedState, TableData, UpdateSourceConfig,
     },
-    services::spreadsheet,
+    services::{maintenance, resource_control, spreadsheet},
 };
 
 pub fn router() -> Router<SharedState> {
@@ -115,8 +115,10 @@ async fn inspect_upload(
     let stored = store_multipart_file(&state, multipart, &staged_dir, &token).await?;
     let inspect_path = stored.path.clone();
     let file_kind = stored.file_kind.to_owned();
-    let sheets =
-        match tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<ImportSheetInspection>> {
+    let sheets = match resource_control::run_file_task(
+        &state,
+        "文件预检",
+        move || -> anyhow::Result<Vec<ImportSheetInspection>> {
             let workbook = spreadsheet::inspect_file(&inspect_path, &file_kind)?;
             let mut sheets = Vec::with_capacity(workbook.sheets.len());
             for sheet in workbook.sheets {
@@ -128,19 +130,16 @@ async fn inspect_upload(
             }
             anyhow::ensure!(!sheets.is_empty(), "文件中没有可导入的数据表");
             Ok(sheets)
-        })
-        .await
-        {
-            Ok(Ok(value)) => value,
-            Ok(Err(error)) => {
-                let _ = tokio::fs::remove_file(&stored.path).await;
-                return Err(AppError::BadRequest(format!("文件解析失败: {error}")));
-            }
-            Err(error) => {
-                let _ = tokio::fs::remove_file(&stored.path).await;
-                return Err(AppError::Internal(format!("文件检查线程异常: {error}")));
-            }
-        };
+        },
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&stored.path).await;
+            return Err(error);
+        }
+    };
     let now = Utc::now();
     let expires_at = now + Duration::hours(24);
     let insert = sqlx::query(
@@ -213,7 +212,7 @@ async fn preview_import(
 
     let path = PathBuf::from(staged.stored_path);
     let file_kind = staged.file_kind;
-    let inspection = tokio::task::spawn_blocking(move || {
+    let inspection = resource_control::run_file_task(&state, "范围预检", move || {
         inspect_import_table(
             &path,
             &file_kind,
@@ -223,9 +222,7 @@ async fn preview_import(
             request.first_row_as_header,
         )
     })
-    .await
-    .map_err(|error| AppError::Internal(format!("范围预检线程异常: {error}")))?
-    .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    .await?;
     if inspection.fields.is_empty() {
         return Err(AppError::BadRequest(
             "所选范围中没有可读取的数据".to_owned(),
@@ -276,12 +273,11 @@ async fn commit_import(
     let validation_path = staged_path.clone();
     let validation_kind = staged.file_kind.clone();
     let requested_tables = request.tables;
-    let (sheet_names, prepared) = tokio::task::spawn_blocking(move || {
-        prepare_import_tables(&validation_path, &validation_kind, requested_tables)
-    })
-    .await
-    .map_err(|error| AppError::Internal(format!("文件检查线程异常: {error}")))?
-    .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let (sheet_names, prepared) =
+        resource_control::run_file_task(&state, "导入校验", move || {
+            prepare_import_tables(&validation_path, &validation_kind, requested_tables)
+        })
+        .await?;
 
     let extension = Path::new(&staged.original_filename)
         .extension()
@@ -440,8 +436,11 @@ async fn upload(
         .data_dir
         .join("uploads")
         .join(format!("{id}.{extension}"));
+    maintenance::ensure_free_space(&state.data_dir, state.query_runtime.min_free_space_bytes, 0)
+        .map_err(|error| AppError::BadRequest(error.to_string()))?;
     let mut output = tokio::fs::File::create(&stored_path).await?;
     let mut size_bytes = 0usize;
+    let mut next_space_check = 64 * 1024 * 1024usize;
     let mut field = field;
     while let Some(chunk) = field
         .chunk()
@@ -454,25 +453,33 @@ async fn upload(
             let _ = tokio::fs::remove_file(&stored_path).await;
             return Err(AppError::BadRequest("文件超过服务器上传限制".to_owned()));
         }
+        if size_bytes >= next_space_check {
+            if let Err(error) = maintenance::ensure_free_space(
+                &state.data_dir,
+                state.query_runtime.min_free_space_bytes,
+                0,
+            ) {
+                drop(output);
+                let _ = tokio::fs::remove_file(&stored_path).await;
+                return Err(AppError::BadRequest(error.to_string()));
+            }
+            next_space_check = next_space_check.saturating_add(64 * 1024 * 1024);
+        }
         output.write_all(&chunk).await?;
     }
     output.flush().await?;
     drop(output);
 
     let inspect_path = stored_path.clone();
-    let inspection = match tokio::task::spawn_blocking(move || {
+    let inspection = match resource_control::run_file_task(&state, "文件检查", move || {
         spreadsheet::inspect_file(&inspect_path, file_kind)
     })
     .await
     {
-        Ok(Ok(value)) => value,
-        Ok(Err(error)) => {
-            let _ = tokio::fs::remove_file(&stored_path).await;
-            return Err(AppError::BadRequest(format!("文件解析失败: {error}")));
-        }
+        Ok(value) => value,
         Err(error) => {
             let _ = tokio::fs::remove_file(&stored_path).await;
-            return Err(AppError::Internal(format!("文件检查线程异常: {error}")));
+            return Err(error);
         }
     };
     let first_sheet = inspection
@@ -481,19 +488,15 @@ async fn upload(
         .expect("inspection always has a sheet");
     let default_sheet = first_sheet.name.clone();
     let stats_path = stored_path.clone();
-    let default_table = match tokio::task::spawn_blocking(move || {
+    let default_table = match resource_control::run_file_task(&state, "文件读取", move || {
         spreadsheet::read_table(&stats_path, file_kind, &default_sheet, "A1", true, Some(1))
     })
     .await
     {
-        Ok(Ok(value)) => value,
-        Ok(Err(error)) => {
-            let _ = tokio::fs::remove_file(&stored_path).await;
-            return Err(AppError::BadRequest(format!("文件解析失败: {error}")));
-        }
+        Ok(value) => value,
         Err(error) => {
             let _ = tokio::fs::remove_file(&stored_path).await;
-            return Err(AppError::Internal(format!("文件检查线程异常: {error}")));
+            return Err(error);
         }
     };
     let sheet_names = inspection
@@ -593,6 +596,12 @@ async fn update_config(
     spreadsheet::parse_cell_reference(&request.start_cell)
         .map_err(|error| AppError::BadRequest(error.to_string()))?;
     let source = required_source(&state, &id, &auth.workspace_id).await?;
+    let previous_cache_keys = sqlx::query_scalar::<_, String>(
+        "SELECT cache_key FROM source_tables WHERE source_id = ? AND cache_key IS NOT NULL",
+    )
+    .bind(&id)
+    .fetch_all(&state.pool)
+    .await?;
     let sheet_names: Vec<String> =
         serde_json::from_str(&source.sheet_names_json).unwrap_or_default();
     if !sheet_names
@@ -607,12 +616,10 @@ async fn update_config(
     let start_cell = request.start_cell.to_ascii_uppercase();
     let preview_cell = start_cell.clone();
     let header = request.first_row_as_header;
-    let table = tokio::task::spawn_blocking(move || {
+    let table = resource_control::run_file_task(&state, "文件检查", move || {
         spreadsheet::read_table(&path, &kind, &sheet, &preview_cell, header, Some(1))
     })
-    .await
-    .map_err(|error| AppError::Internal(format!("文件检查线程异常: {error}")))?
-    .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    .await?;
     let now = Utc::now().to_rfc3339();
     sqlx::query(
         r#"
@@ -656,6 +663,9 @@ async fn update_config(
     .bind(&id)
     .execute(&state.pool)
     .await?;
+    maintenance::remove_cache_keys_if_unreferenced(&state, previous_cache_keys)
+        .await
+        .map_err(|error| AppError::Internal(error.to_string()))?;
     Ok(Json(
         required_source(&state, &id, &auth.workspace_id)
             .await?
@@ -680,7 +690,7 @@ async fn preview(
     let kind = source.file_kind;
     let query_sheet = sheet.clone();
     let query_cell = start_cell.clone();
-    let table = tokio::task::spawn_blocking(move || {
+    let table = resource_control::run_file_task(&state, "数据预览", move || {
         spreadsheet::read_table(
             &path,
             &kind,
@@ -690,9 +700,7 @@ async fn preview(
             Some(limit),
         )
     })
-    .await
-    .map_err(|error| AppError::Internal(format!("预览线程异常: {error}")))?
-    .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    .await?;
     Ok(Json(PreviewResponse {
         truncated: table.total_rows > table.rows.len(),
         total_rows: table.total_rows,
@@ -711,6 +719,12 @@ async fn delete_one(
 ) -> AppResult<StatusCode> {
     auth.require_analyst()?;
     let source = required_source(&state, &id, &auth.workspace_id).await?;
+    let cache_keys = sqlx::query_scalar::<_, String>(
+        "SELECT cache_key FROM source_tables WHERE source_id = ? AND cache_key IS NOT NULL",
+    )
+    .bind(&id)
+    .fetch_all(&state.pool)
+    .await?;
     sqlx::query("DELETE FROM data_sources WHERE id = ? AND workspace_id = ?")
         .bind(&id)
         .bind(&auth.workspace_id)
@@ -721,6 +735,9 @@ async fn delete_one(
     {
         tracing::warn!(?error, source_id = %id, "failed to remove uploaded file");
     }
+    maintenance::remove_cache_keys_if_unreferenced(&state, cache_keys)
+        .await
+        .map_err(|error| AppError::Internal(error.to_string()))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -747,9 +764,12 @@ async fn store_multipart_file(
         .ok_or_else(|| AppError::BadRequest("无法识别文件扩展名".to_owned()))?;
     let (file_kind, media_type) = file_metadata(&extension)?;
     tokio::fs::create_dir_all(directory).await?;
+    maintenance::ensure_free_space(directory, state.query_runtime.min_free_space_bytes, 0)
+        .map_err(|error| AppError::BadRequest(error.to_string()))?;
     let path = directory.join(format!("{file_id}.{extension}"));
     let mut output = tokio::fs::File::create(&path).await?;
     let mut size_bytes = 0usize;
+    let mut next_space_check = 64 * 1024 * 1024usize;
     let mut field = field;
     while let Some(chunk) = field
         .chunk()
@@ -761,6 +781,18 @@ async fn store_multipart_file(
             drop(output);
             let _ = tokio::fs::remove_file(&path).await;
             return Err(AppError::BadRequest("文件超过服务器上传限制".to_owned()));
+        }
+        if size_bytes >= next_space_check {
+            if let Err(error) = maintenance::ensure_free_space(
+                directory,
+                state.query_runtime.min_free_space_bytes,
+                0,
+            ) {
+                drop(output);
+                let _ = tokio::fs::remove_file(&path).await;
+                return Err(AppError::BadRequest(error.to_string()));
+            }
+            next_space_check = next_space_check.saturating_add(64 * 1024 * 1024);
         }
         output.write_all(&chunk).await?;
     }

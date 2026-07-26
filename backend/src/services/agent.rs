@@ -497,13 +497,15 @@ pub async fn start_run(
     .await?;
     insert_queued_run(
         &mut transaction,
-        &run_id,
-        conversation_id,
-        &message_id,
-        &settings.model,
-        run_context.reasoning_effort,
-        &request_context_json,
-        &now,
+        QueuedRunInsert {
+            run_id: &run_id,
+            conversation_id,
+            user_message_id: &message_id,
+            model: &settings.model,
+            reasoning_effort: run_context.reasoning_effort,
+            request_context_json: &request_context_json,
+            now: &now,
+        },
     )
     .await?;
     let title = conversation_title(&message);
@@ -601,13 +603,15 @@ pub async fn regenerate_run(
     .await?;
     insert_queued_run(
         &mut transaction,
-        &run_id,
-        conversation_id,
-        &user_message_id,
-        &settings.model,
-        run_context.reasoning_effort,
-        &request_context_json,
-        &now,
+        QueuedRunInsert {
+            run_id: &run_id,
+            conversation_id,
+            user_message_id: &user_message_id,
+            model: &settings.model,
+            reasoning_effort: run_context.reasoning_effort,
+            request_context_json: &request_context_json,
+            now: &now,
+        },
     )
     .await?;
     sqlx::query(
@@ -766,13 +770,15 @@ pub async fn retry_run(
     ensure_no_active_run_in_transaction(&mut transaction, &source_run.conversation_id).await?;
     insert_queued_run(
         &mut transaction,
-        &run_id,
-        &source_run.conversation_id,
-        &source_run.user_message_id,
-        &settings.model,
-        run_context.reasoning_effort,
-        &request_context_json,
-        &now,
+        QueuedRunInsert {
+            run_id: &run_id,
+            conversation_id: &source_run.conversation_id,
+            user_message_id: &source_run.user_message_id,
+            model: &settings.model,
+            reasoning_effort: run_context.reasoning_effort,
+            request_context_json: &request_context_json,
+            now: &now,
+        },
     )
     .await?;
     sqlx::query("UPDATE ai_conversations SET updated_at = ? WHERE id = ?")
@@ -1850,16 +1856,23 @@ async fn mark_run_running(state: &SharedState, run_id: &str) -> AppResult<()> {
     Ok(())
 }
 
+struct QueuedRunInsert<'a> {
+    run_id: &'a str,
+    conversation_id: &'a str,
+    user_message_id: &'a str,
+    model: &'a str,
+    reasoning_effort: AgentReasoningEffort,
+    request_context_json: &'a str,
+    now: &'a str,
+}
+
 /// 在同一事务插入排队 Run，唯一索引兜底保证一个会话最多只有一个活跃运行。
+///
+/// 关联字段使用具名结构传递，后续扩展运行配置时不会因相邻字符串参数顺序错误而
+/// 把模型、消息或会话 id 写错列。
 async fn insert_queued_run(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    run_id: &str,
-    conversation_id: &str,
-    user_message_id: &str,
-    model: &str,
-    reasoning_effort: AgentReasoningEffort,
-    request_context_json: &str,
-    now: &str,
+    run: QueuedRunInsert<'_>,
 ) -> AppResult<()> {
     sqlx::query(
         r#"
@@ -1869,14 +1882,14 @@ async fn insert_queued_run(
         ) VALUES (?, ?, ?, 'queued', ?, ?, 0, ?, ?, ?)
         "#,
     )
-    .bind(run_id)
-    .bind(conversation_id)
-    .bind(user_message_id)
-    .bind(model)
-    .bind(reasoning_effort.as_str())
-    .bind(request_context_json)
-    .bind(now)
-    .bind(now)
+    .bind(run.run_id)
+    .bind(run.conversation_id)
+    .bind(run.user_message_id)
+    .bind(run.model)
+    .bind(run.reasoning_effort.as_str())
+    .bind(run.request_context_json)
+    .bind(run.now)
+    .bind(run.now)
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -2447,7 +2460,19 @@ mod tests {
             secret_key: [7u8; 32],
             http_client: reqwest::Client::new(),
             query_control: Default::default(),
-            cache_build_lock: Default::default(),
+            cache_build_locks: Default::default(),
+            query_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+            file_parse_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            resource_queue_timeout_seconds: 5,
+            query_timeout_seconds: 30,
+            background_query_timeout_seconds: 60,
+            file_parse_timeout_seconds: 60,
+            query_runtime: crate::models::QueryRuntimeLimits {
+                memory_limit_mb: 256,
+                threads: 2,
+                temp_limit_mb: 1_024,
+                min_free_space_bytes: 16 * 1024 * 1024,
+            },
             agent_control: Default::default(),
             agent_max_steps: 4,
             agent_timeout_seconds: 30,

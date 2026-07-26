@@ -20,6 +20,10 @@ pub enum AppError {
     Forbidden(String),
     #[error("{0}")]
     RateLimited(String),
+    #[error("{0}")]
+    Unavailable(String),
+    #[error("{0}")]
+    Timeout(String),
     #[error("数据库操作失败")]
     Database(#[from] sqlx::Error),
     #[error("文件操作失败")]
@@ -48,6 +52,12 @@ impl IntoResponse for AppError {
             Self::Unauthorized(message) => (StatusCode::UNAUTHORIZED, "unauthorized", message),
             Self::Forbidden(message) => (StatusCode::FORBIDDEN, "forbidden", message),
             Self::RateLimited(message) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited", message),
+            Self::Unavailable(message) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service_unavailable",
+                message,
+            ),
+            Self::Timeout(message) => (StatusCode::REQUEST_TIMEOUT, "timeout", message),
             Self::Database(error) => {
                 tracing::error!(?error, "database request failed");
                 (
