@@ -27,6 +27,64 @@ pub async fn execute_job_request(
     execute_request_inner(state, request, None, Some(job_id)).await
 }
 
+/// 执行后台任务并把完整结果写入独立产物，返回值只携带有界样本和产物元数据。
+pub async fn execute_job_to_artifact(
+    state: SharedState,
+    request: &QueryRequest,
+    job_id: String,
+    artifact_path: PathBuf,
+) -> AppResult<query_engine::QueryArtifactExecution> {
+    let sources = resolve_query_sources(&state, request, None).await?;
+    let sql = request.sql.clone();
+    let cache_root = state.data_dir.join("table-cache");
+    let work_root = state.data_dir.join("query-work");
+    let query_state = state.clone();
+    let execution_id = job_id;
+    let query_execution_id = execution_id.clone();
+    let permit = resource_control::acquire_permit(
+        state.query_semaphore.clone(),
+        state.resource_queue_timeout_seconds,
+        "查询执行器",
+    )
+    .await?;
+    let handle = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        query_engine::execute_query_to_artifact(
+            sources,
+            &sql,
+            200,
+            &artifact_path,
+            query_engine::QueryExecutionContext {
+                cache_root: &cache_root,
+                work_root: &work_root,
+                cache_build_locks: &query_state.cache_build_locks,
+                runtime: &query_state.query_runtime,
+                execution_control: Some((&query_state.query_control, &query_execution_id)),
+            },
+        )
+    });
+    let result = match tokio::time::timeout(
+        Duration::from_secs(state.background_query_timeout_seconds),
+        handle,
+    )
+    .await
+    {
+        Ok(result) => {
+            result.map_err(|error| AppError::Internal(format!("查询线程异常: {error}")))?
+        }
+        Err(_) => {
+            cancel_execution(&state, &execution_id);
+            return Err(AppError::Timeout(format!(
+                "后台查询超过 {} 秒，已发送中断信号",
+                state.background_query_timeout_seconds
+            )));
+        }
+    };
+    let execution = result.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    persist_cache_updates(&state, &execution.cache_updates).await?;
+    Ok(execution)
+}
+
 /// 解析新旧请求为统一逻辑表列表，再把阻塞的文件导入和 DuckDB 查询移到专用线程。
 async fn execute_request_inner(
     state: SharedState,
@@ -90,7 +148,16 @@ async fn execute_request_inner(
     };
 
     let execution = result.map_err(|error| AppError::BadRequest(error.to_string()))?;
-    for update in execution.cache_updates {
+    persist_cache_updates(&state, &execution.cache_updates).await?;
+    Ok(execution.response)
+}
+
+/// 持久化首次构建的缓存元数据，配置版本条件可防止并发编辑覆盖较新的表结构。
+async fn persist_cache_updates(
+    state: &SharedState,
+    updates: &[query_engine::QueryCacheUpdate],
+) -> AppResult<()> {
+    for update in updates {
         let schema_json = serde_json::to_string(&update.columns)
             .map_err(|error| AppError::Internal(error.to_string()))?;
         sqlx::query(
@@ -101,17 +168,17 @@ async fn execute_request_inner(
             WHERE id = ? AND config_version = ?
             "#,
         )
-        .bind(update.cache_key)
+        .bind(&update.cache_key)
         .bind(schema_json)
         .bind(update.row_count as i64)
         .bind(update.columns.len() as i64)
         .bind(chrono::Utc::now().to_rfc3339())
-        .bind(update.table_id)
+        .bind(&update.table_id)
         .bind(update.config_version)
         .execute(&state.pool)
         .await?;
     }
-    Ok(execution.response)
+    Ok(())
 }
 
 /// 同时记录取消状态并中断已建立的 DuckDB 连接，覆盖缓存导入和 SQL 两个阶段。

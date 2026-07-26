@@ -21,6 +21,8 @@ pub struct Config {
     pub duckdb_threads: usize,
     pub duckdb_temp_limit_mb: usize,
     pub min_free_space_mb: usize,
+    pub job_result_max_mb: usize,
+    pub job_result_retention_days: i64,
     pub agent_max_steps: usize,
     pub agent_timeout_seconds: u64,
     pub agent_context_chars: usize,
@@ -56,6 +58,8 @@ impl Config {
         )?;
         let duckdb_temp_limit_mb = parse_usize("ANYDATAS_DUCKDB_TEMP_LIMIT_MB", 10_240)?;
         let min_free_space_mb = parse_usize("ANYDATAS_MIN_FREE_SPACE_MB", 1_024)?;
+        let job_result_max_mb = parse_usize("ANYDATAS_JOB_RESULT_MAX_MB", 20_480)?;
+        let job_result_retention_days = parse_usize("ANYDATAS_JOB_RESULT_RETENTION_DAYS", 30)?;
         let agent_max_steps = parse_usize("ANYDATAS_AGENT_MAX_STEPS", 6)?;
         let agent_timeout_seconds = parse_usize("ANYDATAS_AGENT_TIMEOUT_SECONDS", 300)?;
         let agent_context_chars = parse_usize("ANYDATAS_AGENT_CONTEXT_CHARS", 80_000)?;
@@ -89,6 +93,12 @@ impl Config {
         if !(64..=1_048_576).contains(&min_free_space_mb) {
             anyhow::bail!("ANYDATAS_MIN_FREE_SPACE_MB must be between 64 and 1048576");
         }
+        if !(64..=1_048_576).contains(&job_result_max_mb) {
+            anyhow::bail!("ANYDATAS_JOB_RESULT_MAX_MB must be between 64 and 1048576");
+        }
+        if !(1..=3_650).contains(&job_result_retention_days) {
+            anyhow::bail!("ANYDATAS_JOB_RESULT_RETENTION_DAYS must be between 1 and 3650");
+        }
         if !(2..=20).contains(&agent_max_steps) {
             anyhow::bail!("ANYDATAS_AGENT_MAX_STEPS must be between 2 and 20");
         }
@@ -117,6 +127,8 @@ impl Config {
             duckdb_threads,
             duckdb_temp_limit_mb,
             min_free_space_mb,
+            job_result_max_mb,
+            job_result_retention_days: job_result_retention_days as i64,
             agent_max_steps,
             agent_timeout_seconds: agent_timeout_seconds as u64,
             agent_context_chars,

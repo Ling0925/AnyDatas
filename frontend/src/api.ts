@@ -18,6 +18,7 @@ import type {
   InspectImportTablePayload,
   ImportTableConfig,
   Job,
+  JobResultPage,
   JobSummary,
   LoginPayload,
   PreviewResponse,
@@ -232,6 +233,14 @@ export const api = {
   },
   async getJob(id: string) {
     return (await client.get<Job>(`/jobs/${id}`)).data
+  },
+  async getJobResult(id: string, offset = 0, limit = 100) {
+    return (await client.get<JobResultPage>(`/jobs/${id}/result`, {
+      params: { offset, limit },
+    })).data
+  },
+  jobResultDownloadUrl(id: string) {
+    return `/api/jobs/${encodeURIComponent(id)}/result.csv`
   },
   async createJob(payload: { sourceId: string; tables: QueryTableBinding[]; name: string; sql: string }) {
     return (await client.post<Job>('/jobs', payload)).data

@@ -41,11 +41,17 @@ export const useTasksStore = defineStore('tasks', () => {
         api.listJobs({ status: statusFilter.value, query: search.value.trim() }),
         api.getJobSummary(),
       ])
-      jobs.value = jobItems
+      const previous = selectedJob.value
+      jobs.value = jobItems.map((job) => (
+        previous?.id === job.id
+          ? { ...job, result: previous.result, logs: previous.logs }
+          : job
+      ))
       summary.value = jobSummary
       if (!selectedJobId.value || !jobs.value.some((job) => job.id === selectedJobId.value)) {
         selectedJobId.value = jobs.value[0]?.id ?? null
       }
+      await refreshSelectedJob()
     } finally {
       loading.value = false
     }
@@ -60,6 +66,12 @@ export const useTasksStore = defineStore('tasks', () => {
     const updated = await api.getJob(selectedJobId.value)
     const index = jobs.value.findIndex((job) => job.id === updated.id)
     if (index >= 0) jobs.value[index] = updated
+  }
+
+  /** 选中任务后单独读取详情，列表接口因此无需重复传输每条任务的结果样本。 */
+  async function selectJob(id: string) {
+    selectedJobId.value = id
+    await refreshSelectedJob()
   }
 
   async function loadSchedules() {
@@ -145,6 +157,7 @@ export const useTasksStore = defineStore('tasks', () => {
     loadJobs,
     loadSummary,
     refreshSelectedJob,
+    selectJob,
     loadSchedules,
     createJob,
     cancelJob,

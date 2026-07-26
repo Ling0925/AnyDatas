@@ -59,7 +59,9 @@ async fn main() -> anyhow::Result<()> {
             threads: config.duckdb_threads,
             temp_limit_mb: config.duckdb_temp_limit_mb,
             min_free_space_bytes: (config.min_free_space_mb as u64) * 1024 * 1024,
+            max_artifact_bytes: (config.job_result_max_mb as u64) * 1024 * 1024,
         },
+        job_result_retention_days: config.job_result_retention_days,
         agent_control: Default::default(),
         agent_max_steps: config.agent_max_steps,
         agent_timeout_seconds: config.agent_timeout_seconds,
@@ -72,10 +74,14 @@ async fn main() -> anyhow::Result<()> {
         temporary_caches = cleanup.temporary_caches,
         orphaned_caches = cleanup.orphaned_caches,
         expired_imports = cleanup.expired_imports,
+        temporary_results = cleanup.temporary_results,
+        orphaned_results = cleanup.orphaned_results,
+        expired_results = cleanup.expired_results,
         "startup storage cleanup completed"
     );
     workers::spawn_job_worker(state.clone());
     workers::spawn_schedule_worker(state.clone());
+    workers::spawn_maintenance_worker(state.clone());
 
     let app = api::router(state, &config);
     let listener = TcpListener::bind(&config.bind)

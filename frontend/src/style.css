@@ -3719,6 +3719,33 @@ input:focus-visible {
   border: 1px solid var(--line);
 }
 
+.detail-result-heading {
+  margin-bottom: 9px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.detail-result-heading h3 {
+  margin-bottom: 0;
+}
+
+.detail-result-heading span,
+.result-expired p {
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+.detail-result .el-pagination {
+  margin-top: 10px;
+  justify-content: flex-end;
+}
+
+.result-expired p {
+  line-height: 1.55;
+}
+
 .detail-result .data-grid th,
 .detail-result .data-grid td {
   min-width: 100px;

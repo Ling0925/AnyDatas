@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { VueMonacoEditor } from '@guolao/vue-monaco-editor'
 import {
@@ -7,6 +7,7 @@ import {
   CircleCheck,
   CircleX,
   Clock3,
+  Download,
   FileSpreadsheet,
   ListChecks,
   LoaderCircle,
@@ -20,13 +21,14 @@ import {
   Trash2,
 } from '@lucide/vue'
 
-import { errorMessage } from '../api'
+import { api, errorMessage } from '../api'
 import DataGrid from '../components/DataGrid.vue'
 import TableBindingEditor from '../components/TableBindingEditor.vue'
 import { useTasksStore } from '../stores/tasks'
 import { useWorkspaceStore } from '../stores/workspace'
 import type {
   Job,
+  JobResultPage,
   JobStatus,
   JobSummary,
   QueryTableBinding,
@@ -40,6 +42,10 @@ const activeTab = ref<'runs' | 'schedules'>('runs')
 const jobDialogVisible = ref(false)
 const scheduleDialogVisible = ref(false)
 const saving = ref(false)
+const resultLoading = ref(false)
+const resultPage = ref<JobResultPage | null>(null)
+const resultPageNumber = ref(1)
+const resultPageSize = 100
 const jobForm = reactive<{ tables: QueryTableBinding[]; name: string; sql: string }>({
   tables: [],
   name: '',
@@ -102,6 +108,7 @@ const currentCron = computed(() => {
     ? `0 ${minute} ${hour} * * MON-FRI`
     : `0 ${minute} ${hour} * * *`
 })
+const displayedResult = computed(() => resultPage.value ?? tasks.selectedJob?.result ?? null)
 
 let pollTimer: ReturnType<typeof setTimeout> | undefined
 let stopped = false
@@ -119,6 +126,15 @@ onUnmounted(() => {
   stopped = true
   if (pollTimer) clearTimeout(pollTimer)
 })
+
+watch(
+  () => `${tasks.selectedJob?.id ?? ''}:${tasks.selectedJob?.resultAvailable ? 'ready' : 'empty'}`,
+  () => {
+    resultPage.value = null
+    resultPageNumber.value = 1
+    void loadSelectedResult()
+  },
+)
 
 function schedulePoll() {
   if (stopped) return
@@ -155,6 +171,12 @@ function duration(job: Job): string {
   return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
 }
 
+function formatBytes(value: number | null): string {
+  if (value === null) return '—'
+  if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KB`
+  return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
 function triggerLabel(value: string): string {
   return {
     manual: '手动创建',
@@ -174,6 +196,47 @@ async function reloadJobs() {
 async function setFilter(value: JobStatus | '') {
   tasks.statusFilter = value
   await reloadJobs()
+}
+
+async function selectJob(id: string) {
+  try {
+    await tasks.selectJob(id)
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  }
+}
+
+/** 结果分页始终由服务端读取 DuckDB 产物，页面切换不会重复传输完整数据集。 */
+async function loadSelectedResult() {
+  const job = tasks.selectedJob
+  if (!job?.resultAvailable) return
+  resultLoading.value = true
+  try {
+    resultPage.value = await api.getJobResult(
+      job.id,
+      (resultPageNumber.value - 1) * resultPageSize,
+      resultPageSize,
+    )
+  } catch (error) {
+    resultPage.value = null
+    ElMessage.error(errorMessage(error))
+  } finally {
+    resultLoading.value = false
+  }
+}
+
+async function changeResultPage(page: number) {
+  resultPageNumber.value = page
+  await loadSelectedResult()
+}
+
+function downloadJobResult(id: string) {
+  const link = document.createElement('a')
+  link.href = api.jobResultDownloadUrl(id)
+  link.download = ''
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
 }
 
 function openJobDialog() {
@@ -407,7 +470,7 @@ async function deleteSchedule(id: string) {
             type="button"
             class="job-row"
             :class="{ selected: tasks.selectedJobId === job.id }"
-            @click="tasks.selectedJobId = job.id"
+            @click="selectJob(job.id)"
           >
             <span class="status-badge" :class="statusMeta[job.status].className">
               {{ statusMeta[job.status].label }}
@@ -491,6 +554,19 @@ async function deleteSchedule(id: string) {
           </div>
           <div class="detail-actions">
             <el-tooltip
+              v-if="tasks.selectedJob.resultAvailable"
+              content="下载完整 CSV"
+              placement="bottom"
+            >
+              <el-button
+                class="icon-button plain"
+                aria-label="下载完整 CSV"
+                @click="downloadJobResult(tasks.selectedJob.id)"
+              >
+                <Download :size="14" />
+              </el-button>
+            </el-tooltip>
+            <el-tooltip
               v-if="tasks.selectedJob.status === 'queued' || tasks.selectedJob.status === 'running'"
               content="停止任务"
               placement="bottom"
@@ -522,6 +598,8 @@ async function deleteSchedule(id: string) {
           <div><dt>触发方式</dt><dd>{{ triggerLabel(tasks.selectedJob.triggerType) }}</dd></div>
           <div><dt>开始时间</dt><dd>{{ formatDate(tasks.selectedJob.startedAt) }}</dd></div>
           <div><dt>运行耗时</dt><dd>{{ duration(tasks.selectedJob) }}</dd></div>
+          <div><dt>完整结果</dt><dd>{{ tasks.selectedJob.resultRowCount?.toLocaleString() ?? '—' }} 行</dd></div>
+          <div><dt>产物大小</dt><dd>{{ formatBytes(tasks.selectedJob.resultSizeBytes) }}</dd></div>
         </dl>
 
         <section class="detail-section">
@@ -553,12 +631,35 @@ async function deleteSchedule(id: string) {
           </div>
         </section>
 
-        <section v-if="tasks.selectedJob.result" class="detail-section detail-result">
-          <h3>结果预览</h3>
+        <section v-if="displayedResult" class="detail-section detail-result" v-loading="resultLoading">
+          <div class="detail-result-heading">
+            <h3>结果数据</h3>
+            <span v-if="tasks.selectedJob.resultRowCount !== null">
+              {{ tasks.selectedJob.resultRowCount.toLocaleString() }} 行
+            </span>
+          </div>
           <DataGrid
-            :columns="tasks.selectedJob.result.columns"
-            :rows="tasks.selectedJob.result.rows.slice(0, 20)"
+            :columns="displayedResult.columns"
+            :rows="displayedResult.rows"
           />
+          <el-pagination
+            v-if="tasks.selectedJob.resultAvailable && (tasks.selectedJob.resultRowCount ?? 0) > resultPageSize"
+            background
+            layout="prev, pager, next"
+            :current-page="resultPageNumber"
+            :page-size="resultPageSize"
+            :total="tasks.selectedJob.resultRowCount ?? 0"
+            :pager-count="5"
+            @current-change="changeResultPage"
+          />
+        </section>
+
+        <section
+          v-else-if="tasks.selectedJob.status === 'succeeded' && tasks.selectedJob.resultRowCount !== null"
+          class="detail-section result-expired"
+        >
+          <h3>结果数据</h3>
+          <p>完整结果已按保留策略清理，任务 SQL 和运行日志仍然保留。</p>
         </section>
       </template>
       <div v-else class="inspector-empty"><ListChecks :size="26" /><span>选择一条任务查看详情</span></div>

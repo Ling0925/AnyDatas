@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use sqlx::Row;
 use tokio::time::MissedTickBehavior;
 
@@ -35,6 +35,27 @@ pub fn spawn_schedule_worker(state: Arc<AppState>) {
             interval.tick().await;
             if let Err(error) = enqueue_due_schedules(state.clone()).await {
                 tracing::error!(?error, "schedule worker failed");
+            }
+        }
+    });
+}
+
+/// 每小时回收到期后台结果，长期单机运行时不依赖额外 Cron 或运维容器。
+pub fn spawn_maintenance_worker(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60 * 60));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            match crate::services::maintenance::cleanup_expired_job_results(&state).await {
+                Ok(removed) if removed > 0 => {
+                    tracing::info!(removed, "expired background results cleaned");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(?error, "background result cleanup failed");
+                }
             }
         }
     });
@@ -77,9 +98,20 @@ async fn claim_and_run_job(state: SharedState) -> Result<(), AppError> {
         sheet: None,
         start_cell: None,
         first_row_as_header: None,
-        limit: Some(5_000),
+        limit: None,
     };
-    let result = execution::execute_job_request(state.clone(), &request, id.clone()).await;
+    let artifact_key = id.clone();
+    let artifact_path = state
+        .data_dir
+        .join("job-results")
+        .join(format!("{artifact_key}.duckdb"));
+    let result = execution::execute_job_to_artifact(
+        state.clone(),
+        &request,
+        id.clone(),
+        artifact_path.clone(),
+    )
+    .await;
     let current_status: String = sqlx::query_scalar("SELECT status FROM jobs WHERE id = ?")
         .bind(&id)
         .fetch_one(&state.pool)
@@ -93,23 +125,35 @@ async fn claim_and_run_job(state: SharedState) -> Result<(), AppError> {
                 &state,
                 &id,
                 "success",
-                &format!("查询完成，共返回 {} 行", result.row_count),
+                &format!(
+                    "查询完成，共生成 {} 行完整结果，大小 {:.2} MB",
+                    result.total_rows,
+                    result.artifact_size_bytes as f64 / 1024.0 / 1024.0
+                ),
             )
             .await?;
-            let now = Utc::now().to_rfc3339();
+            let finished = Utc::now();
+            let now = finished.to_rfc3339();
+            let expires_at =
+                (finished + ChronoDuration::days(state.job_result_retention_days)).to_rfc3339();
             sqlx::query(
                 r#"
                 UPDATE jobs
                 SET status = 'succeeded', progress = 100, result_json = ?,
-                    result_row_count = ?, finished_at = ?, updated_at = ?
+                    result_row_count = ?, result_artifact_key = ?,
+                    result_artifact_format = 'duckdb', result_size_bytes = ?,
+                    result_expires_at = ?, finished_at = ?, updated_at = ?
                 WHERE id = ?
                 "#,
             )
             .bind(
-                serde_json::to_string(&result)
+                serde_json::to_string(&result.sample)
                     .map_err(|error| AppError::Internal(error.to_string()))?,
             )
-            .bind(result.row_count as i64)
+            .bind(result.total_rows as i64)
+            .bind(&artifact_key)
+            .bind(result.artifact_size_bytes as i64)
+            .bind(expires_at)
             .bind(&now)
             .bind(&now)
             .bind(&id)
@@ -117,6 +161,15 @@ async fn claim_and_run_job(state: SharedState) -> Result<(), AppError> {
             .await?;
         }
         Err(error) => {
+            if let Err(remove_error) = tokio::fs::remove_file(&artifact_path).await
+                && remove_error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    ?remove_error,
+                    job_id = %id,
+                    "failed to remove incomplete job artifact"
+                );
+            }
             let message = error.to_string();
             append_log(&state, &id, "error", &message).await?;
             let now = Utc::now().to_rfc3339();

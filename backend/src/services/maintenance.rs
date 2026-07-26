@@ -11,6 +11,9 @@ pub struct CleanupReport {
     pub temporary_caches: usize,
     pub orphaned_caches: usize,
     pub expired_imports: usize,
+    pub temporary_results: usize,
+    pub orphaned_results: usize,
+    pub expired_results: usize,
 }
 
 /// 启动服务前清理无法继续使用的临时产物，并只保留数据库仍引用的表缓存。
@@ -22,9 +25,11 @@ pub async fn cleanup_startup_storage(state: &SharedState) -> Result<CleanupRepor
     let query_root = state.data_dir.join("query-work");
     let cache_root = state.data_dir.join("table-cache");
     let staging_root = state.data_dir.join("staging");
+    let result_root = state.data_dir.join("job-results");
     fs::create_dir_all(&query_root)?;
     fs::create_dir_all(&cache_root)?;
     fs::create_dir_all(&staging_root)?;
+    fs::create_dir_all(&result_root)?;
 
     report.query_directories = remove_directory_children(&query_root)?;
     let referenced = sqlx::query_scalar::<_, String>(
@@ -68,7 +73,79 @@ pub async fn cleanup_startup_storage(state: &SharedState) -> Result<CleanupRepor
         remove_file_if_present(Path::new(&stored_path))?;
         report.expired_imports += 1;
     }
+    report.expired_results = cleanup_expired_job_results(state).await?;
+    let referenced_results = sqlx::query_scalar::<_, String>(
+        "SELECT result_artifact_key FROM jobs WHERE result_artifact_key IS NOT NULL",
+    )
+    .fetch_all(&state.pool)
+    .await?
+    .into_iter()
+    .collect::<HashSet<_>>();
+    for entry in fs::read_dir(&result_root)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path)?;
+            report.temporary_results += 1;
+            continue;
+        }
+        if path.extension().and_then(|value| value.to_str()) == Some("tmp") {
+            fs::remove_file(&path)?;
+            report.temporary_results += 1;
+            continue;
+        }
+        if path.extension().and_then(|value| value.to_str()) != Some("duckdb") {
+            continue;
+        }
+        let key = path.file_stem().and_then(|value| value.to_str());
+        if key.is_none_or(|key| !referenced_results.contains(key)) {
+            fs::remove_file(&path)?;
+            report.orphaned_results += 1;
+        }
+    }
     Ok(report)
+}
+
+/// 到期后删除完整结果产物但保留任务审计记录，历史 SQL、耗时和日志仍可查看。
+///
+/// 数据库字段在文件删除后同一轮清空，前端会明确显示结果已过期，而不是继续提供
+/// 一个必然返回 404 的下载入口。
+pub async fn cleanup_expired_job_results(state: &SharedState) -> Result<usize> {
+    let now = Utc::now().to_rfc3339();
+    let expired = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT id, result_artifact_key
+        FROM jobs
+        WHERE result_artifact_key IS NOT NULL
+          AND result_expires_at IS NOT NULL
+          AND result_expires_at < ?
+        "#,
+    )
+    .bind(&now)
+    .fetch_all(&state.pool)
+    .await?;
+    for (job_id, artifact_key) in &expired {
+        if is_artifact_key(artifact_key) {
+            let path = state
+                .data_dir
+                .join("job-results")
+                .join(format!("{artifact_key}.duckdb"));
+            remove_file_if_present(&path)?;
+        }
+        sqlx::query(
+            r#"
+            UPDATE jobs
+            SET result_json = NULL, result_artifact_key = NULL,
+                result_artifact_format = NULL, result_size_bytes = NULL,
+                result_expires_at = NULL, updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(&now)
+        .bind(job_id)
+        .execute(&state.pool)
+        .await?;
+    }
+    Ok(expired.len())
 }
 
 /// 删除已经不被任何逻辑表引用的指定缓存，供配置更新和数据源删除后即时回收空间。
@@ -152,6 +229,10 @@ fn remove_file_if_present(path: &Path) -> Result<()> {
 
 fn is_cache_key(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_artifact_key(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok()
 }
 
 #[cfg(test)]

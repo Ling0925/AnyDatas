@@ -1,7 +1,11 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{
+        StatusCode,
+        header::{CONTENT_DISPOSITION, CONTENT_TYPE},
+    },
+    response::Response,
     routing::{get, post},
 };
 use chrono::Utc;
@@ -11,10 +15,13 @@ use crate::{
     api::auth::AuthContext,
     error::{AppError, AppResult},
     models::{
-        CreateJobRequest, Job, JobListParams, JobLog, JobRow, JobSummary, QueryTableBinding,
-        SharedState,
+        CreateJobRequest, Job, JobListParams, JobLog, JobResultPage, JobResultParams, JobRow,
+        JobSummary, QueryTableBinding, SharedState,
     },
-    services::query_bindings::{self, BindingTarget, ValidatedBindings},
+    services::{
+        job_results,
+        query_bindings::{self, BindingTarget, ValidatedBindings},
+    },
 };
 
 pub fn router() -> Router<SharedState> {
@@ -22,6 +29,8 @@ pub fn router() -> Router<SharedState> {
         .route("/jobs", get(list).post(create))
         .route("/jobs/summary", get(summary))
         .route("/jobs/{id}", get(get_one).delete(delete_one))
+        .route("/jobs/{id}/result", get(get_result))
+        .route("/jobs/{id}/result.csv", get(download_result))
         .route("/jobs/{id}/cancel", post(cancel))
         .route("/jobs/{id}/retry", post(retry))
 }
@@ -63,7 +72,10 @@ async fn list(
         r#"
         SELECT j.id, j.source_id, d.name AS source_name, j.schedule_id, j.name,
                j.kind, j.sql_text, j.status, j.progress, j.trigger_type,
-               j.result_json, j.result_row_count, j.error_message, j.logs_json,
+               NULL AS result_json, j.result_row_count,
+               j.result_artifact_key, j.result_artifact_format,
+               j.result_size_bytes, j.result_expires_at,
+               j.error_message, '[]' AS logs_json,
                j.created_at, j.started_at, j.finished_at, j.updated_at
         FROM jobs j
         JOIN data_sources d ON d.id = j.source_id
@@ -97,6 +109,47 @@ async fn get_one(
 ) -> AppResult<Json<Job>> {
     let row = required_job(&state, &id, Some(&auth.workspace_id)).await?;
     Ok(Json(hydrate_job(&state, row).await?))
+}
+
+/// 按页返回后台完整结果，单次最多 1,000 行，浏览器无需加载整份产物。
+async fn get_result(
+    State(state): State<SharedState>,
+    auth: AuthContext,
+    Path(id): Path<String>,
+    Query(params): Query<JobResultParams>,
+) -> AppResult<Json<JobResultPage>> {
+    let job = required_job(&state, &id, Some(&auth.workspace_id)).await?;
+    let artifact_key = job
+        .result_artifact_key
+        .as_deref()
+        .ok_or_else(|| AppError::NotFound("该任务没有可用的完整结果".to_owned()))?;
+    let offset = params.offset.unwrap_or(0);
+    let limit = params.limit.unwrap_or(100).clamp(1, 1_000);
+    Ok(Json(
+        job_results::load_page(&state, artifact_key, offset, limit).await?,
+    ))
+}
+
+/// 流式导出完整 CSV，响应体由后台线程边读边发送，不创建第二份临时结果文件。
+async fn download_result(
+    State(state): State<SharedState>,
+    auth: AuthContext,
+    Path(id): Path<String>,
+) -> AppResult<Response> {
+    let job = required_job(&state, &id, Some(&auth.workspace_id)).await?;
+    let artifact_key = job
+        .result_artifact_key
+        .as_deref()
+        .ok_or_else(|| AppError::NotFound("该任务没有可下载的完整结果".to_owned()))?;
+    let body = job_results::csv_body(&state, artifact_key).await?;
+    Response::builder()
+        .header(CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(
+            CONTENT_DISPOSITION,
+            format!("attachment; filename=\"anydatas-job-{id}.csv\""),
+        )
+        .body(body)
+        .map_err(|error| AppError::Internal(error.to_string()))
 }
 
 async fn create(
@@ -221,6 +274,9 @@ async fn delete_one(
     if matches!(job.status.as_str(), "queued" | "running") {
         return Err(AppError::Conflict("请先停止任务再删除".to_owned()));
     }
+    if let Some(artifact_key) = job.result_artifact_key.as_deref() {
+        job_results::remove_artifact(&state, artifact_key).await?;
+    }
     sqlx::query("DELETE FROM jobs WHERE id = ?")
         .bind(&id)
         .execute(&state.pool)
@@ -306,7 +362,10 @@ pub async fn required_job(
         r#"
         SELECT j.id, j.source_id, d.name AS source_name, j.schedule_id, j.name,
                j.kind, j.sql_text, j.status, j.progress, j.trigger_type,
-               j.result_json, j.result_row_count, j.error_message, j.logs_json,
+               j.result_json, j.result_row_count,
+               j.result_artifact_key, j.result_artifact_format,
+               j.result_size_bytes, j.result_expires_at,
+               j.error_message, j.logs_json,
                j.created_at, j.started_at, j.finished_at, j.updated_at
         FROM jobs j
         JOIN data_sources d ON d.id = j.source_id

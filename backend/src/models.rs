@@ -30,6 +30,7 @@ pub struct AppState {
     pub background_query_timeout_seconds: u64,
     pub file_parse_timeout_seconds: u64,
     pub query_runtime: QueryRuntimeLimits,
+    pub job_result_retention_days: i64,
     pub agent_control: Mutex<HashMap<String, Arc<AgentRunControl>>>,
     pub agent_max_steps: usize,
     pub agent_timeout_seconds: u64,
@@ -44,6 +45,7 @@ pub struct QueryRuntimeLimits {
     pub threads: usize,
     pub temp_limit_mb: usize,
     pub min_free_space_bytes: u64,
+    pub max_artifact_bytes: u64,
 }
 
 /// 按缓存键维护互斥量，避免不同 Sheet 的首次查询被一把全局锁串行化。
@@ -477,6 +479,10 @@ pub struct JobRow {
     pub trigger_type: String,
     pub result_json: Option<String>,
     pub result_row_count: Option<i64>,
+    pub result_artifact_key: Option<String>,
+    pub result_artifact_format: Option<String>,
+    pub result_size_bytes: Option<i64>,
+    pub result_expires_at: Option<String>,
     pub error_message: Option<String>,
     pub logs_json: String,
     pub created_at: String,
@@ -509,6 +515,10 @@ pub struct Job {
     pub trigger_type: String,
     pub result: Option<QueryResponse>,
     pub result_row_count: Option<i64>,
+    pub result_available: bool,
+    pub result_artifact_format: Option<String>,
+    pub result_size_bytes: Option<i64>,
+    pub result_expires_at: Option<String>,
     pub error_message: Option<String>,
     pub logs: Vec<JobLog>,
     pub created_at: String,
@@ -536,6 +546,10 @@ impl From<JobRow> for Job {
                 .as_deref()
                 .and_then(|value| serde_json::from_str(value).ok()),
             result_row_count: row.result_row_count,
+            result_available: row.result_artifact_key.is_some(),
+            result_artifact_format: row.result_artifact_format,
+            result_size_bytes: row.result_size_bytes,
+            result_expires_at: row.result_expires_at,
             error_message: row.error_message,
             logs: serde_json::from_str(&row.logs_json).unwrap_or_default(),
             created_at: row.created_at,
@@ -544,6 +558,26 @@ impl From<JobRow> for Job {
             updated_at: row.updated_at,
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobResultPage {
+    pub columns: Vec<FieldDefinition>,
+    pub rows: Vec<Vec<Value>>,
+    pub row_count: usize,
+    pub total_rows: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub elapsed_ms: u128,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobResultParams {
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

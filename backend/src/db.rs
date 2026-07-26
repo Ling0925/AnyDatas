@@ -183,8 +183,21 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
+        let job_artifact_columns: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM pragma_table_info('jobs')
+            WHERE name IN (
+                'result_artifact_key', 'result_artifact_format',
+                'result_size_bytes', 'result_expires_at'
+            )
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(tables, 4);
         assert_eq!(active_index, 1);
         assert_eq!(reasoning_effort_column, 1);
+        assert_eq!(job_artifact_columns, 4);
     }
 }

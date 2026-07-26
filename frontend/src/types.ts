@@ -313,12 +313,22 @@ export interface Job {
   triggerType: string
   result: QueryResponse | null
   resultRowCount: number | null
+  resultAvailable: boolean
+  resultArtifactFormat: string | null
+  resultSizeBytes: number | null
+  resultExpiresAt: string | null
   errorMessage: string | null
   logs: JobLog[]
   createdAt: string
   startedAt: string | null
   finishedAt: string | null
   updatedAt: string
+}
+
+export interface JobResultPage extends QueryResponse {
+  totalRows: number
+  offset: number
+  limit: number
 }
 
 export interface JobSummary {

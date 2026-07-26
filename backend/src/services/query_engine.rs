@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::Write,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -52,6 +53,14 @@ pub struct QueryCacheUpdate {
 pub struct QueryExecution {
     pub response: QueryResponse,
     pub cache_updates: Vec<QueryCacheUpdate>,
+}
+
+#[derive(Debug)]
+pub struct QueryArtifactExecution {
+    pub sample: QueryResponse,
+    pub cache_updates: Vec<QueryCacheUpdate>,
+    pub total_rows: usize,
+    pub artifact_size_bytes: u64,
 }
 
 pub struct QueryExecutionContext<'a> {
@@ -114,25 +123,217 @@ pub fn execute_query(
         "SELECT * FROM ({clean_sql}) AS __anydatas_result LIMIT {}",
         limit.saturating_add(1)
     );
-    let mut statement = connection
-        .prepare(&query_sql)
-        .map_err(|error| anyhow::anyhow!("SQL 编译失败: {error}"))?;
-    let mut rows = statement
-        .query([])
-        .map_err(|error| anyhow::anyhow!("SQL 执行失败: {error}"))?;
+    let response = collect_query_response(&connection, &query_sql, limit, started)?;
+
+    Ok(QueryExecution {
+        response,
+        cache_updates,
+    })
+}
+
+/// 将后台查询的完整结果物化为独立 DuckDB 文件，同时只返回有界样本供任务详情展示。
+///
+/// 结果文件先写入同一目录的临时路径并在 CHECKPOINT 后原子改名，进程中断不会产生
+/// 看似成功的半成品；SQLite 因此只承担任务元数据，不再承载大量结果 JSON。
+pub fn execute_query_to_artifact(
+    sources: Vec<QuerySource>,
+    sql: &str,
+    sample_limit: usize,
+    artifact_path: &Path,
+    context: QueryExecutionContext<'_>,
+) -> Result<QueryArtifactExecution> {
+    validate_read_only_sql(sql)?;
+    validate_sources(&sources)?;
+    let active_query = context
+        .execution_control
+        .map(|(control, execution_id)| ActiveQueryGuard::register(control, execution_id))
+        .transpose()?;
+    if let Some(query) = &active_query {
+        query.ensure_running()?;
+    }
+    let started = Instant::now();
+    let mut prepared_sources = Vec::with_capacity(sources.len());
+    let mut cache_updates = Vec::with_capacity(sources.len());
+    for source in &sources {
+        ensure_query_running(context.execution_control)?;
+        let (prepared, update) = prepare_source_cache(
+            source,
+            context.cache_root,
+            context.cache_build_locks,
+            context.runtime,
+            context.execution_control,
+        )
+        .with_context(|| format!("逻辑表 {} 缓存构建失败", source.alias))?;
+        prepared_sources.push(prepared);
+        cache_updates.push(update);
+    }
+
+    let parent = artifact_path.parent().context("后台结果路径缺少父目录")?;
+    fs::create_dir_all(parent)?;
+    maintenance::ensure_free_space(parent, context.runtime.min_free_space_bytes, 0)?;
+    let artifact_id = Uuid::new_v4();
+    let temporary_path = artifact_path.with_extension(format!("{artifact_id}.tmp"));
+    let temporary_directory = parent.join(format!(".result-temp-{artifact_id}"));
+    let result = (|| -> Result<(QueryResponse, usize)> {
+        let connection = Connection::open(&temporary_path).context("无法初始化后台结果数据库")?;
+        configure_connection(&connection, context.runtime, Some(&temporary_directory))?;
+        attach_cached_sources(&connection, &prepared_sources)?;
+        connection.execute_batch("SET enable_external_access = false;")?;
+        if let Some(query) = &active_query {
+            query.attach(&connection)?;
+            query.ensure_running()?;
+        }
+        let clean_sql = sql.trim().trim_end_matches(';').trim();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE {} AS SELECT * FROM ({clean_sql}) AS __anydatas_result;",
+                quote_identifier("result")
+            ))
+            .map_err(|error| anyhow::anyhow!("SQL 执行失败: {error}"))?;
+        let total_rows: i64 = connection.query_row(
+            &format!("SELECT COUNT(*) FROM {}", quote_identifier("result")),
+            [],
+            |row| row.get(0),
+        )?;
+        let total_rows = usize::try_from(total_rows).context("结果行数超出平台范围")?;
+        let query_sql = format!(
+            "SELECT * FROM {} LIMIT {}",
+            quote_identifier("result"),
+            sample_limit.saturating_add(1)
+        );
+        let mut sample = collect_query_response(&connection, &query_sql, sample_limit, started)?;
+        sample.truncated = total_rows > sample.rows.len();
+        connection.execute_batch("CHECKPOINT;")?;
+        drop(connection);
+        Ok((sample, total_rows))
+    })();
+    let _ = fs::remove_dir_all(&temporary_directory);
+    match result {
+        Ok((sample, total_rows)) => {
+            let temporary_size = fs::metadata(&temporary_path)?.len();
+            if temporary_size > context.runtime.max_artifact_bytes {
+                let _ = fs::remove_file(&temporary_path);
+                bail!(
+                    "后台结果产物大小 {:.2} MB 超过单任务上限 {:.2} MB",
+                    temporary_size as f64 / 1024.0 / 1024.0,
+                    context.runtime.max_artifact_bytes as f64 / 1024.0 / 1024.0
+                );
+            }
+            if artifact_path.exists() {
+                fs::remove_file(artifact_path)?;
+            }
+            fs::rename(&temporary_path, artifact_path)?;
+            let artifact_size_bytes = fs::metadata(artifact_path)?.len();
+            if let Err(error) =
+                maintenance::ensure_free_space(parent, context.runtime.min_free_space_bytes, 0)
+            {
+                let _ = fs::remove_file(artifact_path);
+                return Err(error.context("后台结果已删除"));
+            }
+            Ok(QueryArtifactExecution {
+                sample,
+                cache_updates,
+                total_rows,
+                artifact_size_bytes,
+            })
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temporary_path);
+            Err(error)
+        }
+    }
+}
+
+/// 从持久化结果文件读取一页数据；分页参数由服务端生成为整数，不拼接用户 SQL。
+pub fn read_artifact_page(
+    artifact_path: &Path,
+    offset: usize,
+    limit: usize,
+    runtime: &QueryRuntimeLimits,
+    work_root: &Path,
+) -> Result<(QueryResponse, usize)> {
+    let started = Instant::now();
+    let workspace = QueryWorkspace::create(work_root)?;
+    let connection = Connection::open(artifact_path).context("无法打开后台结果")?;
+    configure_connection(&connection, runtime, Some(&workspace.temp_path()))?;
+    connection.execute_batch("SET enable_external_access = false;")?;
+    let total_rows: i64 = connection.query_row(
+        &format!("SELECT COUNT(*) FROM {}", quote_identifier("result")),
+        [],
+        |row| row.get(0),
+    )?;
+    let total_rows = usize::try_from(total_rows).context("结果行数超出平台范围")?;
+    let query_sql = format!(
+        "SELECT * FROM {} LIMIT {} OFFSET {}",
+        quote_identifier("result"),
+        limit.saturating_add(1),
+        offset
+    );
+    let mut response = collect_query_response(&connection, &query_sql, limit, started)?;
+    response.truncated = offset.saturating_add(response.rows.len()) < total_rows;
+    Ok((response, total_rows))
+}
+
+/// 将完整后台结果逐行写为 CSV，调用方可以把 Writer 接到 HTTP 流而无需中间大文件。
+///
+/// 文本型公式前缀会添加单引号，避免用户在 Excel 中打开下载文件时触发 CSV 公式；
+/// 数值列保持原值，分析结果不会因安全转义改变数值语义。
+pub fn write_artifact_csv(
+    artifact_path: &Path,
+    runtime: &QueryRuntimeLimits,
+    output: impl Write,
+) -> Result<()> {
+    let connection = Connection::open(artifact_path).context("无法打开后台结果")?;
+    configure_connection(&connection, runtime, None)?;
+    connection.execute_batch("SET enable_external_access = false;")?;
+    let mut statement =
+        connection.prepare(&format!("SELECT * FROM {}", quote_identifier("result")))?;
+    let mut rows = statement.query([])?;
     let names = rows
         .as_ref()
         .context("DuckDB 未返回结果结构")?
         .column_names();
+    let mut writer = csv::WriterBuilder::new().from_writer(output);
+    writer.write_record(&names)?;
+    while let Some(row) = rows.next()? {
+        let record = (0..names.len())
+            .map(|index| {
+                row.get_ref(index)
+                    .map(|value| duck_value_to_csv(value.to_owned()))
+            })
+            .collect::<duckdb::Result<Vec<_>>>()?;
+        writer.write_record(record)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+/// 把 DuckDB 行集转换为有界 JSON 响应，交互查询、后台样本和分页共用同一类型语义。
+fn collect_query_response(
+    connection: &Connection,
+    query_sql: &str,
+    limit: usize,
+    started: Instant,
+) -> Result<QueryResponse> {
+    let mut statement = connection
+        .prepare(query_sql)
+        .map_err(|error| anyhow::anyhow!("SQL 编译失败: {error}"))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| anyhow::anyhow!("SQL 执行失败: {error}"))?;
+    let result_schema = rows.as_ref().context("DuckDB 未返回结果结构")?;
+    let names = result_schema.column_names();
+    let result_types = (0..names.len())
+        .map(|index| {
+            let data_type = result_schema.column_type(index);
+            duck_type_label((&data_type).into())
+        })
+        .collect::<Vec<_>>();
     let mut result_rows = Vec::new();
-    let mut result_types: Vec<Option<String>> = vec![None; names.len()];
     while let Some(row) = rows.next()? {
         let mut values = Vec::with_capacity(names.len());
-        for (index, result_type) in result_types.iter_mut().enumerate() {
+        for index in 0..names.len() {
             let value = row.get_ref(index)?;
-            if result_type.is_none() && !matches!(value, duckdb::types::ValueRef::Null) {
-                *result_type = Some(duck_type_label(value.data_type()));
-            }
             values.push(duck_value_to_json(value.to_owned()));
         }
         result_rows.push(values);
@@ -144,22 +345,17 @@ pub fn execute_query(
         .enumerate()
         .map(|(index, name)| FieldDefinition {
             name,
-            data_type: result_types[index]
-                .clone()
-                .unwrap_or_else(|| "文本".to_owned()),
+            data_type: result_types[index].clone(),
             nullable: true,
         })
         .collect();
 
-    Ok(QueryExecution {
-        response: QueryResponse {
-            columns,
-            row_count: result_rows.len(),
-            rows: result_rows,
-            elapsed_ms: started.elapsed().as_millis(),
-            truncated,
-        },
-        cache_updates,
+    Ok(QueryResponse {
+        columns,
+        row_count: result_rows.len(),
+        rows: result_rows,
+        elapsed_ms: started.elapsed().as_millis(),
+        truncated,
     })
 }
 
@@ -744,6 +940,24 @@ fn duck_value_to_json(value: DuckValue) -> Value {
     }
 }
 
+fn duck_value_to_csv(value: DuckValue) -> String {
+    match value {
+        DuckValue::Null => String::new(),
+        DuckValue::Text(value) | DuckValue::Enum(value) => {
+            if value.starts_with(['=', '+', '-', '@']) {
+                format!("'{value}")
+            } else {
+                value
+            }
+        }
+        value => match duck_value_to_json(value) {
+            Value::Null => String::new(),
+            Value::String(value) => value,
+            value => value.to_string(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{BufWriter, Write};
@@ -845,6 +1059,58 @@ mod tests {
         fs::remove_dir_all(test_dir).unwrap();
 
         assert_eq!(result.response.rows, vec![vec![Value::from(200_001)]]);
+    }
+
+    #[test]
+    fn persists_full_background_result_and_reads_pages() {
+        let test_dir = test_directory();
+        let source_path = test_dir.join("background.csv");
+        let mut writer = BufWriter::new(fs::File::create(&source_path).unwrap());
+        writeln!(writer, "id,value").unwrap();
+        for value in 0..1_000 {
+            writeln!(writer, "{value},item-{value}").unwrap();
+        }
+        writer.flush().unwrap();
+        drop(writer);
+
+        let cache_root = test_dir.join("cache");
+        let work_root = test_dir.join("work");
+        let artifact_path = test_dir.join("results").join("job.duckdb");
+        let locks = CacheBuildLocks::default();
+        let runtime = test_runtime();
+        let result = execute_query_to_artifact(
+            vec![csv_source(&source_path, "background", "data")],
+            "SELECT * FROM data ORDER BY id",
+            20,
+            &artifact_path,
+            QueryExecutionContext {
+                cache_root: &cache_root,
+                work_root: &work_root,
+                cache_build_locks: &locks,
+                runtime: &runtime,
+                execution_control: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.total_rows, 1_000);
+        assert_eq!(result.sample.rows.len(), 20);
+        assert!(result.sample.truncated);
+        assert!(artifact_path.exists());
+
+        let (page, total_rows) =
+            read_artifact_page(&artifact_path, 990, 20, &runtime, &work_root).unwrap();
+        assert_eq!(total_rows, 1_000);
+        assert_eq!(page.rows.len(), 10);
+        assert!(!page.truncated);
+
+        let mut csv = Vec::new();
+        write_artifact_csv(&artifact_path, &runtime, &mut csv).unwrap();
+        let records = csv::Reader::from_reader(csv.as_slice())
+            .records()
+            .collect::<csv::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(records.len(), 1_000);
+        fs::remove_dir_all(test_dir).unwrap();
     }
 
     #[test]
@@ -974,6 +1240,7 @@ mod tests {
             threads: 2,
             temp_limit_mb: 1_024,
             min_free_space_bytes: 16 * 1024 * 1024,
+            max_artifact_bytes: 512 * 1024 * 1024,
         }
     }
 }

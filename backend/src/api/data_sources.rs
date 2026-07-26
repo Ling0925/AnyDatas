@@ -23,7 +23,7 @@ use crate::{
         ImportSheetInspection, ImportTableConfig, InspectImportTableRequest, PreviewParams,
         PreviewResponse, SharedState, TableData, UpdateSourceConfig,
     },
-    services::{maintenance, resource_control, spreadsheet},
+    services::{job_results, maintenance, resource_control, spreadsheet},
 };
 
 pub fn router() -> Router<SharedState> {
@@ -725,6 +725,15 @@ async fn delete_one(
     .bind(&id)
     .fetch_all(&state.pool)
     .await?;
+    let artifact_keys = sqlx::query_scalar::<_, String>(
+        "SELECT result_artifact_key FROM jobs WHERE source_id = ? AND result_artifact_key IS NOT NULL",
+    )
+    .bind(&id)
+    .fetch_all(&state.pool)
+    .await?;
+    for artifact_key in artifact_keys {
+        job_results::remove_artifact(&state, &artifact_key).await?;
+    }
     sqlx::query("DELETE FROM data_sources WHERE id = ? AND workspace_id = ?")
         .bind(&id)
         .bind(&auth.workspace_id)
