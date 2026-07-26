@@ -4,7 +4,10 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   ArrowRight,
+  Braces,
   Building2,
+  Clock3,
+  Database,
   FileSpreadsheet,
   LockKeyhole,
   Mail,
@@ -13,6 +16,7 @@ import {
 } from '@lucide/vue'
 
 import { errorMessage } from '../api'
+import PixelOcean from '../components/PixelOcean.vue'
 import { useAuthStore } from '../stores/auth'
 
 const auth = useAuthStore()
@@ -26,9 +30,25 @@ const form = reactive({
   passwordConfirmation: '',
 })
 
+/**
+ * 根据服务端状态切换“首次初始化”和“普通登录”模式。
+ * 为什么这么做：两种流程共用同一页面，但字段与提交接口不同；
+ * 好处：保留现有认证逻辑的同时，可以让界面文案和表单准确响应当前状态。
+ */
 const isSetup = computed(() => auth.setupRequired)
+
+/**
+ * 为当前认证模式提供明确的主操作文案。
+ * 为什么这么做：初始化会同时创建账户与工作区，仅显示“登录”容易产生误解；
+ * 好处：用户在提交前就能确认操作结果，减少首次部署时的认知成本。
+ */
 const submitLabel = computed(() => (isSetup.value ? '创建并进入工作区' : '登录'))
 
+/**
+ * 校验并提交登录或首次初始化表单。
+ * 为什么这么做：沿用既有校验、接口和安全重定向规则，避免视觉重构改变认证行为；
+ * 好处：新页面只承担展示升级，登录、初始化和错误反馈仍保持原有可靠路径。
+ */
 async function submit() {
   if (!form.email.trim() || !form.password) {
     ElMessage.warning('请输入邮箱和密码')
@@ -72,20 +92,77 @@ async function submit() {
 </script>
 
 <template>
-  <div class="auth-page">
+  <div class="auth-page" :class="{ 'auth-page--setup': isSetup }">
+    <PixelOcean class="auth-ocean" />
+
     <header class="auth-header">
       <div class="auth-brand">
         <span class="brand-mark"><FileSpreadsheet :size="19" /></span>
-        <strong>AnyDatas</strong>
+        <span class="auth-brand-name">
+          <strong>AnyDatas</strong>
+          <small>DATA WORKSPACE</small>
+        </span>
       </div>
-      <span class="auth-deployment"><ShieldCheck :size="15" /> 本机安全工作区</span>
+      <div class="auth-header-meta">
+        <span class="auth-system-code">ANALYSIS SYSTEM / 01</span>
+        <span class="auth-deployment">
+          <span class="auth-status-dot" aria-hidden="true" />
+          <ShieldCheck :size="15" />
+          本机安全工作区
+        </span>
+      </div>
     </header>
 
     <main class="auth-stage">
+      <section class="auth-story" aria-labelledby="auth-story-title">
+        <div class="auth-kicker">
+          <span>LOCAL-FIRST</span>
+          <i aria-hidden="true" />
+          DATA ANALYSIS WORKBENCH
+        </div>
+        <h1 id="auth-story-title">
+          让每一份数据
+          <span>流向答案。</span>
+        </h1>
+        <p>
+          把 Excel / CSV 导入、多表 SQL 分析、定时任务与结果导出，
+          收进同一个可靠的工作区。
+        </p>
+
+        <div class="auth-capabilities" aria-label="核心能力">
+          <article>
+            <span class="auth-capability-icon"><Database :size="17" /></span>
+            <span>
+              <strong>导入</strong>
+              <small>Excel / CSV</small>
+            </span>
+          </article>
+          <article>
+            <span class="auth-capability-icon"><Braces :size="17" /></span>
+            <span>
+              <strong>查询</strong>
+              <small>多表 SQL</small>
+            </span>
+          </article>
+          <article>
+            <span class="auth-capability-icon"><Clock3 :size="17" /></span>
+            <span>
+              <strong>调度</strong>
+              <small>后台任务与追踪</small>
+            </span>
+          </article>
+        </div>
+      </section>
+
       <section class="auth-panel" aria-labelledby="auth-title">
+        <span class="auth-panel-corner" aria-hidden="true" />
+        <div class="auth-panel-meta">
+          <span class="auth-mode">{{ isSetup ? '首次初始化' : '安全访问' }}</span>
+          <span>ACCESS / 001</span>
+        </div>
+
         <div class="auth-panel-heading">
-          <span v-if="isSetup" class="auth-mode">首次初始化</span>
-          <h1 id="auth-title">{{ isSetup ? '创建管理员账户' : '登录工作区' }}</h1>
+          <h2 id="auth-title">{{ isSetup ? '创建管理员账户' : '欢迎回来' }}</h2>
           <p>{{ isSetup ? '设置此服务器的管理员和默认工作区' : '使用管理员分配的账户继续' }}</p>
         </div>
 
@@ -152,7 +229,612 @@ async function submit() {
             <ArrowRight :size="16" />
           </el-button>
         </form>
+
+        <div class="auth-panel-footer" aria-hidden="true">
+          <span><i /> SYSTEM READY</span>
+          <span>ENCRYPTED SESSION</span>
+        </div>
       </section>
     </main>
+
+    <footer class="auth-footer" aria-hidden="true">
+      <span>ANYDATAS / LOCAL-FIRST ANALYTICS</span>
+      <span class="auth-tide-status">
+        <i />
+        <span class="auth-tide-live">PIXEL TIDE / LIVE</span>
+        <span class="auth-tide-static">PIXEL TIDE / STATIC</span>
+      </span>
+    </footer>
   </div>
 </template>
+
+<style scoped>
+.auth-page {
+  position: relative;
+  isolation: isolate;
+  height: 100%;
+  min-height: 620px;
+  display: grid;
+  grid-template-rows: 64px minmax(0, 1fr) 38px;
+  overflow: hidden;
+  color: var(--text);
+  background: #fbfdfc;
+}
+
+.auth-ocean {
+  position: absolute;
+  inset: 64px 0 0;
+  z-index: 0;
+  width: 100%;
+  height: calc(100% - 64px);
+}
+
+.auth-header {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 30px;
+  background: rgb(255 255 255 / 88%);
+  border-bottom: 1px solid rgb(203 214 209 / 78%);
+  backdrop-filter: blur(12px);
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.auth-brand-name {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.auth-brand-name strong {
+  font-size: 18px;
+  line-height: 1.1;
+  font-weight: 760;
+  letter-spacing: -0.02em;
+}
+
+.auth-brand-name small {
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  line-height: 1.1;
+  letter-spacing: 0.14em;
+}
+
+.auth-header-meta,
+.auth-deployment {
+  display: flex;
+  align-items: center;
+}
+
+.auth-header-meta {
+  gap: 20px;
+}
+
+.auth-system-code {
+  color: var(--subtle);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+}
+
+.auth-deployment {
+  position: relative;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.auth-deployment::before {
+  content: "";
+  width: 1px;
+  height: 18px;
+  margin-right: 13px;
+  background: var(--line);
+}
+
+.auth-status-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--primary);
+  box-shadow: 0 0 0 4px rgb(20 125 100 / 10%);
+}
+
+.auth-stage {
+  position: relative;
+  z-index: 2;
+  min-height: 0;
+  width: min(1180px, calc(100% - 88px));
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 440px;
+  align-items: center;
+  gap: clamp(72px, 9vw, 148px);
+  padding: 36px 0 44px;
+  overflow-y: auto;
+}
+
+.auth-story {
+  align-self: center;
+  max-width: 620px;
+  padding-bottom: 26px;
+}
+
+.auth-kicker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 25px;
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.14em;
+}
+
+.auth-kicker span {
+  padding: 6px 8px;
+  color: var(--primary-hover);
+  background: var(--primary-soft);
+  border: 1px solid rgb(20 125 100 / 13%);
+}
+
+.auth-kicker i {
+  width: 28px;
+  height: 1px;
+  background: var(--line-strong);
+}
+
+.auth-story h1 {
+  max-width: 590px;
+  font-size: clamp(45px, 4.4vw, 67px);
+  line-height: 1.08;
+  font-weight: 760;
+  letter-spacing: -0.055em;
+}
+
+.auth-story h1 span {
+  display: block;
+  color: var(--primary);
+}
+
+.auth-story > p {
+  max-width: 520px;
+  margin-top: 24px;
+  color: #506059;
+  font-size: 15px;
+  line-height: 1.8;
+}
+
+.auth-capabilities {
+  max-width: 580px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin-top: 42px;
+  padding: 1px;
+  background: rgb(203 214 209 / 74%);
+  border: 1px solid rgb(203 214 209 / 74%);
+}
+
+.auth-capabilities article {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 13px 12px;
+  background: rgb(255 255 255 / 88%);
+  backdrop-filter: blur(5px);
+}
+
+.auth-capability-icon {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 33px;
+  height: 33px;
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.auth-capabilities article > span:last-child {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.auth-capabilities strong {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.auth-capabilities small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auth-panel {
+  position: relative;
+  width: 440px;
+  padding: 27px 30px 20px;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  box-shadow:
+    0 28px 70px rgb(25 58 47 / 13%),
+    0 3px 10px rgb(25 58 47 / 5%);
+}
+
+.auth-panel::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 98px;
+  height: 3px;
+  background: var(--primary);
+}
+
+.auth-panel-corner {
+  position: absolute;
+  top: 13px;
+  right: 13px;
+  width: 15px;
+  height: 15px;
+  border-top: 1px solid var(--line-strong);
+  border-right: 1px solid var(--line-strong);
+}
+
+.auth-panel-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 19px;
+}
+
+.auth-panel-meta > span:last-child {
+  padding-right: 18px;
+  color: var(--subtle);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  letter-spacing: 0.12em;
+}
+
+.auth-mode {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 8px;
+  color: var(--primary-hover);
+  background: var(--primary-soft);
+  border: 1px solid rgb(20 125 100 / 13%);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.auth-panel-heading {
+  margin-bottom: 23px;
+}
+
+.auth-panel-heading h2 {
+  margin: 0 0 7px;
+  font-size: 25px;
+  line-height: 1.25;
+  font-weight: 750;
+  letter-spacing: -0.025em;
+}
+
+.auth-panel-heading p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.auth-alert {
+  margin-bottom: 18px;
+}
+
+.auth-form {
+  display: grid;
+  gap: 16px;
+}
+
+.auth-field {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  color: #405048;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.auth-field > small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.auth-field :deep(.el-input__wrapper) {
+  min-height: 43px;
+  background: #fbfdfc;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: none;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    background 160ms ease;
+}
+
+.auth-field :deep(.el-input__wrapper:hover) {
+  border-color: var(--line-strong);
+}
+
+.auth-field :deep(.el-input__wrapper.is-focus) {
+  background: #fff;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgb(20 125 100 / 11%);
+}
+
+.auth-field :deep(.el-input__prefix-inner) {
+  color: var(--muted);
+}
+
+.auth-submit {
+  width: 100%;
+  min-height: 45px;
+  margin-top: 5px;
+  border-radius: 6px;
+  box-shadow: 0 10px 24px rgb(20 125 100 / 18%);
+}
+
+.auth-submit :deep(span) {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.auth-panel-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 20px;
+  padding-top: 15px;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  letter-spacing: 0.08em;
+}
+
+.auth-panel-footer span:first-child,
+.auth-tide-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.auth-panel-footer i,
+.auth-tide-status i {
+  width: 5px;
+  height: 5px;
+  background: var(--primary);
+  box-shadow: 0 0 0 3px rgb(20 125 100 / 10%);
+}
+
+.auth-tide-static {
+  display: none;
+}
+
+.auth-footer {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 30px;
+  color: rgb(64 80 72 / 72%);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  letter-spacing: 0.11em;
+}
+
+@media (max-width: 1080px) {
+  .auth-page {
+    min-height: 100%;
+    grid-template-rows: 64px max-content 38px;
+    overflow-y: auto;
+  }
+
+  .auth-stage {
+    min-height: max-content;
+    width: min(620px, calc(100% - 48px));
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: max-content max-content;
+    align-items: start;
+    align-content: start;
+    gap: 42px;
+    padding: 54px 0 76px;
+    overflow: visible;
+  }
+
+  .auth-story {
+    align-self: start;
+    padding: 0;
+  }
+
+  .auth-story h1 {
+    max-width: 560px;
+    font-size: clamp(44px, 8vw, 62px);
+  }
+
+  .auth-panel {
+    width: 100%;
+  }
+
+  .auth-footer {
+    position: relative;
+    height: 38px;
+  }
+}
+
+@media (max-width: 640px) {
+  .auth-page {
+    grid-template-rows: 60px max-content 38px;
+  }
+
+  .auth-ocean {
+    inset: 60px 0 0;
+    height: calc(100% - 60px);
+  }
+
+  .auth-header {
+    padding: 0 18px;
+  }
+
+  .auth-system-code {
+    display: none;
+  }
+
+  .auth-deployment::before {
+    display: none;
+  }
+
+  .auth-deployment {
+    font-size: 0;
+  }
+
+  .auth-deployment svg {
+    width: 17px;
+    height: 17px;
+  }
+
+  .auth-stage {
+    width: calc(100% - 30px);
+    gap: 32px;
+    padding: 34px 0 70px;
+  }
+
+  .auth-kicker {
+    margin-bottom: 18px;
+    font-size: 8px;
+    letter-spacing: 0.08em;
+  }
+
+  .auth-kicker i {
+    width: 14px;
+  }
+
+  .auth-story h1 {
+    font-size: clamp(36px, 12vw, 50px);
+  }
+
+  .auth-story > p {
+    margin-top: 18px;
+    font-size: 13px;
+  }
+
+  .auth-capabilities {
+    margin-top: 28px;
+    grid-template-columns: 1fr;
+  }
+
+  .auth-capabilities article {
+    padding: 10px 12px;
+  }
+
+  .auth-panel {
+    padding: 24px 21px 18px;
+  }
+
+  .auth-panel-meta > span:last-child,
+  .auth-panel-footer > span:last-child {
+    display: none;
+  }
+
+  .auth-footer {
+    padding: 0 18px;
+  }
+
+  .auth-footer > span:first-child {
+    display: none;
+  }
+}
+
+@media (max-height: 760px) and (min-width: 1081px) {
+  .auth-stage {
+    padding-top: 22px;
+    padding-bottom: 28px;
+  }
+
+  .auth-story h1 {
+    font-size: 50px;
+  }
+
+  .auth-story > p {
+    margin-top: 17px;
+  }
+
+  .auth-capabilities {
+    margin-top: 28px;
+  }
+
+  .auth-page--setup .auth-panel {
+    padding-top: 20px;
+    padding-bottom: 15px;
+  }
+
+  .auth-page--setup .auth-panel-meta {
+    margin-bottom: 12px;
+  }
+
+  .auth-page--setup .auth-panel-heading {
+    margin-bottom: 15px;
+  }
+
+  .auth-page--setup .auth-form {
+    gap: 11px;
+  }
+
+  .auth-page--setup .auth-field {
+    gap: 5px;
+  }
+
+  .auth-page--setup .auth-field :deep(.el-input__wrapper) {
+    min-height: 38px;
+  }
+
+  .auth-page--setup .auth-panel-footer {
+    margin-top: 13px;
+    padding-top: 11px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-field :deep(.el-input__wrapper) {
+    transition: none;
+  }
+
+  .auth-tide-live {
+    display: none;
+  }
+
+  .auth-tide-static {
+    display: inline;
+  }
+}
+</style>

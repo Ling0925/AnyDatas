@@ -39,6 +39,7 @@ declare module 'vue' {
     ElTooltip: typeof import('element-plus/es')['ElTooltip']
     FileSidebar: typeof import('./components/FileSidebar.vue')['default']
     InspectorPanel: typeof import('./components/InspectorPanel.vue')['default']
+    PixelOcean: typeof import('./components/PixelOcean.vue')['default']
     ResultChart: typeof import('./components/ResultChart.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
