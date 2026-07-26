@@ -17,6 +17,14 @@ import type {
 
 const DEFAULT_SQL = 'SELECT *\nFROM data\nLIMIT 200;'
 const ALIAS_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/
+const MAX_ALIAS_LENGTH = 63
+export const MAX_AGENT_TABLES = 16
+
+export interface AgentTableSelectionResult {
+  ok: boolean
+  selectedCount: number
+  message?: string
+}
 
 export const useWorkspaceStore = defineStore('workspace', () => {
   const sources = ref<DataSource[]>([])
@@ -24,6 +32,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const selectedId = ref<string | null>(null)
   const selectedTableId = ref<string | null>(null)
   const queryBindings = ref<QueryTableBinding[]>([])
+  const agentTableBindings = ref<QueryTableBinding[]>([])
   const currentSql = ref(DEFAULT_SQL)
   const preview = ref<PreviewResponse | null>(null)
   const queryResult = ref<QueryResponse | null>(null)
@@ -51,6 +60,23 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const primarySourceId = computed(
     () => boundTables.value[0]?.table.sourceId ?? selectedId.value,
   )
+  const agentBoundTables = computed(() => agentTableBindings.value.flatMap((binding) => {
+    const table = sourceTables.value.find((item) => item.id === binding.tableId)
+    return table ? [{ binding, table }] : []
+  }))
+  const invalidAgentTableBindings = computed(() => agentTableBindings.value.filter((binding) => (
+    !sourceTables.value.some((table) => table.id === binding.tableId)
+  )))
+  const agentPrimarySourceId = computed(
+    () => agentBoundTables.value[0]?.table.sourceId ?? null,
+  )
+  const agentContextReady = computed(() => {
+    if (agentTableBindings.value.length > MAX_AGENT_TABLES) return false
+    const aliases = agentTableBindings.value.map((binding) => binding.alias.toLowerCase())
+    return invalidAgentTableBindings.value.length === 0
+      && agentTableBindings.value.every((binding) => ALIAS_PATTERN.test(binding.alias))
+      && new Set(aliases).size === aliases.length
+  })
 
   /**
    * 同时加载物理文件和逻辑表，保证文件树、预览与查询绑定来自同一份服务端快照。
@@ -239,6 +265,104 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   /**
+   * 恢复 Agent 会话保存的表格快照时不丢弃已失效的表。
+   * 这样历史上下文发生变化时界面能够明确提示，而不会静默换成另一组数据。
+   */
+  function setAgentTableBindings(tables: QueryTableBinding[]) {
+    agentTableBindings.value = tables.map((binding) => ({ ...binding }))
+  }
+
+  /**
+   * 切换 Agent 的单张逻辑表选择，并为新增项生成稳定且不重复的 SQL 别名。
+   * Agent 绑定独立于工作台查询绑定，因此选择数据上下文不会意外改写正在编辑的查询。
+   */
+  function toggleAgentTableBinding(tableId: string): AgentTableSelectionResult {
+    const existing = agentTableBindings.value.some((binding) => binding.tableId === tableId)
+    if (existing) {
+      agentTableBindings.value = agentTableBindings.value.filter(
+        (binding) => binding.tableId !== tableId,
+      )
+      return { ok: true, selectedCount: agentTableBindings.value.length }
+    }
+
+    const table = sourceTables.value.find((item) => item.id === tableId)
+    if (!table) {
+      return {
+        ok: false,
+        selectedCount: agentTableBindings.value.length,
+        message: '这张表已不存在，请刷新数据文件后重试',
+      }
+    }
+    if (agentTableBindings.value.length >= MAX_AGENT_TABLES) {
+      return {
+        ok: false,
+        selectedCount: agentTableBindings.value.length,
+        message: `Agent 单次最多可选择 ${MAX_AGENT_TABLES} 张表`,
+      }
+    }
+
+    const base = agentTableBindings.value.length
+      ? agentAliasBase(table.name, agentTableBindings.value.length + 1)
+      : 'data'
+    const alias = uniqueAgentAlias(base, agentTableBindings.value)
+    agentTableBindings.value = [...agentTableBindings.value, { tableId, alias }]
+    return { ok: true, selectedCount: agentTableBindings.value.length }
+  }
+
+  /**
+   * 移除指定 Agent 表绑定，失效表同样可以通过此入口清理。
+   * 按表 ID 移除全部历史重复项，能让复选框状态恢复为单一、可理解的选择语义。
+   */
+  function removeAgentTableBinding(tableId: string): AgentTableSelectionResult {
+    agentTableBindings.value = agentTableBindings.value.filter(
+      (binding) => binding.tableId !== tableId,
+    )
+    return { ok: true, selectedCount: agentTableBindings.value.length }
+  }
+
+  /**
+   * 清空 Agent 的全部表格上下文，使后续消息恢复为默认的纯对话模式。
+   */
+  function clearAgentTableBindings(): AgentTableSelectionResult {
+    agentTableBindings.value = []
+    return { ok: true, selectedCount: 0 }
+  }
+
+  /**
+   * 按当前逻辑表顺序一次选择全部表，并在超过后端上限时返回明确失败。
+   * 只有完整选择成功才替换现有状态，避免“全部”命令悄悄漏掉部分数据表。
+   */
+  function selectAllAgentTables(): AgentTableSelectionResult {
+    if (!sourceTables.value.length) {
+      return {
+        ok: false,
+        selectedCount: agentTableBindings.value.length,
+        message: '当前没有可选择的逻辑表',
+      }
+    }
+    if (sourceTables.value.length > MAX_AGENT_TABLES) {
+      return {
+        ok: false,
+        selectedCount: agentTableBindings.value.length,
+        message: `当前共有 ${sourceTables.value.length} 张表，Agent 单次最多可选择 ${MAX_AGENT_TABLES} 张，请手动选择`,
+      }
+    }
+
+    const nextBindings: QueryTableBinding[] = []
+    for (const table of sourceTables.value) {
+      const base = nextBindings.length
+        ? agentAliasBase(table.name, nextBindings.length + 1)
+        : 'data'
+      nextBindings.push({
+        tableId: table.id,
+        alias: uniqueAgentAlias(base, nextBindings),
+      })
+    }
+    agentTableBindings.value = nextBindings
+    return { ok: true, selectedCount: nextBindings.length }
+  }
+
+  /**
    * 将当前有序绑定整体替换为保存对象的快照，保证别名与 SQL 同步恢复。
    */
   async function setQueryContext(tables: QueryTableBinding[]) {
@@ -392,6 +516,40 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return candidate
   }
 
+  /**
+   * 将 Agent 表名转换为最长 63 字符的 SQL 别名，无法直接转换时使用选择顺序生成稳定回退值。
+   * 前端提前遵守后端长度约束，可避免长 ASCII 表名看似勾选成功却让整个上下文不可发送。
+   */
+  function agentAliasBase(value: string, fallbackIndex: number) {
+    const normalized = value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_]+/g, '_')
+      .replace(/^\d+/, '')
+      .replace(/^_+|_+$/g, '')
+    return (normalized || `table_${fallbackIndex}`).slice(0, MAX_ALIAS_LENGTH)
+  }
+
+  /**
+   * 基于给定 Agent 绑定快照生成大小写不敏感的唯一别名。
+   * 去重后缀会预留在 63 字符上限内，让单选与全选都得到稳定且可被后端接受的名称。
+   */
+  function uniqueAgentAlias(base: string, bindings: QueryTableBinding[]) {
+    const used = new Set(bindings.map((binding) => binding.alias.toLowerCase()))
+    const validBase = (ALIAS_PATTERN.test(base)
+      ? base
+      : agentAliasBase(base, bindings.length + 1))
+      .slice(0, MAX_ALIAS_LENGTH)
+    let candidate = validBase
+    let suffix = 2
+    while (used.has(candidate.toLowerCase())) {
+      const suffixText = `_${suffix}`
+      candidate = `${validBase.slice(0, MAX_ALIAS_LENGTH - suffixText.length)}${suffixText}`
+      suffix += 1
+    }
+    return candidate
+  }
+
   /** 原位替换服务端返回的逻辑表，保持数组排序和当前选择稳定。 */
   function replaceTable(updated: SourceTable) {
     const index = sourceTables.value.findIndex((table) => table.id === updated.id)
@@ -411,6 +569,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     queryBindings,
     boundTables,
     primarySourceId,
+    agentTableBindings,
+    agentBoundTables,
+    invalidAgentTableBindings,
+    agentPrimarySourceId,
+    agentContextReady,
     savedQueries,
     selectedSavedQueryId,
     selectedSavedQuery,
@@ -434,6 +597,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     addTableBinding,
     renameTableBinding,
     removeTableBinding,
+    setAgentTableBindings,
+    toggleAgentTableBinding,
+    removeAgentTableBinding,
+    clearAgentTableBindings,
+    selectAllAgentTables,
     setQueryContext,
     runQuery,
     loadSavedQueries,

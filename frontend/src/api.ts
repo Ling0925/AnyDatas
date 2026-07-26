@@ -95,7 +95,7 @@ export const api = {
   async listAgentConversations() {
     return (await client.get<AiAgentConversationSummary[]>('/ai/agent/conversations')).data
   },
-  /** 创建绑定当前逻辑表快照的新会话。 */
+  /** 创建绑定 Agent 显式选表快照的新会话；空数组表示纯对话且不会自动扩展为全部表。 */
   async createAgentConversation(tables: QueryTableBinding[]) {
     return (await client.post<AiAgentConversationDetail>('/ai/agent/conversations', { tables })).data
   },
@@ -107,7 +107,7 @@ export const api = {
   async archiveAgentConversation(id: string) {
     await client.delete(`/ai/agent/conversations/${id}`)
   },
-  /** 明确将会话切换到工作台当前表绑定和配置版本。 */
+  /** 明确更新空白会话的 Agent 表格快照；已有消息时后端要求新建会话以隔离历史。 */
   async updateAgentConversationContext(id: string, tables: QueryTableBinding[]) {
     return (await client.put<AiAgentConversationDetail>(
       `/ai/agent/conversations/${id}/context`,

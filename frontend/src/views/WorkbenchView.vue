@@ -71,12 +71,11 @@ async function runQuery() {
   }
 }
 
-/** 进入独立 Agent 工作区前确认存在可信表上下文，右侧文件树仍可继续增减绑定。 */
+/**
+ * 直接进入独立 Agent 工作区；Agent 默认不携带表格，用户可以在对话页按需选择。
+ * 这样一般问题不会被工作台的查询绑定污染，也无需为了开始对话而先添加表。
+ */
 async function openAiWorkspace() {
-  if (!store.queryBindings.length) {
-    ElMessage.warning('请先从左侧加入查询表')
-    return
-  }
   await router.push('/agent')
 }
 

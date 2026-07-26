@@ -11,6 +11,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AgentTableSelector: typeof import('./components/AgentTableSelector.vue')['default']
     AiAgentTimeline: typeof import('./components/AiAgentTimeline.vue')['default']
     AiAssistantPanel: typeof import('./components/AiAssistantPanel.vue')['default']
     AiMarkdown: typeof import('./components/AiMarkdown.vue')['default']

@@ -45,7 +45,7 @@ flowchart LR
 | `ai_runs` | 一次 Agent 生命周期 | 每个会话最多一个 queued/running Run |
 | `ai_run_steps` | 每次模型决策和工具执行 | 按 ordinal 保存状态、输入、输出和错误 |
 
-会话表绑定签名包含有序 `tableId`、别名和逻辑表 `config_version`。字段类型、读取范围或表绑定变化后，旧会话不能静默继续执行；用户必须选择新建会话或显式切换上下文。
+会话表绑定签名包含有序 `tableId`、别名和逻辑表 `config_version`；空表会话使用空签名。字段类型、读取范围或表绑定变化后，旧会话不能静默继续执行。有消息的会话不能原位切换上下文，用户必须按新选择创建新会话，防止旧消息或工具结果继续暴露已排除表格；只有尚无消息的空白会话允许更新绑定。
 
 ## 4. Run 状态机
 
@@ -120,12 +120,12 @@ SSE 解析器按 `choices[].delta.tool_calls[index]` 拼接 call id、函数名�
 每轮上下文由服务端构建:
 
 - 当前工作区名称。
-- 每张逻辑表的别名、文件/Sheet/范围标签、行数、配置版本和字段定义。
-- 当前编辑器 SQL。
-- 用户选择附带的小型查询结果样本。
+- 每张已选逻辑表的别名、文件/Sheet/范围标签、行数、配置版本和字段定义。
+- 仅在 Agent 选表与工作台绑定完全一致时附带的当前编辑器 SQL。
+- 用户在绑定一致时显式开启的小型查询结果样本。
 - 服务端滚动摘要与近期活跃分支消息。
 
-不会发送原始文件、整张表、服务器文件路径、DuckDB 缓存键或全部查询结果。前端样本和工具结果都会再次在后端裁剪，复杂 JSON 值会转成短文本。
+新对话默认使用 `tables: []`。此时服务端不声明数据工具，并防御性清除当前 SQL 和结果样本；系统规则要求模型不得猜测字段、表名或数据内容。不会发送原始文件、整张表、服务器文件路径、DuckDB 缓存键或全部查询结果。前端样本和工具结果都会再次在后端裁剪，复杂 JSON 值会转成短文本。
 
 当历史超过预算时，Runtime 用确定性规则将最早消息压成摘要。固定规则、工作区事实、摘要和近期消息分别占用明确额度，最终文本严格不超过 `ANYDATAS_AGENT_CONTEXT_CHARS`，并优先保留最新用户需求。摘要不调用模型，避免额外费用、递归超时和事实改写。重新生成旧回复时，旧分支消息标记为 `superseded`，摘要边界重置并按新活跃分支重建。
 
@@ -137,7 +137,7 @@ SSE 解析器按 `choices[].delta.tool_calls[index]` 拼接 call id、函数名�
 | POST | `/api/ai/agent/conversations` | 创建会话和表绑定快照 |
 | GET | `/api/ai/agent/conversations/{id}` | 获取消息和最近 Run |
 | DELETE | `/api/ai/agent/conversations/{id}` | 归档会话 |
-| PUT | `/api/ai/agent/conversations/{id}/context` | 显式切换表上下文 |
+| PUT | `/api/ai/agent/conversations/{id}/context` | 更新尚无消息的空白会话表上下文 |
 | POST | `/api/ai/agent/conversations/{id}/runs` | 创建异步 Run |
 | POST | `/api/ai/agent/conversations/{id}/regenerate` | 从助手消息处分叉重生成 |
 | GET | `/api/ai/agent/runs/{id}` | 获取 Run 和 Steps |

@@ -51,7 +51,7 @@ const activeConversation = ref<AiAgentConversationDetail | null>(null)
 const activeRun = ref<AiAgentRun | null>(null)
 const draft = ref('')
 const reasoningEffort = ref<AiAgentReasoningEffort>(loadReasoningEffort())
-const includeResultContext = ref(true)
+const includeResultContext = ref(false)
 const listLoading = ref(false)
 const conversationLoading = ref(false)
 const startingRun = ref(false)
@@ -70,10 +70,15 @@ const reasoningOptions = [
   { label: '深入', value: 'high' },
 ]
 
-const starterPrompts = [
-  '先检查表结构和实际数据，帮我识别适合分析的指标',
-  '检查当前查询是否存在口径或关联问题',
-  '根据当前多表上下文设计一套分析方案',
+const dataStarterPrompts = [
+  '先检查已选表的结构和实际数据，帮我识别适合分析的指标',
+  '检查已选表是否存在口径或关联问题',
+  '根据当前表格上下文设计一套分析方案',
+]
+const generalStarterPrompts = [
+  '帮我梳理这个分析需求，先列出需要确认的业务口径',
+  '给我一套从原始数据到分析结论的实施步骤',
+  '解释一下怎样设计一条清晰、可复核的数据分析流程',
 ]
 
 const messages = computed(() => activeConversation.value?.messages ?? [])
@@ -85,10 +90,8 @@ const filteredConversations = computed(() => {
   ))
 })
 const sending = computed(() => startingRun.value || isActiveRun(activeRun.value))
-const currentContextReady = computed(() => store.queryBindings.every((binding) => (
-  store.sourceTables.some((table) => table.id === binding.tableId)
-)))
-const currentContextSignature = computed(() => store.queryBindings
+const currentContextReady = computed(() => store.agentContextReady)
+const currentContextSignature = computed(() => store.agentTableBindings
   .map((binding) => {
     const version = store.sourceTables.find((table) => table.id === binding.tableId)?.configVersion ?? 0
     return `${binding.tableId}:${binding.alias}:${version}`
@@ -101,16 +104,42 @@ const contextChanged = computed(() => Boolean(
 ))
 const canSend = computed(() => Boolean(
   draft.value.trim()
-  && store.queryBindings.length
   && currentContextReady.value
   && !sending.value
   && !contextChanged.value,
 ))
-const contextLabel = computed(() => {
-  const tables = `${store.boundTables.length} 张表`
-  if (sending.value) return `${tables} · Agent 运行中`
-  return store.queryResult && includeResultContext.value ? `${tables} · 含结果样本` : tables
+const canUseAgentSql = computed(() => Boolean(
+  store.agentTableBindings.length
+  && currentContextReady.value
+  && !contextChanged.value,
+))
+const starterPrompts = computed(() => (
+  store.agentTableBindings.length ? dataStarterPrompts : generalStarterPrompts
+))
+const workbenchContextMatches = computed(() => {
+  if (!store.agentTableBindings.length || !currentContextReady.value) return false
+  if (store.agentTableBindings.length !== store.queryBindings.length) return false
+  return store.agentTableBindings.every((binding, index) => {
+    const queryBinding = store.queryBindings[index]
+    return queryBinding?.tableId === binding.tableId && queryBinding.alias === binding.alias
+  })
 })
+const slashCommandVisible = computed(() => {
+  const value = draft.value.trim().toLocaleLowerCase()
+  return value === '/' || (value.startsWith('/') && '/all'.startsWith(value))
+})
+const contextLabel = computed(() => {
+  const tables = store.agentTableBindings.length
+    ? `${store.agentBoundTables.length} 张表`
+    : '未选择表格'
+  if (sending.value) return `${tables} · Agent 运行中`
+  return workbenchContextMatches.value && store.queryResult && includeResultContext.value
+    ? `${tables} · 含结果样本`
+    : tables
+})
+const agentModeLabel = computed(() => (
+  store.agentTableBindings.length ? '自动规划 · 只读工具' : '仅对话模式'
+))
 const runNeedsAttention = computed(() => Boolean(
   activeRun.value
   && !activeRun.value.assistantMessageId
@@ -144,6 +173,9 @@ watch(
 watch(reasoningEffort, (value) => {
   window.localStorage.setItem('anydatas.agent.reasoningEffort', value)
 })
+watch(workbenchContextMatches, (matches) => {
+  if (!matches) includeResultContext.value = false
+})
 onBeforeUnmount(() => {
   invalidateRunTracking()
 })
@@ -174,6 +206,7 @@ function resetState() {
   conversations.value = []
   activeConversation.value = null
   activeRun.value = null
+  store.clearAgentTableBindings()
   draft.value = ''
   conversationSearch.value = ''
   manualPreviews.value = {}
@@ -207,6 +240,7 @@ async function openConversation(id: string) {
     const detail = await api.getAgentConversation(id)
     activeConversation.value = detail
     activeRun.value = detail.latestRun
+    store.setAgentTableBindings(detail.conversation.tables)
     manualPreviews.value = {}
     previewErrors.value = {}
     if (isActiveRun(detail.latestRun)) void trackRun(detail.latestRun)
@@ -218,26 +252,20 @@ async function openConversation(id: string) {
   }
 }
 
-/** 创建独立服务端会话，旧对话继续保留在历史列表中，无需危险的本地清空确认。 */
+/**
+ * 进入本地新对话草稿态并清空表格选择，首次发送时才创建服务端记录。
+ * 这样每个新对话都真正从零上下文开始，也不会制造没有消息的空历史。
+ */
 async function startNewConversation() {
-  if (!store.queryBindings.length || !currentContextReady.value) {
-    ElMessage.warning('请先从右侧加入查询表')
-    return
-  }
-  conversationLoading.value = true
-  try {
-    invalidateRunTracking()
-    const detail = await api.createAgentConversation(store.queryBindings)
-    activeConversation.value = detail
-    activeRun.value = detail.latestRun
-    draft.value = ''
-    await refreshConversationList()
-    await scrollToBottom()
-  } catch (error) {
-    ElMessage.error(`新建 AI 会话失败：${errorMessage(error)}`)
-  } finally {
-    conversationLoading.value = false
-  }
+  invalidateRunTracking()
+  activeConversation.value = null
+  activeRun.value = null
+  store.clearAgentTableBindings()
+  includeResultContext.value = false
+  draft.value = ''
+  manualPreviews.value = {}
+  previewErrors.value = {}
+  await scrollToBottom()
 }
 
 /** 归档当前历史项并切换到下一条会话；后台运行中的会话由后端拒绝归档。 */
@@ -261,6 +289,7 @@ async function archiveConversation(conversation: AiAgentConversationSummary) {
       activeRun.value = null
       const next = conversations.value[0]
       if (next) await openConversation(next.id)
+      else store.clearAgentTableBindings()
     }
     ElMessage.success('AI 对话已归档')
   } catch (error) {
@@ -268,19 +297,27 @@ async function archiveConversation(conversation: AiAgentConversationSummary) {
   }
 }
 
-/** 显式接受工作台当前表和配置版本，后续 Run 不会静默混用旧 Schema。 */
-async function adoptCurrentContext() {
+/**
+ * 表格选择发生变化时从当前历史分叉为本地新对话，保留用户刚刚做出的选择。
+ * 不原地改写旧会话可避免已排除表格仍从历史消息或工具结果进入模型。
+ */
+async function continueWithCurrentSelection() {
+  invalidateRunTracking()
+  activeConversation.value = null
+  activeRun.value = null
+  includeResultContext.value = false
+  manualPreviews.value = {}
+  previewErrors.value = {}
+  await scrollToBottom()
+}
+
+/**
+ * 重新读取当前历史会话，同时恢复它固化的表格快照。
+ * 这是取消误操作的安全路径，不会把新选择写回已有消息历史。
+ */
+async function restoreConversationSelection() {
   const id = activeConversation.value?.conversation.id
-  if (!id || sending.value) return
-  try {
-    const detail = await api.updateAgentConversationContext(id, store.queryBindings)
-    activeConversation.value = detail
-    activeRun.value = detail.latestRun
-    await refreshConversationList()
-    ElMessage.success('已切换到当前数据上下文')
-  } catch (error) {
-    ElMessage.error(`上下文切换失败：${errorMessage(error)}`)
-  }
+  if (id) await openConversation(id)
 }
 
 /** 将起始问题放入输入框，让用户可以补充业务口径后再发送。 */
@@ -291,7 +328,7 @@ function selectStarter(prompt: string) {
 /** 确保首次发送拥有服务端会话，创建过程不会清空已经输入的草稿。 */
 async function ensureConversation(): Promise<AiAgentConversationDetail> {
   if (activeConversation.value) return activeConversation.value
-  const detail = await api.createAgentConversation(store.queryBindings)
+  const detail = await api.createAgentConversation(store.agentTableBindings)
   activeConversation.value = detail
   activeRun.value = detail.latestRun
   await refreshConversationList()
@@ -305,8 +342,12 @@ async function ensureConversation(): Promise<AiAgentConversationDetail> {
 async function sendMessage() {
   const content = draft.value.trim()
   if (!content || sending.value) return
-  if (!store.queryBindings.length || !currentContextReady.value) {
-    ElMessage.warning('请先从右侧加入查询表')
+  if (/^\/all(?:\s+|$)/i.test(content)) {
+    await applyAllTablesCommand(true)
+    return
+  }
+  if (!currentContextReady.value) {
+    ElMessage.warning('所选表格已失效，请先从右侧移除或重新选择')
     return
   }
   if (contextChanged.value) {
@@ -318,10 +359,14 @@ async function sendMessage() {
     const detail = await ensureConversation()
     const run = await api.startAgentRun(detail.conversation.id, {
       message: content,
-      currentSql: store.currentSql,
-      tables: store.queryBindings,
+      currentSql: workbenchContextMatches.value && store.currentSql.trim()
+        ? store.currentSql
+        : undefined,
+      tables: store.agentTableBindings,
       reasoningEffort: reasoningEffort.value,
-      resultContext: includeResultContext.value && store.queryResult
+      resultContext: workbenchContextMatches.value
+        && includeResultContext.value
+        && store.queryResult
         ? {
             columns: store.queryResult.columns.slice(0, 20),
             rows: store.queryResult.rows.slice(0, 8).map((row) => row.slice(0, 20)),
@@ -529,15 +574,23 @@ function normalizeSql(sql: string): string {
 
 /** 在不修改编辑器的情况下执行候选查询，并把临时结果附着在当前消息。 */
 async function previewSql(message: AiAgentMessage) {
-  if (!message.sql || !store.primarySourceId || !store.queryBindings.length) return
+  if (
+    !message.sql
+    || !store.agentPrimarySourceId
+    || !store.agentTableBindings.length
+    || !currentContextReady.value
+  ) {
+    ElMessage.warning('请先选择候选 SQL 所需的表格')
+    return
+  }
   previewingId.value = message.id
   const errors = { ...previewErrors.value }
   delete errors[message.id]
   previewErrors.value = errors
   try {
     const result = await api.runQuery({
-      sourceId: store.primarySourceId,
-      tables: store.queryBindings,
+      sourceId: store.agentPrimarySourceId,
+      tables: store.agentTableBindings,
       sql: message.sql,
       limit: 20,
     })
@@ -560,19 +613,53 @@ async function previewSql(message: AiAgentMessage) {
 
 /** 将候选 SQL 交给父工作台应用，编辑器和正式结果区仍保持单一状态来源。 */
 function applySql(sql: string) {
+  if (!canUseAgentSql.value) {
+    ElMessage.warning('请先恢复这段对话的有效表格上下文')
+    return
+  }
   emit('applySql', sql)
 }
 
 /** 将候选 SQL 应用并运行，Agent 的小样本工具结果不会替代正式查询结果。 */
 function runSql(sql: string) {
+  if (!canUseAgentSql.value) {
+    ElMessage.warning('请先恢复这段对话的有效表格上下文')
+    return
+  }
   emit('runSql', sql)
 }
 
-/** Enter 发送、Shift+Enter 换行，同时避开中文输入法组合阶段。 */
+/**
+ * 执行 `/all` 时把命令展开为明确的表格快照，并从真正发送给模型的文本中剥离命令。
+ * 前端固化具体 ID 可避免未来新增表格后悄悄改变旧对话上下文。
+ */
+async function applyAllTablesCommand(sendRemaining = false) {
+  const result = store.selectAllAgentTables()
+  if (!result.ok) {
+    ElMessage.warning(result.message ?? '无法选择全部表格')
+    return
+  }
+  const normalizedDraft = draft.value.trim()
+  draft.value = /^\/all(?:\s+|$)/i.test(normalizedDraft)
+    ? normalizedDraft.replace(/^\/all(?:\s+|$)/i, '').trimStart()
+    : ''
+  if (activeConversation.value) await continueWithCurrentSelection()
+  ElMessage.success(`已选择全部 ${store.agentTableBindings.length} 张表`)
+  if (sendRemaining && draft.value.trim()) await sendMessage()
+}
+
+/**
+ * Enter 优先识别精确 `/all` 命令，其余内容正常发送；Shift+Enter 与输入法组合仍用于换行。
+ * 严格命令边界可避免 `/alligator` 一类普通文本被误当成全选操作。
+ */
 function handleComposerKeydown(event: Event | KeyboardEvent) {
   if (!(event instanceof KeyboardEvent)) return
   if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return
   event.preventDefault()
+  if (/^\/all(?:\s+|$)/i.test(draft.value.trim())) {
+    void applyAllTablesCommand(true)
+    return
+  }
   void sendMessage()
 }
 
@@ -745,7 +832,7 @@ async function scrollToBottom(force = true) {
           <span class="ai-assistant-mark"><Bot :size="16" /></span>
           <div>
             <strong>{{ activeConversation?.conversation.title ?? '新对话' }}</strong>
-            <span>{{ contextLabel }} · 自动规划 · 只读工具</span>
+            <span>{{ contextLabel }} · {{ agentModeLabel }}</span>
           </div>
         </div>
         <div class="ai-assistant-actions">
@@ -758,14 +845,33 @@ async function scrollToBottom(force = true) {
             <div class="ai-context-popover">
               <strong>当前运行上下文</strong>
               <dl>
-                <div><dt>逻辑表</dt><dd>{{ store.boundTables.length }}</dd></div>
-                <div><dt>当前 SQL</dt><dd>{{ store.currentSql.trim() ? '已包含' : '无' }}</dd></div>
-                <div><dt>查询结果</dt><dd>{{ store.queryResult ? `${store.queryResult.rowCount} 行` : '无' }}</dd></div>
-                <div><dt>执行模式</dt><dd>自动规划 · 只读工具</dd></div>
+                <div><dt>逻辑表</dt><dd>{{ store.agentBoundTables.length }}</dd></div>
+                <div>
+                  <dt>当前 SQL</dt>
+                  <dd>{{ workbenchContextMatches && store.currentSql.trim() ? '已包含' : '不包含' }}</dd>
+                </div>
+                <div>
+                  <dt>查询结果</dt>
+                  <dd>
+                    {{ workbenchContextMatches && store.queryResult
+                      ? `${store.queryResult.rowCount} 行可选`
+                      : '不包含' }}
+                  </dd>
+                </div>
+                <div>
+                  <dt>执行模式</dt>
+                  <dd>{{ store.agentTableBindings.length ? '自动规划 · 只读工具' : '仅对话' }}</dd>
+                </div>
               </dl>
-              <el-checkbox v-model="includeResultContext" :disabled="!store.queryResult">
+              <el-checkbox
+                v-model="includeResultContext"
+                :disabled="!workbenchContextMatches || !store.queryResult"
+              >
                 包含小型结果样本
               </el-checkbox>
+              <p v-if="!workbenchContextMatches" class="ai-context-note">
+                只有 AI 选表与工作台绑定完全一致时，才可附加当前 SQL 和结果样本。
+              </p>
             </div>
           </el-popover>
         </div>
@@ -775,17 +881,26 @@ async function scrollToBottom(force = true) {
         <div v-if="contextChanged" class="ai-context-warning">
           <div>
             <Database :size="16" />
-            <span><strong>数据上下文已变化</strong>表绑定或读取配置与这段对话不一致</span>
+            <span><strong>表格选择已变化</strong>为避免旧消息泄露已排除表格，请使用新对话继续</span>
           </div>
           <div>
-            <el-button size="small" @click="startNewConversation">新建对话</el-button>
-            <el-button size="small" type="primary" @click="adoptCurrentContext">切换上下文</el-button>
+            <el-button size="small" @click="restoreConversationSelection">
+              恢复原选择
+            </el-button>
+            <el-button size="small" type="primary" @click="continueWithCurrentSelection">
+              按此选择新建
+            </el-button>
           </div>
         </div>
 
         <div v-if="!messages.length && !conversationLoading" class="ai-chat-empty">
           <span><Sparkles :size="26" /></span>
-          <strong>从数据开始分析</strong>
+          <strong>{{ store.agentTableBindings.length ? '从已选数据开始分析' : '从一个问题开始' }}</strong>
+          <p>
+            {{ store.agentTableBindings.length
+              ? `本对话只会使用右侧选择的 ${store.agentTableBindings.length} 张表`
+              : '默认不携带任何表格信息，也不会调用数据工具' }}
+          </p>
           <button v-for="prompt in starterPrompts" :key="prompt" type="button" @click="selectStarter(prompt)">
             {{ prompt }}
           </button>
@@ -847,18 +962,30 @@ async function scrollToBottom(force = true) {
               </header>
               <pre><code>{{ message.sql }}</code></pre>
               <div class="ai-proposal-actions">
-                <el-button size="small" aria-label="应用候选 SQL" @click="applySql(message.sql)">
+                <el-button
+                  size="small"
+                  aria-label="应用候选 SQL"
+                  :disabled="!canUseAgentSql"
+                  @click="applySql(message.sql)"
+                >
                   <Check :size="14" />应用
                 </el-button>
                 <el-button
                   size="small"
                   aria-label="预览候选 SQL 结果"
                   :loading="previewingId === message.id"
+                  :disabled="!canUseAgentSql"
                   @click="previewSql(message)"
                 >
                   <Eye :size="14" />预览
                 </el-button>
-                <el-button size="small" type="primary" aria-label="应用候选 SQL 并运行" @click="runSql(message.sql)">
+                <el-button
+                  size="small"
+                  type="primary"
+                  aria-label="应用候选 SQL 并运行"
+                  :disabled="!canUseAgentSql"
+                  @click="runSql(message.sql)"
+                >
                   <Play :size="14" />应用并运行
                 </el-button>
               </div>
@@ -915,6 +1042,16 @@ async function scrollToBottom(force = true) {
 
       <div class="ai-composer-shell">
         <footer class="ai-composer">
+          <div v-if="slashCommandVisible" class="ai-slash-menu" role="listbox" aria-label="Slash 命令">
+            <button type="button" role="option" aria-selected="true" @click="applyAllTablesCommand()">
+              <code>/all</code>
+              <span>
+                <strong>使用全部表格</strong>
+                <small>选择当前工作区全部可用逻辑表，命令本身不会发送给 AI</small>
+              </span>
+              <kbd>Enter</kbd>
+            </button>
+          </div>
           <div class="ai-composer-main">
             <el-input
               v-model="draft"
@@ -923,7 +1060,7 @@ async function scrollToBottom(force = true) {
               :autosize="{ minRows: 2, maxRows: 6 }"
               maxlength="4000"
               :disabled="contextChanged"
-              placeholder="继续描述需求，Agent 会按需检查数据并迭代 SQL"
+              placeholder="输入问题，或输入 / 查看命令；默认不携带表格"
               @keydown="handleComposerKeydown"
             />
             <el-tooltip v-if="sending" content="停止" placement="top">
