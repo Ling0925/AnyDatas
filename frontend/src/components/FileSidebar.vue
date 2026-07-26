@@ -398,8 +398,10 @@ async function removeSource(id: string, name: string) {
 
   <el-dialog
     v-model="importDialogVisible"
+    class="import-confirm-dialog"
     title="确认数据导入"
-    width="1020px"
+    width="min(1020px, calc(100vw - 32px))"
+    align-center
     :close-on-click-modal="!importBusy"
     :close-on-press-escape="!importBusy"
     :show-close="!importBusy"
