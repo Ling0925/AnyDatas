@@ -12,38 +12,124 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  backend:
+    name: Rust backend
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: rustfmt, clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run strict Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Run backend tests
+        run: cargo test --locked
+
+  frontend:
+    name: Vue frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.10.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: Build production frontend
+        run: pnpm --dir frontend build
+
+  operations:
+    name: Operations and configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: pip
+          python-version: "3.13"
 
-      - name: Install dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+      - name: Compile operations scripts
+        run: python -m py_compile scripts/backup.py scripts/restore.py scripts/retention.py
 
-      - name: Compile source
-        run: python -m compileall -q app scripts tests
+      - name: Run backup and restore tests
+        run: python -m unittest discover -s ops_tests -v
 
-      - name: Run automated tests
-        run: python -m pytest
+      - name: Validate Grafana dashboard JSON
+        run: python -m json.tool monitoring/grafana/dashboards/anydatas-single-server.json >/dev/null
 
-      - name: Run end-to-end smoke test
-        run: python tests/smoke_test.py
-
-      - name: Validate single-server Compose configuration
-        run: docker compose -f docker-compose.yml config -q
-
-      - name: Validate optional monitoring Compose configuration
+      - name: Validate Compose configurations
         env:
           ANYDATAS_GRAFANA_ADMIN_PASSWORD: ci-validation-only
         run: |
           cp monitoring/metrics-token.example monitoring/metrics-token
+          docker compose -f docker-compose.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.operations.yml --profile tools config -q
           docker compose -f docker-compose.yml -f docker-compose.monitoring.yml config -q
+
+      - name: Validate Prometheus configuration and rules
+        run: |
+          docker run --rm \
+            --entrypoint promtool \
+            -v "$PWD/monitoring:/etc/prometheus:ro" \
+            -v "$PWD/monitoring/metrics-token.example:/run/secrets/anydatas_metrics_token:ro" \
+            prom/prometheus:v3.12.0 \
+            check config /etc/prometheus/prometheus.yml
+
+  container:
+    name: Production container
+    needs: [backend, frontend, operations]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

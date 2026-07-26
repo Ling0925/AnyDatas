@@ -1,0 +1,46 @@
+services:
+  backup:
+    image: python:3.13-slim
+    profiles: ["tools"]
+    working_dir: /workspace
+    network_mode: none
+    environment:
+      ANYDATAS_DATA_DIR: /data
+      ANYDATAS_BACKUP_DIR: /backups
+    volumes:
+      - anydatas-data:/data:ro
+      - ${ANYDATAS_BACKUP_DIR:-./backups}:/backups
+      - ./scripts:/workspace/scripts:ro
+    command:
+      - python3
+      - /workspace/scripts/backup.py
+      - --data-dir
+      - /data
+      - --output-dir
+      - /backups
+      - --retention-days
+      - ${ANYDATAS_BACKUP_RETENTION_DAYS:-14}
+    restart: "no"
+
+  restore:
+    image: python:3.13-slim
+    profiles: ["tools"]
+    working_dir: /workspace
+    network_mode: none
+    volumes:
+      - anydatas-data:/data
+      - ${ANYDATAS_BACKUP_DIR:-./backups}:/backups:ro
+      - ./scripts:/workspace/scripts:ro
+    command:
+      - python3
+      - /workspace/scripts/restore.py
+      - /backups/${ANYDATAS_RESTORE_ARCHIVE:-MISSING_BACKUP_ARCHIVE}
+      - --data-dir
+      - /data
+      - --force
+      - --in-place
+      - --owner-uid
+      - "10001"
+      - --owner-gid
+      - "10001"
+    restart: "no"
