@@ -140,7 +140,8 @@ const workbenchContextMatches = computed(() => {
 })
 const slashCommandVisible = computed(() => {
   const value = draft.value.trim().toLocaleLowerCase()
-  return value === '/' || (value.startsWith('/') && '/all'.startsWith(value))
+  if (value === '/') return true
+  return value.startsWith('/') && ['/all', '/clear'].some((command) => command.startsWith(value))
 })
 const contextLabel = computed(() => {
   const tables = store.agentTableBindings.length
@@ -522,6 +523,16 @@ async function retryRun() {
   }
 }
 
+/**
+ * 判断某条助手消息对应的 Run 是否失败/取消：这类 Run 即便已产出部分回复，也应显示可见的
+ * 重试入口，而不是只在“完全没有回复”时才可重试。
+ */
+function messageRunFailed(message: AiAgentMessage): boolean {
+  const run = activeRun.value
+  if (!run || message.role !== 'assistant') return false
+  return run.assistantMessageId === message.id && ['failed', 'canceled'].includes(run.status)
+}
+
 /** 从指定助手答复处分叉，后端负责 superseded 标记和历史摘要重建。 */
 async function regenerateMessage(message: AiAgentMessage) {
   const conversation = activeConversation.value
@@ -662,6 +673,16 @@ async function applyAllTablesCommand(sendRemaining = false) {
   if (sendRemaining && draft.value.trim()) await sendMessage()
 }
 
+/** `/clear` 命令：清空表格选择回到纯对话模式，命令文本本身不会发送给 AI。 */
+function applyClearCommand() {
+  store.clearAgentTableBindings()
+  const normalized = draft.value.trim()
+  draft.value = /^\/clear(?:\s+|$)/i.test(normalized)
+    ? normalized.replace(/^\/clear(?:\s+|$)/i, '').trimStart()
+    : ''
+  ElMessage.success('已清空表格选择，回到纯对话模式')
+}
+
 /**
  * Enter 优先识别精确 `/all` 命令，其余内容正常发送；Shift+Enter 与输入法组合仍用于换行。
  * 严格命令边界可避免 `/alligator` 一类普通文本被误当成全选操作。
@@ -672,6 +693,10 @@ function handleComposerKeydown(event: Event | KeyboardEvent) {
   event.preventDefault()
   if (/^\/all(?:\s+|$)/i.test(draft.value.trim())) {
     void applyAllTablesCommand(true)
+    return
+  }
+  if (/^\/clear(?:\s+|$)/i.test(draft.value.trim())) {
+    applyClearCommand()
     return
   }
   void sendMessage()
@@ -1012,6 +1037,13 @@ async function scrollToBottom(force = true) {
               </div>
             </section>
 
+            <div v-if="messageRunFailed(message)" class="ai-message-failed">
+              <span>
+                该回复未完成（{{ activeRun?.status === 'canceled' ? '已停止' : '运行失败' }}）
+              </span>
+              <el-button size="small" :disabled="sending" @click="retryRun">重试</el-button>
+            </div>
+
             <div class="ai-message-footer">
               <span>{{ formatMessageTime(message.createdAt) }}</span>
               <div>
@@ -1059,11 +1091,31 @@ async function scrollToBottom(force = true) {
       <div class="ai-composer-shell">
         <footer class="ai-composer">
           <div v-if="slashCommandVisible" class="ai-slash-menu" role="listbox" aria-label="Slash 命令">
-            <button type="button" role="option" aria-selected="true" @click="applyAllTablesCommand()">
+            <button
+              v-if="!draft.trim().toLowerCase().startsWith('/clear')"
+              type="button"
+              role="option"
+              :aria-selected="!draft.trim().toLowerCase().startsWith('/clear')"
+              @click="applyAllTablesCommand()"
+            >
               <code>/all</code>
               <span>
                 <strong>使用全部表格</strong>
                 <small>选择当前工作区全部可用逻辑表，命令本身不会发送给 AI</small>
+              </span>
+              <kbd>Enter</kbd>
+            </button>
+            <button
+              v-if="draft.trim() === '/' || '/clear'.startsWith(draft.trim().toLowerCase())"
+              type="button"
+              role="option"
+              :aria-selected="draft.trim().toLowerCase().startsWith('/clear')"
+              @click="applyClearCommand()"
+            >
+              <code>/clear</code>
+              <span>
+                <strong>清空表格选择</strong>
+                <small>回到纯对话模式，不向 AI 提供任何表结构</small>
               </span>
               <kbd>Enter</kbd>
             </button>

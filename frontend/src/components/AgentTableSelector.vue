@@ -101,6 +101,26 @@ function selectAllTables() {
 }
 
 /**
+ * 一键把工作台正在查询的表同步为 AI 上下文，解决“在工作台绑了表、进 AI 却是已选 0”的错配。
+ * 这是显式操作，不改变“默认不向 AI 提供表结构”的隐私默认。
+ */
+function useWorkbenchTables() {
+  const bindings = store.queryBindings.filter(
+    (binding) => store.sourceTables.some((table) => table.id === binding.tableId),
+  )
+  if (!bindings.length) {
+    ElMessage.warning('工作台当前没有绑定的查询表')
+    return
+  }
+  if (bindings.length > MAX_AGENT_TABLES) {
+    ElMessage.warning(`工作台绑定了 ${bindings.length} 张表，超过单次上限 ${MAX_AGENT_TABLES} 张`)
+    return
+  }
+  store.setAgentTableBindings(bindings.map((binding) => ({ ...binding })))
+  ElMessage.success(`已同步工作台的 ${bindings.length} 张表`)
+}
+
+/**
  * 清空选择会恢复默认的纯对话模式，且不影响数据分析工作台自己的查询绑定。
  */
 function clearSelection() {
@@ -131,6 +151,16 @@ function tableMeta(table: SourceTable) {
         <span>已选 {{ store.agentTableBindings.length }} / {{ store.sourceTables.length }}</span>
       </div>
       <div class="agent-table-heading-actions">
+        <el-tooltip content="使用工作台正在查询的表" placement="bottom">
+          <button
+            type="button"
+            :disabled="!store.queryBindings.length"
+            aria-label="使用工作台正在查询的表"
+            @click="useWorkbenchTables"
+          >
+            工作台
+          </button>
+        </el-tooltip>
         <button
           type="button"
           :disabled="!store.sourceTables.length"
@@ -283,7 +313,7 @@ function tableMeta(table: SourceTable) {
 
     <footer class="agent-table-footer">
       <span>单次最多 {{ MAX_AGENT_TABLES }} 张</span>
-      <span>可输入 <code>/all</code> 选择全部</span>
+      <span>命令 <code>/all</code> 全选 · <code>/clear</code> 清空</span>
     </footer>
   </aside>
 </template>

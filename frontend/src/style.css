@@ -3073,6 +3073,21 @@ input:focus-visible {
   line-height: 1.45;
 }
 
+/* 失败/取消运行的就地重试条：即使已产出部分回复也提供明确的重试入口。 */
+.ai-message-failed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--red-border);
+  border-radius: var(--radius-md);
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: var(--fs-caption);
+}
+
 .ai-message-footer {
   min-width: 0;
   min-height: 25px;
