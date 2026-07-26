@@ -69,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
         job_result_retention_days: config.job_result_retention_days,
         metrics: RuntimeMetrics::new(),
         agent_control: Default::default(),
+        agent_events: Default::default(),
         agent_max_steps: config.agent_max_steps,
         agent_timeout_seconds: config.agent_timeout_seconds,
         agent_context_chars: config.agent_context_chars,

@@ -54,7 +54,10 @@
 | --- | --- |
 | `backend/src/api/auth.rs` | 首次初始化、密码登录、会话、退出和工作区身份提取 |
 | `backend/src/api/data_sources.rs` | 文件暂存预检、确认导入、列表、删除和历史默认表兼容接口 |
-| `backend/src/api/ai.rs` | 工作区 AI 配置、连接测试、可信 Schema 上下文和 SQL 生成 |
+| `backend/src/api/ai.rs` | 工作区 AI 配置和连接测试 |
+| `backend/src/api/agent.rs` | 持久化会话、Run、取消、重试和 SSE 事件接口 |
+| `backend/src/services/agent.rs` | Agent 状态机、上下文预算和只读工具编排 |
+| `backend/src/services/agent_provider.rs` | OpenAI Chat Completions、原生工具调用与流式解析 |
 | `backend/src/api/source_tables.rs` | 逻辑表列表、范围配置、独立预览、创建和删除 |
 | `backend/src/api/queries.rs` | 前台同步 SQL 查询 |
 | `backend/src/api/saved_queries.rs` | 工作区内保存查询的增删改查 |
@@ -70,12 +73,15 @@
 | `backend/migrations/0003_multi_table_queries.sql` | 逻辑表、多表绑定和历史 data 别名回填 |
 | `backend/migrations/0004_staged_imports.sql` | 24 小时导入暂存记录和文件归属校验 |
 | `backend/migrations/0005_workspace_ai.sql` | 工作区 AI 设置和加密 API Key |
+| `backend/migrations/0006_ai_agent_runtime.sql` | Agent 会话、消息、Run 和 Step |
+| `backend/migrations/0007_query_governance.sql` | 查询治理和运行元数据 |
+| `backend/migrations/0008_job_result_artifacts.sql` | 后台任务完整结果制品 |
 
 DuckDB 连接在服务端完成缓存挂载后关闭外部访问和扩展自动加载，并只接受单条 `SELECT` 或 `WITH` 查询。源数据不设置行数硬上限；CSV 逐行导入持久化单表缓存，配置版本变化后生成新缓存键。一次查询最多绑定 16 张逻辑表，同表多别名复用一个挂载。查询通过子查询包装限制返回前端的结果行数。后台任务注册 DuckDB 中断句柄，并在缓存导入期间轮询取消状态；停止运行中任务会中断查询并释放 worker，而不是只修改数据库状态。
 
 密码使用 Argon2 散列。浏览器只保存 `HttpOnly`、`SameSite=Lax` 会话 Cookie，数据库只保存会话 token 的 SHA-256 摘要；连续 5 次登录失败会锁定 15 分钟。所有数据源、查询、任务和计划接口均从会话解析工作区并在 SQL 查询层约束范围，写操作要求 Owner、Admin 或 Analyst。
 
-AI API Key 使用 AES-256-GCM 加密，主密钥默认保存在数据卷 `/data/.secret-key` 且不会经 API 返回。AI Schema 上下文由后端根据已授权的逻辑表绑定重建，不接受浏览器伪造字段结构；最近消息与结果样本受数量和字符上限约束。模型返回的候选内容仍需通过单条只读 SQL 校验，预览不会修改编辑器，只有用户确认后才应用或执行。
+AI API Key 使用 AES-256-GCM 加密，主密钥默认保存在数据卷 `/data/.secret-key` 且不会经 API 返回。AI Schema 上下文由后端根据已授权的逻辑表绑定重建，不接受浏览器伪造字段结构；固定规则、Schema、摘要和近期消息使用严格总预算。模型返回的候选内容仍需通过单条只读 SQL 校验，预览不会修改编辑器，只有用户确认后才应用或执行。运行状态由进程内事件总线推送 SSE，SQLite 保持唯一事实来源；断线时前端才回退短轮询。
 
 ## 5. API 覆盖
 
@@ -112,7 +118,12 @@ AI API Key 使用 AES-256-GCM 加密，主密钥默认保存在数据卷 `/data/
 | `POST /api/schedules/{id}/run` | 完成 |
 | `GET/PUT /api/ai/settings` | 完成 |
 | `POST /api/ai/settings/test` | 完成 |
-| `POST /api/ai/sql` | 完成 |
+| `GET/POST /api/ai/agent/conversations` | 完成 |
+| `POST /api/ai/agent/conversations/{id}/runs` | 完成 |
+| `GET /api/ai/agent/runs/{id}` | 完成 |
+| `GET /api/ai/agent/runs/{id}/events` | 完成 |
+| `POST /api/ai/agent/runs/{id}/cancel` | 完成 |
+| `POST /api/ai/agent/runs/{id}/retry` | 完成 |
 
 ## 6. 数据与迁移边界
 

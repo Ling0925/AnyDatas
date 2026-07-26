@@ -43,32 +43,7 @@ export interface AiSettingsPayload {
   clearApiKey: boolean
 }
 
-export interface AiSqlResponse {
-  sql: string
-  model: string
-}
-
 export type AiChatRole = 'user' | 'assistant'
-
-export interface AiChatHistoryMessage {
-  role: AiChatRole
-  content: string
-}
-
-export interface AiResultContext {
-  columns: FieldDefinition[]
-  rows: unknown[][]
-  rowCount: number
-  truncated: boolean
-}
-
-export interface AiChatRequest {
-  message: string
-  currentSql?: string
-  tables: QueryTableBinding[]
-  history: AiChatHistoryMessage[]
-  resultContext?: AiResultContext
-}
 
 export interface AiToolRun {
   tool: 'previewSql' | 'inspectTable' | string
@@ -76,13 +51,6 @@ export interface AiToolRun {
   ok: boolean
   result: QueryResponse | null
   error: string | null
-}
-
-export interface AiChatResponse {
-  message: string
-  sql: string | null
-  model: string
-  toolRuns: AiToolRun[]
 }
 
 export type AiAgentRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'canceled'
@@ -149,11 +117,19 @@ export interface AiAgentConversationDetail {
   latestRun: AiAgentRun | null
 }
 
+/** Agent 可选携带的有界查询样本；浏览器不会把完整结果或整张表发送给模型。 */
+export interface AiAgentResultContext {
+  columns: FieldDefinition[]
+  rows: unknown[][]
+  rowCount: number
+  truncated: boolean
+}
+
 export interface AiAgentRunPayload {
   message: string
   currentSql?: string
   tables: QueryTableBinding[]
-  resultContext?: AiResultContext
+  resultContext?: AiAgentResultContext
   reasoningEffort: AiAgentReasoningEffort
 }
 

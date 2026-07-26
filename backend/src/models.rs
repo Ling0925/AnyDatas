@@ -11,7 +11,7 @@ use duckdb::InterruptHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{FromRow, SqlitePool};
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore, watch};
 
 pub struct AppState {
     pub pool: SqlitePool,
@@ -37,6 +37,7 @@ pub struct AppState {
     pub job_result_retention_days: i64,
     pub metrics: RuntimeMetrics,
     pub agent_control: Mutex<HashMap<String, Arc<AgentRunControl>>>,
+    pub agent_events: AgentEventHub,
     pub agent_max_steps: usize,
     pub agent_timeout_seconds: u64,
     pub agent_context_chars: usize,
@@ -108,6 +109,49 @@ pub struct QueryControl {
 pub struct AgentRunControl {
     canceled: AtomicBool,
     notify: Notify,
+}
+
+/// 按 Run 维护轻量版本通知；数据库保存完整状态，内存通道只负责唤醒实时订阅者。
+///
+/// 这种设计既避免每个 SSE 连接轮询 SQLite，又保留断线重连后从数据库恢复的能力。
+#[derive(Default)]
+pub struct AgentEventHub {
+    channels: Mutex<HashMap<String, watch::Sender<u64>>>,
+}
+
+impl AgentEventHub {
+    /// 订阅一个 Run 的状态变化；先建立通道再读取数据库可以避免订阅窗口丢失更新。
+    pub fn subscribe(&self, run_id: &str) -> Result<watch::Receiver<u64>, &'static str> {
+        let mut channels = self.channels.lock().map_err(|_| "Agent 事件注册表不可用")?;
+        if let Some(sender) = channels.get(run_id) {
+            return Ok(sender.subscribe());
+        }
+        let (sender, receiver) = watch::channel(0);
+        channels.insert(run_id.to_owned(), sender);
+        Ok(receiver)
+    }
+
+    /// 在持久化事务提交后递增版本；连续更新可以合并，订阅者总会重新读取最新快照。
+    pub fn notify(&self, run_id: &str) {
+        let Ok(channels) = self.channels.lock() else {
+            tracing::error!(run_id, "Agent 事件注册表不可用");
+            return;
+        };
+        if let Some(sender) = channels.get(run_id) {
+            sender.send_modify(|version| *version = version.saturating_add(1));
+        }
+    }
+
+    /// 推送终态并移除注册项；已有订阅者可收到最后一次更新，新连接则直接读取数据库终态。
+    pub fn finish(&self, run_id: &str) {
+        let Ok(mut channels) = self.channels.lock() else {
+            tracing::error!(run_id, "Agent 事件注册表不可用");
+            return;
+        };
+        if let Some(sender) = channels.remove(run_id) {
+            sender.send_modify(|version| *version = version.saturating_add(1));
+        }
+    }
 }
 
 impl AgentRunControl {
@@ -709,4 +753,36 @@ pub struct UpsertScheduleRequest {
 #[derive(Debug, Deserialize)]
 pub struct ToggleScheduleRequest {
     pub enabled: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AgentEventHub;
+
+    /// 验证普通更新只唤醒订阅者而不关闭通道，后续步骤仍可继续复用同一订阅。
+    #[tokio::test]
+    async fn agent_event_hub_notifies_active_subscribers() {
+        let hub = AgentEventHub::default();
+        let mut receiver = hub.subscribe("run-1").unwrap();
+        hub.notify("run-1");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), receiver.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*receiver.borrow_and_update(), 1);
+        assert!(receiver.has_changed().is_ok());
+    }
+
+    /// 验证终态通知在移除注册项前送达，SSE 可以读取最终快照后自然结束。
+    #[tokio::test]
+    async fn agent_event_hub_delivers_terminal_version_before_close() {
+        let hub = AgentEventHub::default();
+        let mut receiver = hub.subscribe("run-2").unwrap();
+        hub.finish("run-2");
+
+        receiver.changed().await.unwrap();
+        assert_eq!(*receiver.borrow_and_update(), 1);
+        assert!(receiver.changed().await.is_err());
+    }
 }

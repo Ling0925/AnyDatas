@@ -109,7 +109,7 @@ Owner/Admin 可在顶栏“工作区 AI 设置”中配置:
 - 当前编辑器 SQL、最近对话和用户需求。
 - 可选的当前查询结果字段、前五行样本、总行数和截断状态。
 
-每张表最多发送 200 个字段，Schema 总上下文最多 30000 字符；单条新消息最多 4000 字符，当前 SQL 最多 20000 字符。默认总上下文预算为 80000 字符；超过预算时，最早消息会被确定性压成滚动摘要并至少保留最近八条活跃消息，不会因为历史过长拒绝整轮 Agent 请求。当前结果样本最多 20 个字段、8 行，序列化后最多 6000 字符。文件名、Sheet 名、表名、字段名、字段值和历史均被明确标记为不受信任的数据，模型被要求忽略其中的指令性内容。
+每张表最多发送 200 个字段，Schema 总上下文最多 30000 字符；单条新消息最多 4000 字符，当前 SQL 最多 20000 字符。默认总上下文预算为 80000 字符；固定规则、工作区上下文、滚动摘要和近期消息使用互不重叠的分区预算，最终请求不会突破全局上限。历史过长时会确定性压缩较早消息并优先保留最新需求，不会由浏览器重复上传整段对话。当前结果样本最多 20 个字段、8 行，序列化后最多 6000 字符。文件名、Sheet 名、表名、字段名、字段值和历史均被明确标记为不受信任的数据，模型被要求忽略其中的指令性内容。
 
 模型返回后，后端提取可选 SQL 代码块，并复用查询引擎的安全校验，只接受一条 `SELECT` 或 `WITH` 查询，拒绝外部文件、网络、扩展加载及写操作。右侧 AI 面板将候选 SQL 作为独立提案展示：
 
@@ -120,7 +120,7 @@ Owner/Admin 可在顶栏“工作区 AI 设置”中配置:
 
 模型可以在步骤预算内主动请求受控的只读 SQL 预览或逻辑表样本。后端只把最多 10 列、5 行的工具结果回传模型；最后一轮关闭工具声明，要求模型在预算内形成最终答复。
 
-会话、消息、Run 和 Step 按用户及工作区保存在 SQLite。刷新后可恢复未结束 Run；重新生成会保留旧分支审计记录并将其标记为 `superseded`。浏览器不再保存或回传完整 AI 历史。
+会话、消息、Run 和 Step 按用户及工作区保存在 SQLite。运行变化通过服务端事件总线唤醒 SSE 订阅者，空闲连接不轮询 SQLite；刷新或断线后仍从数据库恢复完整快照。重新生成会保留旧分支审计记录并将其标记为 `superseded`。浏览器不再保存或回传完整 AI 历史。
 
 ### 4.3 密钥和隐私
 
@@ -130,7 +130,7 @@ Owner/Admin 可在顶栏“工作区 AI 设置”中配置:
 - 也可通过至少 32 字符的 `ANYDATAS_SECRET_KEY` 提供主密钥；启用后不得随意修改，否则历史 API Key 无法解密。
 - 备份和恢复必须包含完整 `anydatas-data` 卷，尤其是 SQLite 数据库与 `.secret-key`。
 
-AI 对话会把上述 Schema、文件元数据、当前 SQL、最近消息和启用后的结果样本发送给配置的 AI 服务。包含敏感列名、字段值或业务信息的工作区应使用获准的服务地址；用户可在 AI 上下文菜单关闭结果样本。Base URL 允许局域网地址以兼容本地模型，因此工作区管理员属于受信任角色；未来多租户托管版需要额外增加网络出口策略和 SSRF 防护。
+AI 对话会把上述 Schema、文件元数据、当前 SQL、最近消息和启用后的结果样本发送给配置的 AI 服务。包含敏感列名、字段值或业务信息的工作区应使用获准的服务地址；用户可在 AI 上下文菜单关闭结果样本。公网服务默认必须使用 HTTPS，并拒绝回环、私网、链路本地和保留地址；仅在单机受信任环境显式设置 `ANYDATAS_AI_ALLOW_PRIVATE_NETWORK=1` 后才允许局域网模型。
 
 ## 5. API
 
@@ -142,12 +142,11 @@ AI 对话会把上述 Schema、文件元数据、当前 SQL、最近消息和启
 | GET | `/api/ai/settings` | 已登录成员 | 读取不含密钥的配置摘要 |
 | PUT | `/api/ai/settings` | Owner/Admin | 更新工作区 AI 配置 |
 | POST | `/api/ai/settings/test` | Owner/Admin | 使用已保存配置执行最小 Chat 请求 |
-| POST | `/api/ai/chat` | Analyst+ | 使用最近对话、可信 Schema 和可选结果样本进行分析 |
-| POST | `/api/ai/sql` | Analyst+ | 兼容旧客户端的单轮候选 SQL 生成 |
 | GET/POST | `/api/ai/agent/conversations` | Analyst+ | 列出或创建服务端 Agent 会话 |
 | GET/DELETE | `/api/ai/agent/conversations/{id}` | Analyst+ | 读取或归档会话 |
 | POST | `/api/ai/agent/conversations/{id}/runs` | Analyst+ | 创建异步 Agent Run |
 | GET | `/api/ai/agent/runs/{id}` | Analyst+ | 读取 Run 和结构化 Steps |
+| GET | `/api/ai/agent/runs/{id}/events` | Analyst+ | 订阅事件驱动的 Run 快照 |
 | POST | `/api/ai/agent/runs/{id}/cancel` | Analyst+ | 停止模型与当前 DuckDB 工具 |
 | POST | `/api/ai/agent/runs/{id}/retry` | Analyst+ | 原位重试失败或取消 Run |
 

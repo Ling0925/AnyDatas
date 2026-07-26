@@ -180,7 +180,7 @@ function resetState() {
   previewErrors.value = {}
 }
 
-/** 初始化服务端会话列表并打开最近会话，若其 Run 尚未结束则自动恢复轮询。 */
+/** 初始化服务端会话列表并打开最近会话，若其 Run 尚未结束则自动恢复实时订阅。 */
 async function initializeConversations() {
   listLoading.value = true
   try {
@@ -300,7 +300,7 @@ async function ensureConversation(): Promise<AiAgentConversationDetail> {
 
 /**
  * 仅发送本轮增量和小型结果样本；历史、摘要、工具观察都由后端 Agent Runtime 负责。
- * API 返回 202 后立即刷新用户消息，再通过 Run 轮询观察真实模型与工具步骤。
+ * API 返回 202 后立即刷新用户消息，再通过 Run 事件流观察真实模型与工具步骤。
  */
 async function sendMessage() {
   const content = draft.value.trim()

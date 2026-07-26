@@ -317,7 +317,50 @@ pub async fn load_enabled_settings(
     state: &SharedState,
     workspace_id: &str,
 ) -> AppResult<AgentModelSettings> {
-    let settings = sqlx::query_as::<_, SettingsRow>(
+    let settings = load_settings_row(state, workspace_id)
+        .await?
+        .filter(|settings| settings.enabled)
+        .ok_or_else(|| AppError::BadRequest("当前工作区尚未启用 AI".to_owned()))?;
+    model_settings(state, settings)
+}
+
+/**
+ * 使用 Agent 的正式 Provider 发起最小连接测试，配置页与实际运行因此共享地址校验、密钥和兼容降级。
+ * 测试允许尚未启用的已保存配置，管理员可在正式开放给工作区成员前先验证模型。
+ */
+pub async fn test_connection(state: &SharedState, workspace_id: &str) -> AppResult<String> {
+    let settings = load_settings_row(state, workspace_id)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("请先保存 AI 配置".to_owned()))?;
+    if settings.model.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "测试连接前必须填写模型名称".to_owned(),
+        ));
+    }
+    let model = settings.model.clone();
+    let settings = model_settings(state, settings)?;
+    call_chat(
+        state,
+        &settings,
+        &[
+            ModelMessage::system("Reply with OK only."),
+            ModelMessage::user("Connection test"),
+        ],
+        &[],
+        false,
+        "low",
+        None,
+    )
+    .await?;
+    Ok(model)
+}
+
+/// 读取工作区模型记录；是否要求启用由调用场景决定，避免配置测试复制一套查询和解密逻辑。
+async fn load_settings_row(
+    state: &SharedState,
+    workspace_id: &str,
+) -> AppResult<Option<SettingsRow>> {
+    Ok(sqlx::query_as::<_, SettingsRow>(
         r#"
         SELECT enabled, base_url, model, api_key_ciphertext
         FROM workspace_ai_settings
@@ -326,9 +369,11 @@ pub async fn load_enabled_settings(
     )
     .bind(workspace_id)
     .fetch_optional(&state.pool)
-    .await?
-    .filter(|settings| settings.enabled)
-    .ok_or_else(|| AppError::BadRequest("当前工作区尚未启用 AI".to_owned()))?;
+    .await?)
+}
+
+/// 将数据库记录转换成仅在当前调用存活的明文配置，API Key 不会进入响应或持久化日志。
+fn model_settings(state: &SharedState, settings: SettingsRow) -> AppResult<AgentModelSettings> {
     let api_key = settings
         .api_key_ciphertext
         .as_deref()

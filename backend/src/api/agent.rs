@@ -8,11 +8,11 @@ use axum::{
     routing::{get, post, put},
 };
 use futures_util::{Stream, stream};
-use tokio::time::sleep;
+use tokio::sync::watch;
 
 use crate::{
     api::auth::AuthContext,
-    error::AppResult,
+    error::{AppError, AppResult},
     models::SharedState,
     services::agent::{
         self, AgentConversationDetail, AgentConversationSummary, AgentIdentity, AgentRun,
@@ -21,7 +21,7 @@ use crate::{
     },
 };
 
-/// 挂载服务端 Agent API；旧 `/ai/chat` 保留兼容，新工作台只使用这些持久化资源。
+/// 挂载持久化 Agent API；对话、运行和事件流共用同一套服务端状态。
 pub fn router() -> Router<SharedState> {
     Router::new()
         .route(
@@ -150,13 +150,13 @@ struct RunStreamCursor {
     identity: AgentIdentity,
     run_id: String,
     pending_run: Option<AgentRun>,
-    last_updated_at: Option<String>,
+    events: Option<watch::Receiver<u64>>,
     finished: bool,
 }
 
 /**
- * 持续推送已持久化的 Run 快照；上游分片和工具状态使用同一事件格式，断线后可安全重连。
- * 只有 updated_at 变化时才发送完整快照，避免空闲模型等待期间重复传输工具结果。
+ * 在运行时提交真实变化后推送最新 Run 快照；事件只负责唤醒，数据库仍是可恢复的事实来源。
+ * 订阅者空闲时不访问 SQLite，断线重连则先读取一次完整快照，因此不会依赖内存事件补历史。
  */
 async fn stream_run(
     State(state): State<SharedState>,
@@ -165,49 +165,66 @@ async fn stream_run(
 ) -> AppResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
     auth.require_analyst()?;
     let identity = identity(&auth);
-    let initial_run = agent::get_run(&state, &identity, &id).await?;
+    let authenticated_run = agent::get_run(&state, &identity, &id).await?;
+    let (initial_run, events) = if matches!(authenticated_run.status.as_str(), "queued" | "running")
+    {
+        let mut events = state
+            .agent_events
+            .subscribe(&id)
+            .map_err(|message| AppError::Internal(message.to_owned()))?;
+        // 标记订阅前的旧版本后再次读库；此后发生的更新会保持为未读，避免鉴权与订阅之间丢事件。
+        events.borrow_and_update();
+        let latest_run = agent::get_run(&state, &identity, &id).await?;
+        if !matches!(latest_run.status.as_str(), "queued" | "running") {
+            state.agent_events.finish(&id);
+        }
+        (latest_run, Some(events))
+    } else {
+        (authenticated_run, None)
+    };
     let cursor = RunStreamCursor {
         state,
         identity,
         run_id: id,
         pending_run: Some(initial_run),
-        last_updated_at: None,
+        events,
         finished: false,
     };
     let events = stream::unfold(cursor, |mut cursor| async move {
         if cursor.finished {
             return None;
         }
-        loop {
-            let run = match cursor.pending_run.take() {
-                Some(run) => Ok(run),
-                None => {
-                    sleep(Duration::from_millis(250)).await;
-                    agent::get_run(&cursor.state, &cursor.identity, &cursor.run_id).await
-                }
-            };
-            let run = match run {
-                Ok(run) => run,
-                Err(error) => {
-                    cursor.finished = true;
-                    let payload = serde_json::json!({ "message": error.to_string() }).to_string();
-                    return Some((
-                        Ok(Event::default().event("run-error").data(payload)),
-                        cursor,
-                    ));
-                }
-            };
-            let changed = cursor.last_updated_at.as_deref() != Some(run.updated_at.as_str());
-            let terminal = !matches!(run.status.as_str(), "queued" | "running");
-            if changed {
-                cursor.last_updated_at = Some(run.updated_at.clone());
-                cursor.finished = terminal;
+        if cursor.pending_run.is_none() {
+            let events = cursor.events.as_mut()?;
+            if events.changed().await.is_err() {
+                cursor.finished = true;
+                let payload =
+                    serde_json::json!({ "message": "Agent 实时事件通道已关闭，请重新连接" })
+                        .to_string();
+                return Some((
+                    Ok(Event::default().event("run-error").data(payload)),
+                    cursor,
+                ));
+            }
+        }
+        let run = match cursor.pending_run.take() {
+            Some(run) => Ok(run),
+            None => agent::get_run(&cursor.state, &cursor.identity, &cursor.run_id).await,
+        };
+        match run {
+            Ok(run) => {
+                cursor.finished = !matches!(run.status.as_str(), "queued" | "running");
                 let payload = serde_json::to_string(&run)
                     .unwrap_or_else(|_| "{\"errorMessage\":\"Run 序列化失败\"}".to_owned());
-                return Some((Ok(Event::default().event("run").data(payload)), cursor));
+                Some((Ok(Event::default().event("run").data(payload)), cursor))
             }
-            if terminal {
-                return None;
+            Err(error) => {
+                cursor.finished = true;
+                let payload = serde_json::json!({ "message": error.to_string() }).to_string();
+                Some((
+                    Ok(Event::default().event("run-error").data(payload)),
+                    cursor,
+                ))
             }
         }
     });

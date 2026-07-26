@@ -634,7 +634,7 @@ pub async fn regenerate_run(
     get_run(state, identity, &run_id).await
 }
 
-/// 返回 Run 及全部步骤，轮询接口因此既能恢复最终结果也能展示实时工具轨迹。
+/// 返回 Run 及全部步骤，既用于 SSE 快照，也用于断线后的显式恢复读取。
 pub async fn get_run(
     state: &SharedState,
     identity: &AgentIdentity,
@@ -687,18 +687,11 @@ pub async fn cancel_run(
             "只有排队或运行中的 Agent 可以停止".to_owned(),
         ));
     }
-    let now = Utc::now().to_rfc3339();
-    sqlx::query(
-        r#"
-        UPDATE ai_runs SET status = 'canceled', finish_reason = 'canceled',
-            error_message = NULL, finished_at = ?, updated_at = ?
-        WHERE id = ? AND status IN ('queued', 'running')
-        "#,
+    let tool_running: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM ai_run_steps WHERE run_id = ? AND kind = 'tool' AND status = 'running'",
     )
-    .bind(&now)
-    .bind(&now)
     .bind(run_id)
-    .execute(&state.pool)
+    .fetch_one(&state.pool)
     .await?;
     let control = state
         .agent_control
@@ -709,15 +702,10 @@ pub async fn cancel_run(
     if let Some(control) = control {
         control.cancel();
     }
-    let tool_running: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM ai_run_steps WHERE run_id = ? AND kind = 'tool' AND status = 'running'",
-    )
-    .bind(run_id)
-    .fetch_one(&state.pool)
-    .await?;
     if tool_running > 0 {
         interrupt_tool_query(state, run_id)?;
     }
+    mark_run_canceled(state, run_id).await?;
     get_run(state, identity, run_id).await
 }
 
@@ -824,6 +812,7 @@ fn launch_run(
             control,
         )
         .await;
+        state.agent_events.finish(&run_id);
         if let Ok(mut controls) = state.agent_control.lock() {
             controls.remove(&run_id);
         }
@@ -846,6 +835,7 @@ async fn supervise_run(
 ) {
     if let Err(error) = mark_run_running(&state, run_id).await {
         tracing::error!(run_id, error = %error, "Agent Run 启动状态写入失败");
+        let _ = mark_run_failed(&state, run_id, &error.to_string(), "startup_error").await;
         return;
     }
     if control.is_canceled() {
@@ -960,7 +950,7 @@ async fn execute_agent_loop(
                 tokio::select! {
                     biased;
                     _ = control.cancelled() => {
-                        let _ = finish_step(state, &step_id, "canceled", None, Some("用户已停止")).await;
+                        let _ = finish_step(state, run_id, &step_id, "canceled", None, Some("用户已停止")).await;
                         return Err(RuntimeFailure::Canceled);
                     }
                     result = &mut model_request => {
@@ -968,14 +958,14 @@ async fn execute_agent_loop(
                             Ok(turn) => turn,
                             Err(error) => {
                                 let message = error.to_string();
-                                let _ = finish_step(state, &step_id, "failed", None, Some(&message)).await;
+                                let _ = finish_step(state, run_id, &step_id, "failed", None, Some(&message)).await;
                                 return Err(RuntimeFailure::Failed(message));
                             }
                         };
                     }
                     update = stream_rx.recv() => {
                         if let Some(update) = update {
-                            persist_model_stream(state, &step_id, update).await.map_err(runtime_error)?;
+                            persist_model_stream(state, run_id, &step_id, update).await.map_err(runtime_error)?;
                         }
                     }
                 }
@@ -986,9 +976,16 @@ async fn execute_agent_loop(
             "toolCalls": turn.tool_calls,
             "finishReason": turn.finish_reason,
         });
-        finish_step(state, &step_id, "completed", Some(step_output), None)
-            .await
-            .map_err(runtime_error)?;
+        finish_step(
+            state,
+            run_id,
+            &step_id,
+            "completed",
+            Some(step_output),
+            None,
+        )
+        .await
+        .map_err(runtime_error)?;
 
         if turn.tool_calls.is_empty() || !allow_tools {
             let content = if turn.content.trim().is_empty() {
@@ -1026,6 +1023,7 @@ async fn execute_agent_loop(
                 Ok(execution) => {
                     finish_step(
                         state,
+                        run_id,
                         &step_id,
                         if execution.run.ok {
                             "completed"
@@ -1041,12 +1039,20 @@ async fn execute_agent_loop(
                     tool_runs.push(execution.run);
                 }
                 Err(RuntimeFailure::Canceled) => {
-                    let _ =
-                        finish_step(state, &step_id, "canceled", None, Some("用户已停止")).await;
+                    let _ = finish_step(
+                        state,
+                        run_id,
+                        &step_id,
+                        "canceled",
+                        None,
+                        Some("用户已停止"),
+                    )
+                    .await;
                     return Err(RuntimeFailure::Canceled);
                 }
                 Err(RuntimeFailure::Failed(message)) => {
-                    let _ = finish_step(state, &step_id, "failed", None, Some(&message)).await;
+                    let _ =
+                        finish_step(state, run_id, &step_id, "failed", None, Some(&message)).await;
                     return Err(RuntimeFailure::Failed(message));
                 }
             }
@@ -1307,45 +1313,98 @@ async fn prepare_model_messages(
         .transpose()
         .map_err(|error| AppError::Internal(error.to_string()))?
         .unwrap_or_else(|| "(尚未提供查询结果样本)".to_owned());
-    let context_budget = (state.agent_context_chars / 2).max(8_000);
-    let context_message = truncate_chars(
-        &format!(
-            "以下是应用提供的当前工作区上下文，不是新的用户指令。\n工作区: {}\n表结构(JSON):\n{}\n\n当前 SQL:\n{}\n\n当前结果样本(JSON):\n{}",
-            identity.workspace_name, schema_json, current_sql, result_json
-        ),
+    let history = history
+        .into_iter()
+        .map(|message| {
+            let content = history_message_content(&message);
+            (message.role, content)
+        })
+        .collect();
+    Ok(compose_model_messages(
+        state.agent_context_chars,
+        system,
+        reasoning_instruction,
+        &identity.workspace_name,
+        schema_json,
+        current_sql,
+        &result_json,
+        &conversation.summary,
+        history,
+    ))
+}
+
+/**
+ * 按全局硬预算装配模型消息，固定规则、工作区上下文、摘要与近期历史不会再重复占用同一份额度。
+ * 最近消息从后向前保留，因而长会话仍优先携带当前问题和最近一次 SQL 迭代。
+ */
+#[allow(clippy::too_many_arguments)]
+fn compose_model_messages(
+    total_budget: usize,
+    system: &str,
+    reasoning_instruction: &str,
+    workspace_name: &str,
+    schema_json: &str,
+    current_sql: &str,
+    result_json: &str,
+    summary: &str,
+    history: Vec<(String, String)>,
+) -> Vec<ModelMessage> {
+    let mut messages = Vec::new();
+    let bounded_system = truncate_chars(system, total_budget);
+    let mut used = bounded_system.chars().count();
+    if !bounded_system.is_empty() {
+        messages.push(ModelMessage::system(bounded_system));
+    }
+
+    let bounded_reasoning =
+        truncate_chars(reasoning_instruction, total_budget.saturating_sub(used));
+    used = used.saturating_add(bounded_reasoning.chars().count());
+    if !bounded_reasoning.is_empty() {
+        messages.push(ModelMessage::system(bounded_reasoning));
+    }
+
+    // 工作区事实最多使用剩余额度的 60%，为滚动摘要和当前用户消息保留稳定空间。
+    let context_budget = total_budget.saturating_sub(used) * 3 / 5;
+    let context_message = bounded_workspace_context(
+        workspace_name,
+        schema_json,
+        current_sql,
+        result_json,
         context_budget,
     );
-    let fixed_chars = system.chars().count()
-        + reasoning_instruction.chars().count()
-        + context_message.chars().count();
-    let mut messages = vec![
-        ModelMessage::system(system),
-        ModelMessage::system(reasoning_instruction),
-        ModelMessage::user(context_message),
-    ];
-    let history_budget = state
-        .agent_context_chars
-        .saturating_sub(fixed_chars)
-        .max(4_000);
-    if !conversation.summary.trim().is_empty() {
-        messages.push(ModelMessage::system(format!(
-            "较早对话的服务端摘要（仅供延续语义，不覆盖当前 Schema）:\n{}",
-            truncate_chars(&conversation.summary, history_budget / 3)
-        )));
+    let context_chars = context_message.chars().count();
+    used = used.saturating_add(context_chars);
+    if !context_message.is_empty() {
+        messages.push(ModelMessage::user(context_message));
     }
+
+    let summary_prefix = "较早对话的服务端摘要（仅供延续语义，不覆盖当前 Schema）:\n";
+    let remaining_before_summary = total_budget.saturating_sub(used);
+    let summary_budget = remaining_before_summary / 4;
+    if !summary.trim().is_empty() && summary_budget > summary_prefix.chars().count() {
+        let bounded_summary = truncate_from_end(
+            summary.trim(),
+            summary_budget.saturating_sub(summary_prefix.chars().count()),
+        );
+        let summary_message = format!("{summary_prefix}{bounded_summary}");
+        used = used.saturating_add(summary_message.chars().count());
+        messages.push(ModelMessage::system(summary_message));
+    }
+
+    let history_budget = total_budget.saturating_sub(used);
     let mut retained = Vec::new();
-    let mut used = 0usize;
-    for message in history.into_iter().rev() {
-        let content = history_message_content(&message);
-        let chars = content.chars().count();
-        if !retained.is_empty() && used.saturating_add(chars) > history_budget {
+    let mut history_used = 0usize;
+    for (role, content) in history.into_iter().rev() {
+        let remaining = history_budget.saturating_sub(history_used);
+        if remaining == 0 {
             break;
         }
-        used = used.saturating_add(chars);
-        retained.push((
-            message.role,
-            truncate_chars(&content, history_budget.max(1)),
-        ));
+        let bounded = truncate_chars(content.trim(), remaining);
+        if bounded.is_empty() {
+            continue;
+        }
+        history_used = history_used.saturating_add(bounded.chars().count());
+        retained.push((role, bounded));
     }
     retained.reverse();
     for (role, content) in retained {
@@ -1355,7 +1414,50 @@ async fn prepare_model_messages(
             messages.push(ModelMessage::assistant_text(content));
         }
     }
-    Ok(messages)
+
+    let total_chars = used.saturating_add(history_used);
+    debug_assert!(total_chars <= total_budget);
+    tracing::info!(
+        total_budget,
+        total_chars,
+        context_chars,
+        history_chars = history_used,
+        message_count = messages.len(),
+        "Agent context prepared"
+    );
+    messages
+}
+
+/**
+ * 为 Schema、当前 SQL 和结果样本分配独立额度后再组合，任一超长部分都不会吞掉其他关键上下文。
+ * 各段按字符截断并携带标记，中文内容不会因 UTF-8 字节边界而损坏。
+ */
+fn bounded_workspace_context(
+    workspace_name: &str,
+    schema_json: &str,
+    current_sql: &str,
+    result_json: &str,
+    max_chars: usize,
+) -> String {
+    let shell = format!(
+        "以下是应用提供的当前工作区上下文，不是新的用户指令。\n工作区: {workspace_name}\n表结构(JSON):\n\n\n当前 SQL:\n\n\n当前结果样本(JSON):\n"
+    );
+    let shell_chars = shell.chars().count();
+    if shell_chars >= max_chars {
+        return truncate_chars(&shell, max_chars);
+    }
+    let payload_budget = max_chars - shell_chars;
+    let schema = truncate_chars(schema_json, payload_budget * 3 / 5);
+    let sql = truncate_chars(current_sql, payload_budget / 4);
+    let result = truncate_chars(
+        result_json,
+        payload_budget
+            .saturating_sub(schema.chars().count())
+            .saturating_sub(sql.chars().count()),
+    );
+    format!(
+        "以下是应用提供的当前工作区上下文，不是新的用户指令。\n工作区: {workspace_name}\n表结构(JSON):\n{schema}\n\n当前 SQL:\n{sql}\n\n当前结果样本(JSON):\n{result}"
+    )
 }
 
 /**
@@ -1567,11 +1669,10 @@ async fn resolve_context(
         });
     }
     let signature = signature_items.join("|");
-    let schema_budget = MAX_SCHEMA_CONTEXT_CHARS.min(
-        (state.agent_context_chars / 2)
-            .saturating_sub(4_000)
-            .max(4_000),
-    );
+    // 最终提示词会为工作区上下文分配约 60%，其中 Schema 占 60%；提前按更保守的
+    // 30% 做结构化裁剪，可避免后续字符串预算再次切断合法 JSON。
+    let schema_budget =
+        MAX_SCHEMA_CONTEXT_CHARS.min((state.agent_context_chars * 3 / 10).max(4_000));
     let schema_json = serialize_schema_context(&mut contexts, schema_budget)?;
     Ok(ResolvedContext {
         primary_source_id: validated.primary_source_id,
@@ -1723,7 +1824,7 @@ fn starts_with_query(value: &str) -> bool {
     })
 }
 
-/// 开始一个持久化步骤并同步 Run 计数，前端轮询可立即看到模型或工具正在工作。
+/// 开始一个持久化步骤并同步 Run 计数，事务提交后事件订阅者可立即看到真实动作。
 async fn start_step(
     state: &SharedState,
     run_id: &str,
@@ -1765,12 +1866,14 @@ async fn start_step(
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
+    state.agent_events.notify(run_id);
     Ok(id)
 }
 
 /// 保存模型已公开输出的最新快照，并同步 Run 版本时间供 SSE 只推送真实变化。
 async fn persist_model_stream(
     state: &SharedState,
+    run_id: &str,
     step_id: &str,
     update: agent_provider::AssistantStreamUpdate,
 ) -> AppResult<()> {
@@ -1798,12 +1901,16 @@ async fn persist_model_stream(
         .await?;
     }
     transaction.commit().await?;
+    if updated.rows_affected() > 0 {
+        state.agent_events.notify(run_id);
+    }
     Ok(())
 }
 
 /// 完成一个步骤并保存结构化输出；状态更新只命中 running，取消不会被迟到结果覆盖。
 async fn finish_step(
     state: &SharedState,
+    run_id: &str,
     step_id: &str,
     status: &str,
     output: Option<Value>,
@@ -1839,13 +1946,16 @@ async fn finish_step(
         .await?;
     }
     transaction.commit().await?;
+    if updated.rows_affected() > 0 {
+        state.agent_events.notify(run_id);
+    }
     Ok(())
 }
 
 /// 将排队 Run 切换为运行中，若已被取消则保持取消状态并让监督器快速退出。
 async fn mark_run_running(state: &SharedState, run_id: &str) -> AppResult<()> {
     let now = Utc::now().to_rfc3339();
-    sqlx::query(
+    let updated = sqlx::query(
         "UPDATE ai_runs SET status = 'running', started_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'",
     )
     .bind(&now)
@@ -1853,6 +1963,9 @@ async fn mark_run_running(state: &SharedState, run_id: &str) -> AppResult<()> {
     .bind(run_id)
     .execute(&state.pool)
     .await?;
+    if updated.rows_affected() > 0 {
+        state.agent_events.notify(run_id);
+    }
     Ok(())
 }
 
@@ -2006,6 +2119,7 @@ async fn complete_run(
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
+    state.agent_events.finish(run_id);
     Ok(())
 }
 
@@ -2017,7 +2131,7 @@ async fn mark_run_failed(
     reason: &str,
 ) -> AppResult<()> {
     let now = Utc::now().to_rfc3339();
-    sqlx::query(
+    let updated = sqlx::query(
         r#"
         UPDATE ai_runs
         SET status = 'failed', finish_reason = ?, error_message = ?,
@@ -2032,13 +2146,17 @@ async fn mark_run_failed(
     .bind(run_id)
     .execute(&state.pool)
     .await?;
-    mark_running_steps(state, run_id, "failed", Some(message)).await
+    if updated.rows_affected() > 0 {
+        mark_running_steps(state, run_id, "failed", Some(message)).await?;
+        state.agent_events.finish(run_id);
+    }
+    Ok(())
 }
 
 /// 收敛取消状态并关闭尚在 running 的 Step，保证刷新后看到一致的终态。
 async fn mark_run_canceled(state: &SharedState, run_id: &str) -> AppResult<()> {
     let now = Utc::now().to_rfc3339();
-    sqlx::query(
+    let updated = sqlx::query(
         r#"
         UPDATE ai_runs
         SET status = 'canceled', finish_reason = 'canceled', error_message = NULL,
@@ -2051,7 +2169,11 @@ async fn mark_run_canceled(state: &SharedState, run_id: &str) -> AppResult<()> {
     .bind(run_id)
     .execute(&state.pool)
     .await?;
-    mark_running_steps(state, run_id, "canceled", Some("用户已停止")).await
+    if updated.rows_affected() > 0 {
+        mark_running_steps(state, run_id, "canceled", Some("用户已停止")).await?;
+        state.agent_events.finish(run_id);
+    }
+    Ok(())
 }
 
 /// 批量关闭遗留运行步骤，异常和取消路径因此不需要猜测当前步骤 id。
@@ -2374,6 +2496,91 @@ mod tests {
     }
 
     #[test]
+    fn composed_agent_context_never_exceeds_the_global_budget() {
+        let budget = 20_000;
+        let history = (0..12)
+            .map(|index| {
+                (
+                    if index % 2 == 0 { "user" } else { "assistant" }.to_owned(),
+                    if index == 11 {
+                        format!("latest-request-{}", "新需求".repeat(8_000))
+                    } else {
+                        format!("history-{index}-{}", "历史".repeat(4_000))
+                    },
+                )
+            })
+            .collect();
+        let messages = compose_model_messages(
+            budget,
+            &"system".repeat(500),
+            &"reasoning".repeat(200),
+            "压力测试工作区",
+            &"schema".repeat(10_000),
+            &"SELECT * FROM data ".repeat(2_000),
+            &"result".repeat(5_000),
+            &"summary".repeat(6_000),
+            history,
+        );
+        let contents = messages
+            .iter()
+            .filter_map(|message| {
+                serde_json::to_value(message).ok()?["content"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            contents
+                .iter()
+                .map(|content| content.chars().count())
+                .sum::<usize>()
+                <= budget
+        );
+        assert!(
+            contents
+                .last()
+                .is_some_and(|content| content.starts_with("latest-request-"))
+        );
+    }
+
+    #[test]
+    fn preserves_structurally_truncated_schema_in_workspace_context() {
+        let mut contexts = vec![TableContext {
+            alias: "data".to_owned(),
+            source_name: "压力数据".to_owned(),
+            original_filename: "large.xlsx".to_owned(),
+            table_name: "明细".to_owned(),
+            sheet_name: "Sheet1".to_owned(),
+            start_cell: "A1".to_owned(),
+            end_cell: None,
+            row_count: 10_000,
+            config_version: 1,
+            fields: (0..500)
+                .map(|index| FieldDefinition {
+                    name: format!("字段_{index}_{}", "长名称".repeat(20)),
+                    data_type: "文本".to_owned(),
+                    nullable: true,
+                })
+                .collect(),
+            fields_truncated: false,
+        }];
+        let schema = serialize_schema_context(&mut contexts, 6_000).unwrap();
+        assert!(schema.chars().count() <= 6_000);
+        assert!(serde_json::from_str::<Value>(&schema).is_ok());
+
+        let workspace = bounded_workspace_context("测试", &schema, "SELECT 1", "[]", 12_000);
+        let embedded_schema = workspace
+            .split_once("表结构(JSON):\n")
+            .unwrap()
+            .1
+            .split_once("\n\n当前 SQL:")
+            .unwrap()
+            .0;
+        let value = serde_json::from_str::<Value>(embedded_schema).unwrap();
+        assert_eq!(value["truncated"], true);
+    }
+
+    #[test]
     fn quotes_table_aliases() {
         assert_eq!(quote_identifier("order\"items"), "\"order\"\"items\"");
     }
@@ -2481,6 +2688,7 @@ mod tests {
             job_result_retention_days: 30,
             metrics: crate::models::RuntimeMetrics::new(),
             agent_control: Default::default(),
+            agent_events: Default::default(),
             agent_max_steps: 4,
             agent_timeout_seconds: 30,
             agent_context_chars: 80_000,

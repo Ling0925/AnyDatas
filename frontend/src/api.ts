@@ -5,14 +5,11 @@ import type {
   AuthUser,
   AiSettings,
   AiSettingsPayload,
-  AiChatRequest,
-  AiChatResponse,
   AiAgentConversationDetail,
   AiAgentConversationSummary,
   AiAgentRun,
   AiAgentRunPayload,
   AiAgentReasoningEffort,
-  AiSqlResponse,
   DataSource,
   ImportInspection,
   InspectImportTablePayload,
@@ -94,12 +91,6 @@ export const api = {
   async testAiSettings() {
     return (await client.post<{ ok: boolean; model: string }>('/ai/settings/test')).data
   },
-  async generateSql(payload: { instruction: string; currentSql?: string; tables: QueryTableBinding[] }) {
-    return (await client.post<AiSqlResponse>('/ai/sql', payload)).data
-  },
-  async chatWithAi(payload: AiChatRequest, signal?: AbortSignal) {
-    return (await client.post<AiChatResponse>('/ai/chat', payload, { signal, timeout: 0 })).data
-  },
   /** 从服务端读取会话列表，浏览器不再承担 AI 历史的持久化职责。 */
   async listAgentConversations() {
     return (await client.get<AiAgentConversationSummary[]>('/ai/agent/conversations')).data
@@ -123,7 +114,7 @@ export const api = {
       { tables },
     )).data
   },
-  /** 创建异步 Agent Run，后续通过轻量轮询读取模型和工具步骤。 */
+  /** 创建异步 Agent Run，后续通过事件流接收模型和工具步骤。 */
   async startAgentRun(conversationId: string, payload: AiAgentRunPayload) {
     return (await client.post<AiAgentRun>(
       `/ai/agent/conversations/${conversationId}/runs`,
