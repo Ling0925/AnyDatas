@@ -113,6 +113,20 @@ const canUseAgentSql = computed(() => Boolean(
   && currentContextReady.value
   && !contextChanged.value,
 ))
+/** 当发送被禁用时给出可读原因，避免按钮静默置灰让人以为界面坏了。 */
+const sendDisabledReason = computed(() => {
+  if (sending.value) return ''
+  if (contextChanged.value) return '数据上下文已变更，请先按新选择继续或恢复原选择'
+  if (!currentContextReady.value) return '所选表格无效或超过 16 张，请调整右侧数据上下文'
+  if (!draft.value.trim()) return '请先输入问题'
+  return ''
+})
+const sqlDisabledReason = computed(() => {
+  if (contextChanged.value) return '数据上下文已变更，请先确认或恢复选择'
+  if (!store.agentTableBindings.length) return '当前为纯对话模式，请先在右侧选择数据表'
+  if (!currentContextReady.value) return '所选表格无效或超过 16 张'
+  return ''
+})
 const starterPrompts = computed(() => (
   store.agentTableBindings.length ? dataStarterPrompts : generalStarterPrompts
 ))
@@ -961,7 +975,8 @@ async function scrollToBottom(force = true) {
                 </div>
               </header>
               <pre><code>{{ message.sql }}</code></pre>
-              <div class="ai-proposal-actions">
+              <el-tooltip :disabled="!sqlDisabledReason" :content="sqlDisabledReason" placement="top">
+                <div class="ai-proposal-actions">
                 <el-button
                   size="small"
                   aria-label="应用候选 SQL"
@@ -988,7 +1003,8 @@ async function scrollToBottom(force = true) {
                 >
                   <Play :size="14" />应用并运行
                 </el-button>
-              </div>
+                </div>
+              </el-tooltip>
 
               <AiResultPreview v-if="messagePreview(message)" :result="messagePreview(message)!" />
               <div v-else-if="previewErrors[message.id]" class="ai-preview-error">
@@ -1059,7 +1075,6 @@ async function scrollToBottom(force = true) {
               resize="none"
               :autosize="{ minRows: 2, maxRows: 6 }"
               maxlength="4000"
-              :disabled="contextChanged"
               placeholder="输入问题，或输入 / 查看命令；默认不携带表格"
               @keydown="handleComposerKeydown"
             />
@@ -1073,7 +1088,7 @@ async function scrollToBottom(force = true) {
                 <Square v-if="!stoppingRun" :size="14" />
               </el-button>
             </el-tooltip>
-            <el-tooltip v-else content="发送" placement="top">
+            <el-tooltip v-else :content="sendDisabledReason || '发送'" placement="top">
               <el-button
                 class="ai-send-button"
                 type="primary"

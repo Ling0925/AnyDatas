@@ -28,8 +28,8 @@ async function applyAgentSql(sql: string) {
     await store.setQueryContext(store.agentTableBindings)
   }
   store.currentSql = sql
-  await router.push('/workbench')
-  ElMessage.success('候选 SQL 已应用到工作台')
+  // 就地应用：只写入工作台 SQL，不跳走，用户可继续读对话，需要时再切到「数据分析」。
+  ElMessage.success('候选 SQL 已写入工作台，切到「数据分析」即可查看')
 }
 
 /**
