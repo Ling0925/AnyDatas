@@ -587,6 +587,22 @@ input:focus-visible {
   min-height: 330px;
 }
 
+.ai-settings-feedback {
+  margin-bottom: 14px;
+}
+
+.ai-settings-hint {
+  margin: 14px 0 0;
+  color: var(--subtle);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.ai-settings-hint code {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+}
+
 .ai-provider-row {
   height: 58px;
   display: grid;
