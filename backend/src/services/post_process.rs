@@ -1,30 +1,318 @@
 //! QuickJS post-process engine for optional query result transforms.
 //!
-//! Runs user `process(rows, meta)` after SQL succeeds. HTTP host injection lands in a
-//! later task; this module accepts `http: None` and does not expose `http.request`.
+//! Runs user `process(rows, meta)` after SQL succeeds. Optional sandboxed
+//! `http.request` is injected when callers pass a `JsHttpRuntime`.
 
-// Public surface is consumed by execution integration (Task 6) and HTTP host (Task 4).
+// Public surface is consumed by execution integration (Task 6).
 #![allow(dead_code)]
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use reqwest::blocking::Client;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_LENGTH, HOST};
+use reqwest::{Method, Url};
 use rquickjs::function::Rest;
-use rquickjs::{CatchResultExt, Context, Ctx, Function, Object, Runtime, Value as JsValue};
+use rquickjs::{
+    CatchResultExt, Context, Ctx, Exception, Function, Object, Runtime, Value as JsValue,
+};
 use serde_json::{Map, Value};
 
 use crate::error::AppError;
 use crate::models::{FieldDefinition, JsRuntimeLimits};
+use crate::services::net_guard::{self, AllowlistEntry, NetGuardError};
 
 const CONSOLE_LINE_CHARS: usize = 500;
 const ERROR_MESSAGE_CHARS: usize = 500;
+const ALLOWED_HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"];
 
-/// Placeholder for Task 4 sandboxed `http.request` host. Callers may pass `None`.
+/// Per-request HTTP limits sliced from [`JsRuntimeLimits`].
+#[derive(Debug, Clone)]
+pub struct JsHttpLimits {
+    pub max_requests: usize,
+    pub timeout_ms: u64,
+    pub max_timeout_ms: u64,
+    pub max_body_bytes: usize,
+    pub max_request_body_bytes: usize,
+}
+
+impl JsHttpLimits {
+    pub fn from_runtime(limits: &JsRuntimeLimits) -> Self {
+        Self {
+            max_requests: limits.http_max_requests,
+            timeout_ms: limits.http_timeout_ms,
+            max_timeout_ms: limits.http_max_timeout_ms,
+            max_body_bytes: limits.http_max_body_bytes,
+            max_request_body_bytes: limits.http_max_request_body_bytes,
+        }
+    }
+}
+
+/// Sandboxed host for synchronous `http.request` inside post-process JS.
 #[derive(Debug)]
-#[allow(dead_code)]
-pub struct JsHttpRuntime;
+pub struct JsHttpRuntime {
+    pub client: Client,
+    pub limits: JsHttpLimits,
+    pub allowlist: Vec<AllowlistEntry>,
+    pub enabled: bool,
+    pub allow_private_when_empty: bool,
+    request_count: Cell<usize>,
+}
+
+impl JsHttpRuntime {
+    /// Build a blocking client (no redirects) from runtime limits.
+    pub fn new(limits: &JsRuntimeLimits) -> Result<Self, PostProcessError> {
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_millis(limits.http_max_timeout_ms.max(1)))
+            .build()
+            .map_err(|error| {
+                PostProcessError::new(
+                    "post_js_internal",
+                    format!("创建 HTTP 客户端失败：{error}"),
+                )
+            })?;
+        Ok(Self::from_parts(
+            client,
+            JsHttpLimits::from_runtime(limits),
+            limits.allowlist.clone(),
+            limits.enabled_http,
+            limits.allow_private_network,
+        ))
+    }
+
+    pub fn from_parts(
+        client: Client,
+        limits: JsHttpLimits,
+        allowlist: Vec<AllowlistEntry>,
+        enabled: bool,
+        allow_private_when_empty: bool,
+    ) -> Self {
+        Self {
+            client,
+            limits,
+            allowlist,
+            enabled,
+            allow_private_when_empty,
+            request_count: Cell::new(0),
+        }
+    }
+
+    fn perform(&self, request: HttpRequestArgs) -> Result<HttpResponseValue, HttpHostError> {
+        if !self.enabled {
+            return Err(HttpHostError::disabled("脚本 HTTP 已禁用"));
+        }
+
+        let used = self.request_count.get();
+        if used >= self.limits.max_requests {
+            return Err(HttpHostError::limit(format!(
+                "HTTP 请求次数超过限制（{}）",
+                self.limits.max_requests
+            )));
+        }
+        self.request_count.set(used + 1);
+
+        let method = parse_http_method(&request.method)?;
+        let url = Url::parse(&request.url).map_err(|error| {
+            HttpHostError::error(format!("URL 无效：{error}"))
+        })?;
+
+        if url.scheme() != "http" && url.scheme() != "https" {
+            return Err(HttpHostError::blocked("仅允许 http 或 https 协议"));
+        }
+
+        let host = url
+            .host_str()
+            .ok_or_else(|| HttpHostError::blocked("URL 缺少主机"))?;
+        let port = url.port_or_known_default().unwrap_or(80);
+        let resolved = resolve_host_ips(host, port).map_err(HttpHostError::error)?;
+
+        match net_guard::url_allowed(
+            &url,
+            &self.allowlist,
+            &resolved,
+            self.allow_private_when_empty,
+        ) {
+            Ok(()) => {}
+            Err(NetGuardError::InvalidScheme) => {
+                return Err(HttpHostError::blocked("仅允许 http 或 https 协议"));
+            }
+            Err(NetGuardError::NotAllowlisted) => {
+                return Err(HttpHostError::blocked("目标地址不在白名单内"));
+            }
+            Err(NetGuardError::RestrictedAddress) => {
+                return Err(HttpHostError::blocked("目标解析到本机或私有网络"));
+            }
+        }
+
+        if let Some(body) = request.body.as_ref()
+            && body.len() > self.limits.max_request_body_bytes
+        {
+            return Err(HttpHostError::limit(format!(
+                "请求体超过限制（{} > {} 字节）",
+                body.len(),
+                self.limits.max_request_body_bytes
+            )));
+        }
+
+        let timeout_ms = request
+            .timeout_ms
+            .unwrap_or(self.limits.timeout_ms)
+            .clamp(1, self.limits.max_timeout_ms.max(1));
+
+        let mut builder = self
+            .client
+            .request(method, url)
+            .timeout(Duration::from_millis(timeout_ms));
+
+        let mut headers = HeaderMap::new();
+        for (name, value) in request.headers {
+            let lower = name.to_ascii_lowercase();
+            if lower == "host" || lower == "content-length" {
+                continue;
+            }
+            let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                HttpHostError::error(format!("非法请求头名 `{name}`：{error}"))
+            })?;
+            if header_name == HOST || header_name == CONTENT_LENGTH {
+                continue;
+            }
+            let header_value = HeaderValue::from_str(&value).map_err(|error| {
+                HttpHostError::error(format!("非法请求头值 `{name}`：{error}"))
+            })?;
+            headers.append(header_name, header_value);
+        }
+        builder = builder.headers(headers);
+
+        if let Some(body) = request.body {
+            builder = builder.body(body);
+        }
+
+        let response = builder.send().map_err(|error| {
+            HttpHostError::error(format!("HTTP 请求失败：{error}"))
+        })?;
+
+        let status = response.status().as_u16();
+        let ok = response.status().is_success();
+        let response_headers = flatten_response_headers(response.headers());
+        let body_bytes = response.bytes().map_err(|error| {
+            HttpHostError::error(format!("读取响应失败：{error}"))
+        })?;
+        if body_bytes.len() > self.limits.max_body_bytes {
+            return Err(HttpHostError::limit(format!(
+                "响应体超过限制（{} > {} 字节）",
+                body_bytes.len(),
+                self.limits.max_body_bytes
+            )));
+        }
+        let body = String::from_utf8_lossy(&body_bytes).into_owned();
+
+        Ok(HttpResponseValue {
+            ok,
+            status,
+            headers: response_headers,
+            body,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HttpRequestArgs {
+    method: String,
+    url: String,
+    headers: Vec<(String, String)>,
+    body: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct HttpResponseValue {
+    ok: bool,
+    status: u16,
+    headers: BTreeMap<String, String>,
+    body: String,
+}
+
+#[derive(Debug, Clone)]
+struct HttpHostError {
+    code: &'static str,
+    message: String,
+}
+
+impl HttpHostError {
+    fn disabled(message: impl Into<String>) -> Self {
+        Self {
+            code: "post_js_http_disabled",
+            message: message.into(),
+        }
+    }
+
+    fn blocked(message: impl Into<String>) -> Self {
+        Self {
+            code: "post_js_http_blocked",
+            message: message.into(),
+        }
+    }
+
+    fn limit(message: impl Into<String>) -> Self {
+        Self {
+            code: "post_js_http_limit",
+            message: message.into(),
+        }
+    }
+
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            code: "post_js_http_error",
+            message: message.into(),
+        }
+    }
+}
+
+fn parse_http_method(raw: &str) -> Result<Method, HttpHostError> {
+    let upper = raw.trim().to_ascii_uppercase();
+    if !ALLOWED_HTTP_METHODS.contains(&upper.as_str()) {
+        return Err(HttpHostError::error(format!(
+            "不支持的 HTTP 方法：{raw}"
+        )));
+    }
+    Method::from_bytes(upper.as_bytes()).map_err(|error| {
+        HttpHostError::error(format!("不支持的 HTTP 方法：{error}"))
+    })
+}
+
+fn resolve_host_ips(host: &str, port: u16) -> Result<Vec<IpAddr>, String> {
+    let target = format!("{host}:{port}");
+    let addrs = target
+        .to_socket_addrs()
+        .map_err(|error| format!("DNS 解析失败：{error}"))?;
+    let ips: Vec<IpAddr> = addrs.map(|addr| addr.ip()).collect();
+    if ips.is_empty() {
+        return Err("DNS 解析未返回地址".to_owned());
+    }
+    Ok(ips)
+}
+
+fn flatten_response_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::<String, String>::new();
+    for (name, value) in headers.iter() {
+        let key = name.as_str().to_ascii_lowercase();
+        let value_text = value.to_str().unwrap_or("").to_owned();
+        map.entry(key)
+            .and_modify(|existing| {
+                if !existing.is_empty() {
+                    existing.push(',');
+                }
+                existing.push_str(&value_text);
+            })
+            .or_insert(value_text);
+    }
+    map
+}
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -70,7 +358,8 @@ pub fn normalize_post_js(raw: Option<&str>) -> Option<String> {
 
 /// Execute user post-process script against SQL result columns/rows.
 ///
-/// `http` is reserved for Task 4; when `None`, no `http` global is injected.
+/// When `http` is `Some`, injects a sandboxed `http.request` host. When `None`,
+/// no `http` global is available to scripts.
 pub fn run_post_process(
     script: &str,
     columns: &[FieldDefinition],
@@ -79,7 +368,6 @@ pub fn run_post_process(
     timeout_ms: u64,
     http: Option<&JsHttpRuntime>,
 ) -> Result<PostProcessOutput, PostProcessError> {
-    let _http = http; // Task 4 wires host injection
     let started = Instant::now();
 
     if script.len() > limits.max_script_bytes {
@@ -169,6 +457,9 @@ pub fn run_post_process(
     let eval_result =
         context.with(|ctx| -> Result<Vec<Vec<(String, Value)>>, PostProcessError> {
             install_console(&ctx, Rc::clone(&console_buf), max_console_lines)?;
+            if let Some(http_runtime) = http {
+                install_http(&ctx, http_runtime)?;
+            }
 
             if let Err(error) = ctx.eval::<(), _>(script).catch(&ctx) {
                 return Err(map_js_error(&ctx, error, deadline, "post_js_syntax"));
@@ -222,6 +513,228 @@ pub fn run_post_process(
         elapsed: started.elapsed(),
         console,
     })
+}
+
+fn install_http<'js>(
+    ctx: &Ctx<'js>,
+    http: &JsHttpRuntime,
+) -> Result<(), PostProcessError> {
+    // QuickJS callbacks must be 'static. The host pointer is only dereferenced while
+    // `run_post_process` still holds `http` and the JS context is active.
+    let http_ptr = http as *const JsHttpRuntime as usize;
+    let request_fn = Function::new(ctx.clone(), move |ctx, options| {
+        // SAFETY: pointer remains valid for the duration of run_post_process / ctx.with.
+        let runtime = unsafe { &*(http_ptr as *const JsHttpRuntime) };
+        http_request_callback(ctx, options, runtime)
+    })
+    .map_err(|error| {
+        PostProcessError::new(
+            "post_js_internal",
+            format!("注册 http.request 失败：{error}"),
+        )
+    })?;
+
+    let http_obj = Object::new(ctx.clone()).map_err(|error| {
+        PostProcessError::new(
+            "post_js_internal",
+            format!("创建 http 对象失败：{error}"),
+        )
+    })?;
+    http_obj.set("request", request_fn).map_err(|error| {
+        PostProcessError::new(
+            "post_js_internal",
+            format!("设置 http.request 失败：{error}"),
+        )
+    })?;
+    ctx.globals().set("http", http_obj).map_err(|error| {
+        PostProcessError::new(
+            "post_js_internal",
+            format!("注入 http 失败：{error}"),
+        )
+    })?;
+    Ok(())
+}
+
+fn http_request_callback<'js>(
+    ctx: Ctx<'js>,
+    options: JsValue<'js>,
+    runtime: &JsHttpRuntime,
+) -> rquickjs::Result<JsValue<'js>> {
+    match http_request_js(&ctx, runtime, options) {
+        Ok(object) => Ok(object.into_value()),
+        Err(error) => Err(throw_http_error(&ctx, error)),
+    }
+}
+
+fn throw_http_error(ctx: &Ctx<'_>, error: HttpHostError) -> rquickjs::Error {
+    match Exception::from_message(ctx.clone(), &error.message) {
+        Ok(exception) => {
+            let object = exception.as_object();
+            let _ = object.set("code", error.code);
+            let _ = object.set("name", "Error");
+            exception.throw()
+        }
+        Err(err) => err,
+    }
+}
+
+fn http_request_js<'js>(
+    ctx: &Ctx<'js>,
+    runtime: &JsHttpRuntime,
+    options: JsValue<'js>,
+) -> Result<Object<'js>, HttpHostError> {
+    let args = parse_http_request_args(ctx, options)?;
+    let response = runtime.perform(args)?;
+    response_to_js_object(ctx, response)
+}
+
+fn parse_http_request_args<'js>(
+    ctx: &Ctx<'js>,
+    options: JsValue<'js>,
+) -> Result<HttpRequestArgs, HttpHostError> {
+    let object = options
+        .into_object()
+        .ok_or_else(|| HttpHostError::error("http.request 参数必须是对象"))?;
+
+    let method = match object.get::<_, JsValue>("method") {
+        Ok(value) if !value.is_undefined() && !value.is_null() => {
+            js_value_to_string(ctx, value).map_err(HttpHostError::error)?
+        }
+        _ => "GET".to_owned(),
+    };
+
+    let url = match object.get::<_, JsValue>("url") {
+        Ok(value) if !value.is_undefined() && !value.is_null() => {
+            js_value_to_string(ctx, value).map_err(HttpHostError::error)?
+        }
+        _ => {
+            return Err(HttpHostError::error("http.request 缺少 url"));
+        }
+    };
+
+    let mut headers = Vec::new();
+    if let Ok(header_value) = object.get::<_, JsValue>("headers")
+        && !header_value.is_undefined()
+        && !header_value.is_null()
+    {
+        let header_obj = header_value
+            .into_object()
+            .ok_or_else(|| HttpHostError::error("headers 必须是对象"))?;
+        let keys = header_obj.keys::<String>();
+        for key_result in keys {
+            let key = key_result.map_err(|error| {
+                HttpHostError::error(format!("读取 headers 失败：{error}"))
+            })?;
+            let value: JsValue = header_obj.get(key.as_str()).map_err(|error| {
+                HttpHostError::error(format!("读取 headers 失败：{error}"))
+            })?;
+            let text = js_value_to_string(ctx, value).map_err(HttpHostError::error)?;
+            headers.push((key, text));
+        }
+    }
+
+    let body = match object.get::<_, JsValue>("body") {
+        Ok(value) if value.is_null() || value.is_undefined() => None,
+        Ok(value) => Some(js_value_to_string(ctx, value).map_err(HttpHostError::error)?),
+        Err(_) => None,
+    };
+
+    let timeout_ms = match object.get::<_, JsValue>("timeoutMs") {
+        Ok(value) if value.is_undefined() || value.is_null() => None,
+        Ok(value) => Some(js_value_to_u64(ctx, value)?),
+        Err(_) => None,
+    };
+
+    Ok(HttpRequestArgs {
+        method,
+        url,
+        headers,
+        body,
+        timeout_ms,
+    })
+}
+
+fn js_value_to_string<'js>(ctx: &Ctx<'js>, value: JsValue<'js>) -> Result<String, String> {
+    if let Some(s) = value.as_string() {
+        return s
+            .to_string()
+            .map_err(|error| format!("读取字符串失败：{error}"));
+    }
+    if let Some(v) = value.as_bool() {
+        return Ok(v.to_string());
+    }
+    if let Some(v) = value.as_int() {
+        return Ok(v.to_string());
+    }
+    if let Some(v) = value.as_float() {
+        return Ok(v.to_string());
+    }
+    if value.is_null() {
+        return Ok("null".to_owned());
+    }
+    if value.is_undefined() {
+        return Ok("undefined".to_owned());
+    }
+    match ctx.json_stringify(value) {
+        Ok(Some(text)) => text
+            .to_string()
+            .map_err(|error| format!("序列化失败：{error}")),
+        Ok(None) => Ok(String::new()),
+        Err(error) => Err(format!("序列化失败：{error}")),
+    }
+}
+
+fn js_value_to_u64<'js>(_ctx: &Ctx<'js>, value: JsValue<'js>) -> Result<u64, HttpHostError> {
+    if let Some(v) = value.as_int() {
+        if v < 0 {
+            return Err(HttpHostError::error("timeoutMs 必须为非负整数"));
+        }
+        return Ok(v as u64);
+    }
+    if let Some(v) = value.as_float() {
+        if !v.is_finite() || v < 0.0 {
+            return Err(HttpHostError::error("timeoutMs 必须为非负整数"));
+        }
+        return Ok(v as u64);
+    }
+    if let Some(s) = value.as_string()
+        && let Ok(text) = s.to_string()
+        && let Ok(parsed) = text.parse::<u64>()
+    {
+        return Ok(parsed);
+    }
+    Err(HttpHostError::error("timeoutMs 必须为数字"))
+}
+
+fn response_to_js_object<'js>(
+    ctx: &Ctx<'js>,
+    response: HttpResponseValue,
+) -> Result<Object<'js>, HttpHostError> {
+    let object = Object::new(ctx.clone()).map_err(|error| {
+        HttpHostError::error(format!("创建响应对象失败：{error}"))
+    })?;
+    object
+        .set("ok", response.ok)
+        .map_err(|error| HttpHostError::error(format!("设置 ok 失败：{error}")))?;
+    object
+        .set("status", response.status as i32)
+        .map_err(|error| HttpHostError::error(format!("设置 status 失败：{error}")))?;
+    object
+        .set("body", response.body)
+        .map_err(|error| HttpHostError::error(format!("设置 body 失败：{error}")))?;
+
+    let headers = Object::new(ctx.clone()).map_err(|error| {
+        HttpHostError::error(format!("创建 headers 对象失败：{error}"))
+    })?;
+    for (name, value) in response.headers {
+        headers.set(name.as_str(), value).map_err(|error| {
+            HttpHostError::error(format!("设置响应头失败：{error}"))
+        })?;
+    }
+    object
+        .set("headers", headers)
+        .map_err(|error| HttpHostError::error(format!("设置 headers 失败：{error}")))?;
+    Ok(object)
 }
 
 fn install_console<'js>(
@@ -377,12 +890,60 @@ fn exception_to_error(exception: &rquickjs::Exception<'_>, default_code: &'stati
         .ok()
         .flatten()
         .unwrap_or_default();
+    let code_prop = exception
+        .get::<_, Option<String>>("code")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     let mut message = exception
         .message()
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| exception.to_string());
     truncate_in_place(&mut message, ERROR_MESSAGE_CHARS);
-    PostProcessError::new(classify_js_code(default_code, &name, &message), message)
+    let code = if is_known_post_js_code(&code_prop) {
+        leak_code_static(&code_prop)
+    } else {
+        classify_js_code(default_code, &name, &message)
+    };
+    PostProcessError::new(code, message)
+}
+
+fn is_known_post_js_code(code: &str) -> bool {
+    matches!(
+        code,
+        "post_js_no_process"
+            | "post_js_syntax"
+            | "post_js_throw"
+            | "post_js_timeout"
+            | "post_js_limit_script"
+            | "post_js_limit_input_rows"
+            | "post_js_limit_output_rows"
+            | "post_js_bad_return"
+            | "post_js_http_disabled"
+            | "post_js_http_blocked"
+            | "post_js_http_limit"
+            | "post_js_http_error"
+            | "post_js_internal"
+    )
+}
+
+fn leak_code_static(code: &str) -> &'static str {
+    match code {
+        "post_js_no_process" => "post_js_no_process",
+        "post_js_syntax" => "post_js_syntax",
+        "post_js_throw" => "post_js_throw",
+        "post_js_timeout" => "post_js_timeout",
+        "post_js_limit_script" => "post_js_limit_script",
+        "post_js_limit_input_rows" => "post_js_limit_input_rows",
+        "post_js_limit_output_rows" => "post_js_limit_output_rows",
+        "post_js_bad_return" => "post_js_bad_return",
+        "post_js_http_disabled" => "post_js_http_disabled",
+        "post_js_http_blocked" => "post_js_http_blocked",
+        "post_js_http_limit" => "post_js_http_limit",
+        "post_js_http_error" => "post_js_http_error",
+        "post_js_internal" => "post_js_internal",
+        _ => "post_js_throw",
+    }
 }
 
 fn classify_js_code(default_code: &'static str, name: &str, message: &str) -> &'static str {
@@ -706,6 +1267,7 @@ fn truncate_in_place(text: &mut String, max_chars: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::blocking::Client;
     use serde_json::json;
 
     fn field(name: &str, data_type: &str) -> FieldDefinition {
@@ -907,5 +1469,177 @@ mod tests {
         let script = "function process(){ for(;;){} }";
         let err = run_post_process(script, &[], &[], &test_limits(), 50, None).unwrap_err();
         assert_eq!(err.code, "post_js_timeout");
+    }
+
+    fn spawn_mock_http_server(
+        status_line: &str,
+        headers: &str,
+        body: &str,
+    ) -> (String, u16, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
+        let status_line = status_line.to_owned();
+        let headers = headers.to_owned();
+        let body = body.to_owned();
+        let handle = std::thread::spawn(move || {
+            // Serve a few connections so multi-request tests can reuse the same mock.
+            for _ in 0..16 {
+                listener.set_nonblocking(false).ok();
+                let Ok((mut socket, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf);
+                let response = format!(
+                    "{status_line}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes());
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), port, handle)
+    }
+
+    fn http_runtime_for(
+        limits: &JsRuntimeLimits,
+        enabled: bool,
+        allowlist: Vec<crate::services::net_guard::AllowlistEntry>,
+    ) -> JsHttpRuntime {
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        JsHttpRuntime::from_parts(
+            client,
+            JsHttpLimits::from_runtime(limits),
+            allowlist,
+            enabled,
+            limits.allow_private_network,
+        )
+    }
+
+    #[test]
+    fn http_request_blocked_on_loopback_without_allowlist() {
+        let (base, _port, _handle) =
+            spawn_mock_http_server("HTTP/1.1 200 OK", "Content-Type: text/plain\r\n", "ok");
+        let limits = test_limits();
+        let http = http_runtime_for(&limits, true, Vec::new());
+        let script = format!(
+            r#"
+              function process(rows) {{
+                const res = http.request({{ method: 'GET', url: '{base}/data' }});
+                return [{{ body: res.body }}];
+              }}
+            "#
+        );
+        let err = run_post_process(&script, &[], &[], &limits, 5000, Some(&http)).unwrap_err();
+        assert_eq!(err.code, "post_js_http_blocked");
+    }
+
+    #[test]
+    fn http_request_succeeds_when_allowlisted() {
+        let (base, port, _handle) =
+            spawn_mock_http_server("HTTP/1.1 200 OK", "Content-Type: text/plain\r\n", "hello-body");
+        let limits = test_limits();
+        let allowlist = crate::services::net_guard::parse_allowlist(&format!("127.0.0.1:{port}"))
+            .unwrap();
+        let http = http_runtime_for(&limits, true, allowlist);
+        let script = format!(
+            r#"
+              function process(rows) {{
+                const res = http.request({{ method: 'GET', url: '{base}/data' }});
+                return [{{ ok: res.ok, status: res.status, body: res.body }}];
+              }}
+            "#
+        );
+        let out = run_post_process(&script, &[], &[], &limits, 5000, Some(&http)).unwrap();
+        assert_eq!(out.rows.len(), 1);
+        let by_name: std::collections::HashMap<_, _> = out
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.name.as_str(), &out.rows[0][i]))
+            .collect();
+        assert_eq!(by_name["ok"], &json!(true));
+        assert_eq!(by_name["status"], &json!(200));
+        assert_eq!(by_name["body"], &json!("hello-body"));
+    }
+
+    #[test]
+    fn http_request_disabled() {
+        let (base, port, _handle) =
+            spawn_mock_http_server("HTTP/1.1 200 OK", "Content-Type: text/plain\r\n", "x");
+        let limits = test_limits();
+        let allowlist = crate::services::net_guard::parse_allowlist(&format!("127.0.0.1:{port}"))
+            .unwrap();
+        let http = http_runtime_for(&limits, false, allowlist);
+        let script = format!(
+            r#"
+              function process() {{
+                http.request({{ url: '{base}/' }});
+                return [];
+              }}
+            "#
+        );
+        let err = run_post_process(&script, &[], &[], &limits, 5000, Some(&http)).unwrap_err();
+        assert_eq!(err.code, "post_js_http_disabled");
+    }
+
+    #[test]
+    fn http_request_enforces_max_requests() {
+        let (base, port, _handle) =
+            spawn_mock_http_server("HTTP/1.1 200 OK", "Content-Type: text/plain\r\n", "x");
+        let mut limits = test_limits();
+        limits.http_max_requests = 1;
+        let allowlist = crate::services::net_guard::parse_allowlist(&format!("127.0.0.1:{port}"))
+            .unwrap();
+        let http = http_runtime_for(&limits, true, allowlist);
+        let script = format!(
+            r#"
+              function process() {{
+                http.request({{ url: '{base}/a' }});
+                http.request({{ url: '{base}/b' }});
+                return [];
+              }}
+            "#
+        );
+        let err = run_post_process(&script, &[], &[], &limits, 5000, Some(&http)).unwrap_err();
+        assert_eq!(err.code, "post_js_http_limit");
+    }
+
+    #[test]
+    fn http_request_does_not_follow_redirects() {
+        let (base, port, _handle) = spawn_mock_http_server(
+            "HTTP/1.1 302 Found",
+            "Location: http://169.254.169.254/\r\nContent-Type: text/plain\r\n",
+            "redirect-body",
+        );
+        let limits = test_limits();
+        let allowlist = crate::services::net_guard::parse_allowlist(&format!("127.0.0.1:{port}"))
+            .unwrap();
+        let http = http_runtime_for(&limits, true, allowlist);
+        let script = format!(
+            r#"
+              function process() {{
+                const res = http.request({{ url: '{base}/redirect' }});
+                return [{{ ok: res.ok, status: res.status, body: res.body }}];
+              }}
+            "#
+        );
+        let out = run_post_process(&script, &[], &[], &limits, 5000, Some(&http)).unwrap();
+        let by_name: std::collections::HashMap<_, _> = out
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.name.as_str(), &out.rows[0][i]))
+            .collect();
+        assert_eq!(by_name["ok"], &json!(false));
+        assert_eq!(by_name["status"], &json!(302));
+        assert_eq!(by_name["body"], &json!("redirect-body"));
     }
 }
