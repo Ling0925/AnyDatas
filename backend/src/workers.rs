@@ -118,6 +118,7 @@ async fn claim_and_run_job(state: SharedState) -> Result<(), AppError> {
         start_cell: None,
         first_row_as_header: None,
         limit: None,
+        post_js: job.post_js,
     };
     let artifact_key = id.clone();
     let artifact_path = state
@@ -235,7 +236,7 @@ async fn enqueue_due_schedules(state: SharedState) -> Result<(), AppError> {
     let now = Utc::now().to_rfc3339();
     let rows = sqlx::query(
         r#"
-        SELECT id, source_id, name, sql_text, cron_expression, timezone
+        SELECT id, source_id, name, sql_text, post_js, cron_expression, timezone
         FROM schedules
         WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
         ORDER BY next_run_at
@@ -250,6 +251,7 @@ async fn enqueue_due_schedules(state: SharedState) -> Result<(), AppError> {
         let source_id: String = row.get("source_id");
         let name: String = row.get("name");
         let sql: String = row.get("sql_text");
+        let post_js: Option<String> = row.get("post_js");
         let expression: String = row.get("cron_expression");
         let timezone: String = row.get("timezone");
         let next = next_run(&expression, &timezone)?;
@@ -272,6 +274,7 @@ async fn enqueue_due_schedules(state: SharedState) -> Result<(), AppError> {
                 &tables,
                 &name,
                 &sql,
+                post_js.as_deref(),
                 Some(&id),
                 "schedule",
             )

@@ -32,7 +32,7 @@ async fn list(
     let rows = sqlx::query_as::<_, SavedQueryRow>(
         r#"
         SELECT q.id, q.source_id, d.name AS source_name, q.name, q.sql_text,
-               q.created_at, q.updated_at
+               q.post_js, q.created_at, q.updated_at
         FROM saved_queries q
         JOIN data_sources d ON d.id = q.source_id
         WHERE d.workspace_id = ? AND (? = '' OR q.source_id = ?)
@@ -71,12 +71,13 @@ async fn create(
     let now = Utc::now().to_rfc3339();
     let mut transaction = state.pool.begin().await?;
     sqlx::query(
-        "INSERT INTO saved_queries (id, source_id, name, sql_text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO saved_queries (id, source_id, name, sql_text, post_js, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&bindings.primary_source_id)
     .bind(payload.name.trim())
     .bind(payload.sql.trim())
+    .bind(normalize_optional_text(payload.post_js.as_deref()))
     .bind(&now)
     .bind(&now)
     .execute(&mut *transaction)
@@ -104,11 +105,12 @@ async fn update(
     let bindings = validate_payload(&state, &payload, &auth.workspace_id).await?;
     let mut transaction = state.pool.begin().await?;
     let result = sqlx::query(
-        "UPDATE saved_queries SET source_id = ?, name = ?, sql_text = ?, updated_at = ? WHERE id = ?",
+        "UPDATE saved_queries SET source_id = ?, name = ?, sql_text = ?, post_js = ?, updated_at = ? WHERE id = ?",
     )
     .bind(&bindings.primary_source_id)
     .bind(payload.name.trim())
     .bind(payload.sql.trim())
+    .bind(normalize_optional_text(payload.post_js.as_deref()))
     .bind(Utc::now().to_rfc3339())
     .bind(&id)
     .execute(&mut *transaction)
@@ -176,6 +178,10 @@ async fn hydrate_query(state: &SharedState, row: SavedQueryRow) -> AppResult<Sav
     Ok(query)
 }
 
+fn normalize_optional_text(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned)
+}
+
 async fn required_query(
     state: &SharedState,
     id: &str,
@@ -184,7 +190,7 @@ async fn required_query(
     sqlx::query_as::<_, SavedQueryRow>(
         r#"
         SELECT q.id, q.source_id, d.name AS source_name, q.name, q.sql_text,
-               q.created_at, q.updated_at
+               q.post_js, q.created_at, q.updated_at
         FROM saved_queries q
         JOIN data_sources d ON d.id = q.source_id
         WHERE q.id = ? AND d.workspace_id = ?

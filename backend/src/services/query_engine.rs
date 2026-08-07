@@ -356,6 +356,8 @@ fn collect_query_response(
         rows: result_rows,
         elapsed_ms: started.elapsed().as_millis(),
         truncated,
+        post_processed: false,
+        post_process_ms: None,
     })
 }
 

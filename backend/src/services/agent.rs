@@ -1208,6 +1208,8 @@ async fn execute_sql_tool(
         start_cell: None,
         first_row_as_header: None,
         limit: Some(TOOL_QUERY_LIMIT),
+        // Agent tools never attach post-process scripts.
+        post_js: None,
     };
     let query_id = tool_query_id(run_id);
     let result = tokio::select! {

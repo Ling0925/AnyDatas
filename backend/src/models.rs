@@ -538,6 +538,11 @@ pub struct QueryRequest {
     pub start_cell: Option<String>,
     pub first_row_as_header: Option<bool>,
     pub limit: Option<usize>,
+    /// Optional QuickJS `process(rows, meta)` script; empty/absent keeps SQL-only behavior.
+    /// Consumed by execution post-process wiring (Task 6).
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub post_js: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -548,6 +553,12 @@ pub struct QueryResponse {
     pub row_count: usize,
     pub elapsed_ms: u128,
     pub truncated: bool,
+    /// True when a post-process script ran successfully over the SQL result.
+    #[serde(default)]
+    pub post_processed: bool,
+    /// Wall time spent in post-process JS, when applicable.
+    #[serde(default)]
+    pub post_process_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -557,6 +568,7 @@ pub struct SavedQueryRow {
     pub source_name: String,
     pub name: String,
     pub sql_text: String,
+    pub post_js: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -569,6 +581,7 @@ pub struct SavedQuery {
     pub source_name: String,
     pub name: String,
     pub sql: String,
+    pub post_js: Option<String>,
     pub tables: Vec<QueryTableBinding>,
     pub created_at: String,
     pub updated_at: String,
@@ -582,6 +595,7 @@ impl From<SavedQueryRow> for SavedQuery {
             source_name: row.source_name,
             name: row.name,
             sql: row.sql_text,
+            post_js: row.post_js,
             tables: Vec::new(),
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -598,6 +612,8 @@ pub struct SavedQueryPayload {
     pub tables: Vec<QueryTableBinding>,
     pub name: String,
     pub sql: String,
+    #[serde(default)]
+    pub post_js: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -621,6 +637,7 @@ pub struct JobRow {
     pub name: String,
     pub kind: String,
     pub sql_text: String,
+    pub post_js: Option<String>,
     pub status: String,
     pub progress: i64,
     pub trigger_type: String,
@@ -656,6 +673,7 @@ pub struct Job {
     pub name: String,
     pub kind: String,
     pub sql: String,
+    pub post_js: Option<String>,
     pub tables: Vec<QueryTableBinding>,
     pub status: String,
     pub progress: i64,
@@ -684,6 +702,7 @@ impl From<JobRow> for Job {
             name: row.name,
             kind: row.kind,
             sql: row.sql_text,
+            post_js: row.post_js,
             tables: Vec::new(),
             status: row.status,
             progress: row.progress,
@@ -736,6 +755,8 @@ pub struct CreateJobRequest {
     pub tables: Vec<QueryTableBinding>,
     pub name: String,
     pub sql: String,
+    #[serde(default)]
+    pub post_js: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -764,6 +785,7 @@ pub struct ScheduleRow {
     pub source_name: String,
     pub name: String,
     pub sql_text: String,
+    pub post_js: Option<String>,
     pub cron_expression: String,
     pub timezone: String,
     pub enabled: bool,
@@ -781,6 +803,7 @@ pub struct ScheduleItem {
     pub source_name: String,
     pub name: String,
     pub sql: String,
+    pub post_js: Option<String>,
     pub tables: Vec<QueryTableBinding>,
     pub cron_expression: String,
     pub timezone: String,
@@ -799,6 +822,7 @@ impl From<ScheduleRow> for ScheduleItem {
             source_name: row.source_name,
             name: row.name,
             sql: row.sql_text,
+            post_js: row.post_js,
             tables: Vec::new(),
             cron_expression: row.cron_expression,
             timezone: row.timezone,
@@ -820,6 +844,8 @@ pub struct UpsertScheduleRequest {
     pub tables: Vec<QueryTableBinding>,
     pub name: String,
     pub sql: String,
+    #[serde(default)]
+    pub post_js: Option<String>,
     pub cron_expression: String,
     pub timezone: String,
     pub enabled: bool,
@@ -832,7 +858,34 @@ pub struct ToggleScheduleRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::AgentEventHub;
+    use super::{AgentEventHub, SavedQueryPayload};
+
+    #[test]
+    fn saved_query_payload_accepts_post_js() {
+        let v: SavedQueryPayload = serde_json::from_str(
+            r#"{"sourceId":"s","tables":[],"name":"n","sql":"select 1","postJs":"function process(r){return r}"}"#,
+        )
+        .unwrap();
+        assert!(v.post_js.unwrap().contains("process"));
+    }
+
+    #[test]
+    fn saved_query_payload_defaults_post_js_to_none() {
+        let v: SavedQueryPayload =
+            serde_json::from_str(r#"{"sourceId":"s","tables":[],"name":"n","sql":"select 1"}"#)
+                .unwrap();
+        assert!(v.post_js.is_none());
+    }
+
+    #[test]
+    fn query_response_deserializes_without_post_process_fields() {
+        let v: super::QueryResponse = serde_json::from_str(
+            r#"{"columns":[],"rows":[],"rowCount":0,"elapsedMs":1,"truncated":false}"#,
+        )
+        .unwrap();
+        assert!(!v.post_processed);
+        assert!(v.post_process_ms.is_none());
+    }
 
     /// 验证普通更新只唤醒订阅者而不关闭通道，后续步骤仍可继续复用同一订阅。
     #[tokio::test]
