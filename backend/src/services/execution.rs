@@ -136,11 +136,7 @@ pub async fn execute_job_to_artifact(
             let sample_limit = 200usize;
             let total_rows = out.rows.len();
             let truncated = total_rows > sample_limit;
-            let sample_rows = out
-                .rows
-                .into_iter()
-                .take(sample_limit)
-                .collect::<Vec<_>>();
+            let sample_rows = out.rows.into_iter().take(sample_limit).collect::<Vec<_>>();
             let post_ms = out.elapsed.as_millis();
 
             execution.sample = QueryResponse {

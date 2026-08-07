@@ -179,7 +179,9 @@ async fn hydrate_query(state: &SharedState, row: SavedQueryRow) -> AppResult<Sav
 }
 
 fn normalize_optional_text(raw: Option<&str>) -> Option<String> {
-    raw.map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned)
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 async fn required_query(

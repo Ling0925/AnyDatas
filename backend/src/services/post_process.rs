@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_LENGTH, HOST};
+use reqwest::header::{CONTENT_LENGTH, HOST, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Method, Url};
 use rquickjs::function::Rest;
 use rquickjs::{
@@ -68,10 +68,7 @@ impl JsHttpRuntime {
             .timeout(Duration::from_millis(limits.http_max_timeout_ms.max(1)))
             .build()
             .map_err(|error| {
-                PostProcessError::new(
-                    "post_js_internal",
-                    format!("创建 HTTP 客户端失败：{error}"),
-                )
+                PostProcessError::new("post_js_internal", format!("创建 HTTP 客户端失败：{error}"))
             })?;
         Ok(Self::from_parts(
             client,
@@ -114,9 +111,8 @@ impl JsHttpRuntime {
         self.request_count.set(used + 1);
 
         let method = parse_http_method(&request.method)?;
-        let url = Url::parse(&request.url).map_err(|error| {
-            HttpHostError::error(format!("URL 无效：{error}"))
-        })?;
+        let url = Url::parse(&request.url)
+            .map_err(|error| HttpHostError::error(format!("URL 无效：{error}")))?;
 
         if url.scheme() != "http" && url.scheme() != "https" {
             return Err(HttpHostError::blocked("仅允许 http 或 https 协议"));
@@ -172,15 +168,13 @@ impl JsHttpRuntime {
             if lower == "host" || lower == "content-length" {
                 continue;
             }
-            let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
-                HttpHostError::error(format!("非法请求头名 `{name}`：{error}"))
-            })?;
+            let header_name = HeaderName::from_bytes(name.as_bytes())
+                .map_err(|error| HttpHostError::error(format!("非法请求头名 `{name}`：{error}")))?;
             if header_name == HOST || header_name == CONTENT_LENGTH {
                 continue;
             }
-            let header_value = HeaderValue::from_str(&value).map_err(|error| {
-                HttpHostError::error(format!("非法请求头值 `{name}`：{error}"))
-            })?;
+            let header_value = HeaderValue::from_str(&value)
+                .map_err(|error| HttpHostError::error(format!("非法请求头值 `{name}`：{error}")))?;
             headers.append(header_name, header_value);
         }
         builder = builder.headers(headers);
@@ -189,16 +183,16 @@ impl JsHttpRuntime {
             builder = builder.body(body);
         }
 
-        let response = builder.send().map_err(|error| {
-            HttpHostError::error(format!("HTTP 请求失败：{error}"))
-        })?;
+        let response = builder
+            .send()
+            .map_err(|error| HttpHostError::error(format!("HTTP 请求失败：{error}")))?;
 
         let status = response.status().as_u16();
         let ok = response.status().is_success();
         let response_headers = flatten_response_headers(response.headers());
-        let body_bytes = response.bytes().map_err(|error| {
-            HttpHostError::error(format!("读取响应失败：{error}"))
-        })?;
+        let body_bytes = response
+            .bytes()
+            .map_err(|error| HttpHostError::error(format!("读取响应失败：{error}")))?;
         if body_bytes.len() > self.limits.max_body_bytes {
             return Err(HttpHostError::limit(format!(
                 "响应体超过限制（{} > {} 字节）",
@@ -273,13 +267,10 @@ impl HttpHostError {
 fn parse_http_method(raw: &str) -> Result<Method, HttpHostError> {
     let upper = raw.trim().to_ascii_uppercase();
     if !ALLOWED_HTTP_METHODS.contains(&upper.as_str()) {
-        return Err(HttpHostError::error(format!(
-            "不支持的 HTTP 方法：{raw}"
-        )));
+        return Err(HttpHostError::error(format!("不支持的 HTTP 方法：{raw}")));
     }
-    Method::from_bytes(upper.as_bytes()).map_err(|error| {
-        HttpHostError::error(format!("不支持的 HTTP 方法：{error}"))
-    })
+    Method::from_bytes(upper.as_bytes())
+        .map_err(|error| HttpHostError::error(format!("不支持的 HTTP 方法：{error}")))
 }
 
 fn resolve_host_ips(host: &str, port: u16) -> Result<Vec<IpAddr>, String> {
@@ -414,16 +405,10 @@ pub fn run_post_process(
     });
     let rows_json = Value::Array(input_objects);
     let rows_json_text = serde_json::to_string(&rows_json).map_err(|error| {
-        PostProcessError::new(
-            "post_js_internal",
-            format!("序列化输入行失败：{error}"),
-        )
+        PostProcessError::new("post_js_internal", format!("序列化输入行失败：{error}"))
     })?;
     let meta_json_text = serde_json::to_string(&meta_json).map_err(|error| {
-        PostProcessError::new(
-            "post_js_internal",
-            format!("序列化 meta 失败：{error}"),
-        )
+        PostProcessError::new("post_js_internal", format!("序列化 meta 失败：{error}"))
     })?;
 
     let timeout = Duration::from_millis(timeout_ms.max(1));
@@ -433,10 +418,7 @@ pub fn run_post_process(
     let memory_limit = limits.memory_mb.saturating_mul(1024 * 1024);
 
     let runtime = Runtime::new().map_err(|error| {
-        PostProcessError::new(
-            "post_js_internal",
-            format!("创建 JS 运行时失败：{error}"),
-        )
+        PostProcessError::new("post_js_internal", format!("创建 JS 运行时失败：{error}"))
     })?;
     if memory_limit > 0 {
         runtime.set_memory_limit(memory_limit);
@@ -444,15 +426,12 @@ pub fn run_post_process(
     runtime.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
 
     let context = Context::full(&runtime).map_err(|error| {
-        PostProcessError::new(
-            "post_js_internal",
-            format!("创建 JS 上下文失败：{error}"),
-        )
+        PostProcessError::new("post_js_internal", format!("创建 JS 上下文失败：{error}"))
     })?;
 
     let max_output_rows = limits.max_output_rows;
-    let eval_result =
-        context.with(|ctx| -> Result<Vec<Vec<(String, Value)>>, PostProcessError> {
+    let eval_result = context.with(
+        |ctx| -> Result<Vec<Vec<(String, Value)>>, PostProcessError> {
             install_console(&ctx, Rc::clone(&console_buf), max_console_lines)?;
             if let Some(http_runtime) = http {
                 install_http(&ctx, http_runtime)?;
@@ -498,7 +477,8 @@ pub fn run_post_process(
             };
 
             js_return_to_objects(&ctx, returned, max_output_rows, deadline)
-        });
+        },
+    );
 
     let objects = eval_result?;
     let (out_columns, out_rows) = objects_to_table(&objects);
@@ -512,10 +492,7 @@ pub fn run_post_process(
     })
 }
 
-fn install_http<'js>(
-    ctx: &Ctx<'js>,
-    http: &JsHttpRuntime,
-) -> Result<(), PostProcessError> {
+fn install_http<'js>(ctx: &Ctx<'js>, http: &JsHttpRuntime) -> Result<(), PostProcessError> {
     // QuickJS callbacks must be 'static. The host pointer is only dereferenced while
     // `run_post_process` still holds `http` and the JS context is active.
     let http_ptr = http as *const JsHttpRuntime as usize;
@@ -532,10 +509,7 @@ fn install_http<'js>(
     })?;
 
     let http_obj = Object::new(ctx.clone()).map_err(|error| {
-        PostProcessError::new(
-            "post_js_internal",
-            format!("创建 http 对象失败：{error}"),
-        )
+        PostProcessError::new("post_js_internal", format!("创建 http 对象失败：{error}"))
     })?;
     http_obj.set("request", request_fn).map_err(|error| {
         PostProcessError::new(
@@ -544,10 +518,7 @@ fn install_http<'js>(
         )
     })?;
     ctx.globals().set("http", http_obj).map_err(|error| {
-        PostProcessError::new(
-            "post_js_internal",
-            format!("注入 http 失败：{error}"),
-        )
+        PostProcessError::new("post_js_internal", format!("注入 http 失败：{error}"))
     })?;
     Ok(())
 }
@@ -619,12 +590,11 @@ fn parse_http_request_args<'js>(
             .ok_or_else(|| HttpHostError::error("headers 必须是对象"))?;
         let keys = header_obj.keys::<String>();
         for key_result in keys {
-            let key = key_result.map_err(|error| {
-                HttpHostError::error(format!("读取 headers 失败：{error}"))
-            })?;
-            let value: JsValue = header_obj.get(key.as_str()).map_err(|error| {
-                HttpHostError::error(format!("读取 headers 失败：{error}"))
-            })?;
+            let key = key_result
+                .map_err(|error| HttpHostError::error(format!("读取 headers 失败：{error}")))?;
+            let value: JsValue = header_obj
+                .get(key.as_str())
+                .map_err(|error| HttpHostError::error(format!("读取 headers 失败：{error}")))?;
             let text = js_value_to_string(ctx, value).map_err(HttpHostError::error)?;
             headers.push((key, text));
         }
@@ -707,9 +677,8 @@ fn response_to_js_object<'js>(
     ctx: &Ctx<'js>,
     response: HttpResponseValue,
 ) -> Result<Object<'js>, HttpHostError> {
-    let object = Object::new(ctx.clone()).map_err(|error| {
-        HttpHostError::error(format!("创建响应对象失败：{error}"))
-    })?;
+    let object = Object::new(ctx.clone())
+        .map_err(|error| HttpHostError::error(format!("创建响应对象失败：{error}")))?;
     object
         .set("ok", response.ok)
         .map_err(|error| HttpHostError::error(format!("设置 ok 失败：{error}")))?;
@@ -720,13 +689,12 @@ fn response_to_js_object<'js>(
         .set("body", response.body)
         .map_err(|error| HttpHostError::error(format!("设置 body 失败：{error}")))?;
 
-    let headers = Object::new(ctx.clone()).map_err(|error| {
-        HttpHostError::error(format!("创建 headers 对象失败：{error}"))
-    })?;
+    let headers = Object::new(ctx.clone())
+        .map_err(|error| HttpHostError::error(format!("创建 headers 对象失败：{error}")))?;
     for (name, value) in response.headers {
-        headers.set(name.as_str(), value).map_err(|error| {
-            HttpHostError::error(format!("设置响应头失败：{error}"))
-        })?;
+        headers
+            .set(name.as_str(), value)
+            .map_err(|error| HttpHostError::error(format!("设置响应头失败：{error}")))?;
     }
     object
         .set("headers", headers)
@@ -783,10 +751,7 @@ fn install_console<'js>(
     }
 
     ctx.globals().set("console", console).map_err(|error| {
-        PostProcessError::new(
-            "post_js_internal",
-            format!("注入 console 失败：{error}"),
-        )
+        PostProcessError::new("post_js_internal", format!("注入 console 失败：{error}"))
     })?;
     Ok(())
 }
@@ -829,9 +794,7 @@ fn map_js_error<'js>(
         rquickjs::CaughtError::Error(inner) => {
             map_rquickjs_error(ctx, inner, deadline, default_code)
         }
-        rquickjs::CaughtError::Exception(exception) => {
-            exception_to_error(&exception, default_code)
-        }
+        rquickjs::CaughtError::Exception(exception) => exception_to_error(&exception, default_code),
         rquickjs::CaughtError::Value(value) => {
             if value.is_uncatchable_error() || Instant::now() >= deadline {
                 return PostProcessError::new("post_js_timeout", "脚本执行超时");
@@ -881,7 +844,10 @@ fn map_rquickjs_error<'js>(
     }
 }
 
-fn exception_to_error(exception: &rquickjs::Exception<'_>, default_code: &'static str) -> PostProcessError {
+fn exception_to_error(
+    exception: &rquickjs::Exception<'_>,
+    default_code: &'static str,
+) -> PostProcessError {
     let name = exception
         .get::<_, Option<String>>("name")
         .ok()
@@ -982,9 +948,9 @@ fn js_return_to_objects<'js>(
     max_output_rows: usize,
     deadline: Instant,
 ) -> Result<Vec<Vec<(String, Value)>>, PostProcessError> {
-    let array = returned.into_array().ok_or_else(|| {
-        PostProcessError::new("post_js_bad_return", "process 必须返回对象数组")
-    })?;
+    let array = returned
+        .into_array()
+        .ok_or_else(|| PostProcessError::new("post_js_bad_return", "process 必须返回对象数组"))?;
     let len = array.len();
     if len > max_output_rows {
         return Err(PostProcessError::new(
@@ -995,9 +961,9 @@ fn js_return_to_objects<'js>(
 
     let mut objects = Vec::with_capacity(len);
     for index in 0..len {
-        let item: JsValue = array.get(index).map_err(|error| {
-            map_rquickjs_error(ctx, error, deadline, "post_js_bad_return")
-        })?;
+        let item: JsValue = array
+            .get(index)
+            .map_err(|error| map_rquickjs_error(ctx, error, deadline, "post_js_bad_return"))?;
         let object = item.into_object().ok_or_else(|| {
             PostProcessError::new(
                 "post_js_bad_return",
@@ -1017,12 +983,11 @@ fn js_object_to_ordered_pairs<'js>(
     let mut pairs = Vec::new();
     let keys = object.keys::<String>();
     for key_result in keys {
-        let key = key_result.map_err(|error| {
-            map_rquickjs_error(ctx, error, deadline, "post_js_bad_return")
-        })?;
-        let js_value: JsValue = object.get(key.as_str()).map_err(|error| {
-            map_rquickjs_error(ctx, error, deadline, "post_js_bad_return")
-        })?;
+        let key = key_result
+            .map_err(|error| map_rquickjs_error(ctx, error, deadline, "post_js_bad_return"))?;
+        let js_value: JsValue = object
+            .get(key.as_str())
+            .map_err(|error| map_rquickjs_error(ctx, error, deadline, "post_js_bad_return"))?;
         let value = js_value_to_json(ctx, js_value, deadline)?;
         pairs.push((key, value));
     }
@@ -1045,11 +1010,7 @@ fn js_value_to_json<'js>(
     }
     if let Some(v) = value.as_float() {
         // QuickJS often stores whole numbers as floats after arithmetic.
-        if v.is_finite()
-            && v.fract() == 0.0
-            && v >= i64::MIN as f64
-            && v <= i64::MAX as f64
-        {
+        if v.is_finite() && v.fract() == 0.0 && v >= i64::MIN as f64 && v <= i64::MAX as f64 {
             return Ok(Value::Number((v as i64).into()));
         }
         if let Some(n) = serde_json::Number::from_f64(v) {
@@ -1071,10 +1032,7 @@ fn js_value_to_json<'js>(
                 .to_string()
                 .map_err(|error| map_rquickjs_error(ctx, error, deadline, "post_js_bad_return"))?;
             serde_json::from_str(&text).map_err(|_| {
-                PostProcessError::new(
-                    "post_js_bad_return",
-                    "process 返回值包含无法序列化的内容",
-                )
+                PostProcessError::new("post_js_bad_return", "process 返回值包含无法序列化的内容")
             })
         }
         Ok(None) => Ok(Value::Null),
@@ -1085,9 +1043,7 @@ fn js_value_to_json<'js>(
     }
 }
 
-fn objects_to_table(
-    objects: &[Vec<(String, Value)>],
-) -> (Vec<FieldDefinition>, Vec<Vec<Value>>) {
+fn objects_to_table(objects: &[Vec<(String, Value)>]) -> (Vec<FieldDefinition>, Vec<Vec<Value>>) {
     if objects.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -1110,13 +1066,15 @@ fn objects_to_table(
 
     let mut out_rows = Vec::with_capacity(objects.len());
     for object in objects {
-        let lookup: std::collections::HashMap<&str, &Value> = object
-            .iter()
-            .map(|(k, v)| (k.as_str(), v))
-            .collect();
+        let lookup: std::collections::HashMap<&str, &Value> =
+            object.iter().map(|(k, v)| (k.as_str(), v)).collect();
         let mut row = Vec::with_capacity(ordered.len());
         for name in &ordered {
-            let raw = lookup.get(name.as_str()).copied().cloned().unwrap_or(Value::Null);
+            let raw = lookup
+                .get(name.as_str())
+                .copied()
+                .cloned()
+                .unwrap_or(Value::Null);
             let cell = normalize_cell(raw);
             if let Some(state) = type_state.get_mut(name) {
                 state.observe(&cell);
@@ -1167,7 +1125,10 @@ impl TypeState {
                 } else if n.as_f64().is_some() {
                     // Distinguish whole floats as int when finite and fract==0
                     if let Some(f) = n.as_f64() {
-                        if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64
+                        if f.is_finite()
+                            && f.fract() == 0.0
+                            && f >= i64::MIN as f64
+                            && f <= i64::MAX as f64
                         {
                             Self::Int
                         } else {
@@ -1238,9 +1199,9 @@ fn approx_value_bytes(value: &Value) -> usize {
         Value::Bool(_) => 5,
         Value::Number(n) => n.to_string().len(),
         Value::String(s) => s.len().saturating_add(2),
-        Value::Array(items) => items
-            .iter()
-            .fold(2usize, |acc, item| acc.saturating_add(approx_value_bytes(item))),
+        Value::Array(items) => items.iter().fold(2usize, |acc, item| {
+            acc.saturating_add(approx_value_bytes(item))
+        }),
         Value::Object(map) => map.iter().fold(2usize, |acc, (k, v)| {
             acc.saturating_add(k.len())
                 .saturating_add(approx_value_bytes(v))
@@ -1300,11 +1261,7 @@ mod tests {
         let out = run_post_process(script, &columns, &rows, &test_limits(), 5000, None).unwrap();
         assert_eq!(out.rows.len(), 1);
         assert!(out.columns.iter().any(|c| c.name == "doubled"));
-        let amount_idx = out
-            .columns
-            .iter()
-            .position(|c| c.name == "amount")
-            .unwrap();
+        let amount_idx = out.columns.iter().position(|c| c.name == "amount").unwrap();
         let doubled_idx = out
             .columns
             .iter()
@@ -1316,7 +1273,8 @@ mod tests {
 
     #[test]
     fn rejects_missing_process() {
-        let err = run_post_process("const x = 1", &[], &[], &test_limits(), 1000, None).unwrap_err();
+        let err =
+            run_post_process("const x = 1", &[], &[], &test_limits(), 1000, None).unwrap_err();
         assert_eq!(err.code, "post_js_no_process");
     }
 
@@ -1540,11 +1498,14 @@ mod tests {
 
     #[test]
     fn http_request_succeeds_when_allowlisted() {
-        let (base, port, _handle) =
-            spawn_mock_http_server("HTTP/1.1 200 OK", "Content-Type: text/plain\r\n", "hello-body");
+        let (base, port, _handle) = spawn_mock_http_server(
+            "HTTP/1.1 200 OK",
+            "Content-Type: text/plain\r\n",
+            "hello-body",
+        );
         let limits = test_limits();
-        let allowlist = crate::services::net_guard::parse_allowlist(&format!("127.0.0.1:{port}"))
-            .unwrap();
+        let allowlist =
+            crate::services::net_guard::parse_allowlist(&format!("127.0.0.1:{port}")).unwrap();
         let http = http_runtime_for(&limits, true, allowlist);
         let script = format!(
             r#"
@@ -1572,8 +1533,8 @@ mod tests {
         let (base, port, _handle) =
             spawn_mock_http_server("HTTP/1.1 200 OK", "Content-Type: text/plain\r\n", "x");
         let limits = test_limits();
-        let allowlist = crate::services::net_guard::parse_allowlist(&format!("127.0.0.1:{port}"))
-            .unwrap();
+        let allowlist =
+            crate::services::net_guard::parse_allowlist(&format!("127.0.0.1:{port}")).unwrap();
         let http = http_runtime_for(&limits, false, allowlist);
         let script = format!(
             r#"
@@ -1593,8 +1554,8 @@ mod tests {
             spawn_mock_http_server("HTTP/1.1 200 OK", "Content-Type: text/plain\r\n", "x");
         let mut limits = test_limits();
         limits.http_max_requests = 1;
-        let allowlist = crate::services::net_guard::parse_allowlist(&format!("127.0.0.1:{port}"))
-            .unwrap();
+        let allowlist =
+            crate::services::net_guard::parse_allowlist(&format!("127.0.0.1:{port}")).unwrap();
         let http = http_runtime_for(&limits, true, allowlist);
         let script = format!(
             r#"
@@ -1617,8 +1578,8 @@ mod tests {
             "redirect-body",
         );
         let limits = test_limits();
-        let allowlist = crate::services::net_guard::parse_allowlist(&format!("127.0.0.1:{port}"))
-            .unwrap();
+        let allowlist =
+            crate::services::net_guard::parse_allowlist(&format!("127.0.0.1:{port}")).unwrap();
         let http = http_runtime_for(&limits, true, allowlist);
         let script = format!(
             r#"

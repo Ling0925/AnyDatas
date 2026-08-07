@@ -36,11 +36,12 @@ Implemented:
 - Cached table reuse so repeated queries do not reparse Excel/CSV
 - Independent logical-table preview and field inspection
 - SQL-based calculated fields
-- Reusable saved queries that persist SQL and ordered multi-table bindings
+- Optional server-side QuickJS post-processing (`process(rows, meta)`) after DuckDB SQL, with deployment-scoped `http.request` allowlisting; shared by interactive queries, saved queries, background jobs, and schedules
+- Reusable saved queries that persist SQL, optional post-process JS, and ordered multi-table bindings
 - Result tables, grouped/stacked bar, line, area, pie, scatter and radar charts with up to four measures, and formula-safe CSV export
 - Workspace OpenAI Chat Completions-compatible settings and a server-persisted Agent Runtime with native tools, resumable conversations, run steps, cancel, retry, and rolling summaries
-- Background jobs with multi-table snapshots, progress, logs, complete DuckDB result artifacts, server pagination, CSV download, stop, retry, retention, and deletion
-- Multi-table cron schedules with timezone, enable/disable, edit, run-now, and deletion
+- Background jobs with multi-table snapshots, optional post-process JS snapshot, progress, logs, complete DuckDB result artifacts (final post-processed table), server pagination, CSV download, stop, retry, retention, and deletion
+- Multi-table cron schedules with timezone, enable/disable, edit, run-now, optional post-process JS, and deletion
 - Password setup/login, HttpOnly sessions, logout, login throttling, and workspace RBAC enforcement
 - Liveness/readiness probes, authenticated Prometheus metrics, worker alerts, request IDs, browser security headers, and AI endpoint SSRF protection
 - Consistent referenced-file backups, verified volume restore, and active Rust/Vue release gates in CI

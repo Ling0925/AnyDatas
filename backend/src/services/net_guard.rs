@@ -80,7 +80,8 @@ pub fn parse_allowlist(text: &str) -> Result<Vec<AllowlistEntry>, String> {
 fn parse_entry(token: &str) -> Result<AllowlistEntry, String> {
     let lower = token.to_ascii_lowercase();
     if lower.starts_with("http://") || lower.starts_with("https://") {
-        let url = Url::parse(token).map_err(|error| format!("白名单 URL 无效: {token} ({error})"))?;
+        let url =
+            Url::parse(token).map_err(|error| format!("白名单 URL 无效: {token} ({error})"))?;
         if url.scheme() != "http" && url.scheme() != "https" {
             return Err(format!("白名单 URL 协议无效: {token}"));
         }
@@ -128,9 +129,10 @@ fn entry_matches(url: &Url, entry: &AllowlistEntry) -> bool {
     let host_lc = host.to_ascii_lowercase();
     match entry {
         AllowlistEntry::Host(allowed) => host_lc == *allowed,
-        AllowlistEntry::HostPort { host: allowed, port } => {
-            host_lc == *allowed && url.port_or_known_default() == Some(*port)
-        }
+        AllowlistEntry::HostPort {
+            host: allowed,
+            port,
+        } => host_lc == *allowed && url.port_or_known_default() == Some(*port),
         AllowlistEntry::UrlPrefix(prefix) => url.as_str().starts_with(prefix.as_str()),
     }
 }

@@ -12,10 +12,7 @@ pub enum AppError {
     BadRequest(String),
     /// Stable business codes (e.g. `post_js_*`) for API clients; used by post-process.
     #[error("{message}")]
-    BadRequestCoded {
-        code: &'static str,
-        message: String,
-    },
+    BadRequestCoded { code: &'static str, message: String },
     #[error("{0}")]
     NotFound(String),
     #[error("{0}")]

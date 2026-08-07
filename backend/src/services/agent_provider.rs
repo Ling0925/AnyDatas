@@ -709,9 +709,10 @@ pub async fn validate_base_url_network(state: &SharedState, base_url: &str) -> A
         ));
     }
     if endpoint.scheme() == "http"
-        && addresses.iter().copied().any(|address| {
-            !crate::services::net_guard::is_restricted_address(address)
-        })
+        && addresses
+            .iter()
+            .copied()
+            .any(|address| !crate::services::net_guard::is_restricted_address(address))
     {
         return Err(AppError::BadRequest(
             "公网 AI 接口必须使用 HTTPS".to_owned(),

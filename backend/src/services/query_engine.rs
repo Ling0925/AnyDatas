@@ -307,10 +307,7 @@ pub fn read_artifact_all_rows(
     )?;
     let total_rows = usize::try_from(total_rows).context("结果行数超出平台范围")?;
     if total_rows > max_rows {
-        bail!(
-            "后处理输入行数超过限制（{} > {}）",
-            total_rows, max_rows
-        );
+        bail!("后处理输入行数超过限制（{} > {}）", total_rows, max_rows);
     }
     let query_sql = format!("SELECT * FROM {}", quote_identifier("result"));
     // limit == total_rows keeps collect from treating a full read as truncated.
@@ -341,8 +338,7 @@ pub fn replace_artifact_with_rows(
     let temporary_path = artifact_path.with_extension(format!("{artifact_id}.rewrite.tmp"));
     let temporary_directory = parent.join(format!(".result-rewrite-{artifact_id}"));
     let result = (|| -> Result<()> {
-        let connection =
-            Connection::open(&temporary_path).context("无法初始化后处理结果数据库")?;
+        let connection = Connection::open(&temporary_path).context("无法初始化后处理结果数据库")?;
         configure_connection(&connection, runtime, Some(&temporary_directory))?;
         connection.execute_batch("SET enable_external_access = false;")?;
         // DuckDB requires ≥1 column; empty process() results use an internal marker.
@@ -1338,8 +1334,8 @@ mod tests {
             vec![Value::from(20.0), Value::from(40.0)],
             vec![Value::from(30.0), Value::from(60.0)],
         ];
-        let size = replace_artifact_with_rows(&artifact_path, &new_columns, &new_rows, &runtime)
-            .unwrap();
+        let size =
+            replace_artifact_with_rows(&artifact_path, &new_columns, &new_rows, &runtime).unwrap();
         assert!(size > 0);
 
         let (page, total_rows) =
@@ -1411,15 +1407,9 @@ mod tests {
                 .map(r => ({ amount: r.amount, doubled: r.amount * 2 }));
             }
         "#;
-        let out = post_process::run_post_process(
-            script,
-            &columns,
-            &rows,
-            &limits,
-            5_000,
-            Some(&http),
-        )
-        .unwrap();
+        let out =
+            post_process::run_post_process(script, &columns, &rows, &limits, 5_000, Some(&http))
+                .unwrap();
         assert_eq!(out.rows.len(), 50);
         assert!(out.columns.iter().any(|c| c.name == "doubled"));
 

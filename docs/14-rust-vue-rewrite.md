@@ -1,6 +1,6 @@
 # Rust + Vue 重构设计与实施状态
 
-更新日期: 2026-07-19
+更新日期: 2026-08-07
 
 ## 1. 重构目标
 
@@ -29,22 +29,23 @@
 - 左侧: 文件到 Sheet/逻辑表的树、搜索、上传、删除和加入查询。
 - 导入预检: 正式导入前选择 Sheet、查看原始样本并修改字段类型。
 - 中间查询 Tab: 上半部 SQL 编辑器，下半部查询结果。
+- 后处理 JS（可选）: SQL 编辑器下方默认折叠的 Monaco JavaScript 区；非空时显示「已启用」。脚本定义同步 `process(rows, meta)`，在 DuckDB SQL 成功后过滤、派生或整形结果，并可经 Rust 宿主调用 `http.request`。空脚本时行为与现网一致。
 - 查询绑定栏: 多文件/多 Sheet 绑定、别名修改、移除和同表多别名。
-- 查询工具栏: 载入、创建、更新和删除包含完整表绑定的保存查询。
-- 结果区域: 表格/图表切换、维度、最多四个数值指标、聚合方式和 CSV 导出。
-- AI 分析: 新对话默认不携带表格；右侧可逐张选择 Agent 专用表绑定，也可用 `/all` 显式选择全部逻辑表。仅当 Agent 选表与工作台绑定完全一致时才可携带当前 SQL 和可选结果样本；支持追问、候选 SQL、独立预览、应用和应用并运行。
+- 查询工具栏: 载入、创建、更新和删除包含完整表绑定与可选 `postJs` 的保存查询。
+- 结果区域: 表格/图表切换、维度、最多四个数值指标、聚合方式和 CSV 导出；经过后处理时显示「已后处理 · Nms」。
+- AI 分析: 新对话默认不携带表格；右侧可逐张选择 Agent 专用表绑定，也可用 `/all` 显式选择全部逻辑表。仅当 Agent 选表与工作台绑定完全一致时才可携带当前 SQL 和可选结果样本；支持追问、候选 SQL、独立预览、应用和应用并运行。Agent 不读写 `postJs`。
 - 中间数据预览 Tab: 使用右侧读取设置重新解析并预览。
 - 右侧数据 Tab: 文件信息、逻辑表名称、工作表、起止单元格、表头、缓存状态和字段列表。
 - 右侧 AI Tab: 按用户和工作区保留最近对话；历史会话恢复各自的表绑定快照，改变选表后必须以新对话继续。
-- 计算字段: 在右侧添加 DuckDB 表达式，前端生成可继续编辑的 SQL。
+- 计算字段: 在右侧添加 DuckDB 表达式，前端生成可继续编辑的 SQL（SQL 内计算）；与后处理 JS（结果集后处理）并存。
 
 ### 后台任务
 
 - 左侧: 全部、运行、排队、完成、失败、停止和计划任务入口。
 - 左侧状态数量来自独立的工作区任务汇总接口，不受当前筛选条件影响。
 - 中间: 运行记录或计划列表。
-- 右侧: 任务元数据、SQL、错误、步骤日志和结果预览。
-- 操作: 新建、停止、重试、删除、启停计划、立即运行和编辑计划。
+- 右侧: 任务元数据、SQL、可选后处理 JS、错误、步骤日志和结果预览；结果与 artifact 均为后处理后的最终表。
+- 操作: 新建、停止、重试、删除、启停计划、立即运行和编辑计划；创建/重试/计划入队均快照 `postJs`。
 
 移动端不在本轮范围内，页面设置最小桌面宽度 1180px。
 
@@ -65,9 +66,12 @@
 | `backend/src/api/schedules.rs` | Cron 计划管理和立即运行 |
 | `backend/src/services/spreadsheet.rs` | 表格解析、表头规范化和类型推断 |
 | `backend/src/services/query_bindings.rs` | 新旧请求绑定规范化及保存/任务/计划关系持久化 |
-| `backend/src/services/query_engine.rs` | 单表缓存、多表挂载、只读 SQL、查询中断和结果转换 |
+| `backend/src/services/query_engine.rs` | 单表缓存、多表挂载、只读 SQL、查询中断和结果转换；artifact 可按后处理结果重写 |
+| `backend/src/services/execution.rs` | 同步查询与任务共用执行路径；SQL 成功后按需调用后处理 |
+| `backend/src/services/post_process.rs` | QuickJS（rquickjs）`process(rows, meta)` 引擎、限额、`http.request` host |
+| `backend/src/services/net_guard.rs` | 受限 IP 分类、HTTP 白名单解析/匹配；AI 与后处理 JS 共用 |
 | `backend/src/services/secrets.rs` | 单机主密钥和工作区 API Key 的 AES-256-GCM 加解密 |
-| `backend/src/workers.rs` | SQLite 队列消费和到期计划入队 |
+| `backend/src/workers.rs` | SQLite 队列消费和到期计划入队；任务日志含后处理完成阶段 |
 | `backend/migrations/0001_init.sql` | 文件、查询、任务和计划元数据模型 |
 | `backend/migrations/0002_auth_workspaces.sql` | 用户、工作区、成员关系、会话和登录限流 |
 | `backend/migrations/0003_multi_table_queries.sql` | 逻辑表、多表绑定和历史 data 别名回填 |
@@ -76,12 +80,15 @@
 | `backend/migrations/0006_ai_agent_runtime.sql` | Agent 会话、消息、Run 和 Step |
 | `backend/migrations/0007_query_governance.sql` | 查询治理和运行元数据 |
 | `backend/migrations/0008_job_result_artifacts.sql` | 后台任务完整结果制品 |
+| `backend/migrations/0009_query_post_js.sql` | 保存查询、任务和计划的可空 `post_js` |
 
 DuckDB 连接在服务端完成缓存挂载后关闭外部访问和扩展自动加载，并只接受单条 `SELECT` 或 `WITH` 查询。源数据不设置行数硬上限；CSV 逐行导入持久化单表缓存，配置版本变化后生成新缓存键。一次查询最多绑定 16 张逻辑表，同表多别名复用一个挂载。查询通过子查询包装限制返回前端的结果行数。后台任务注册 DuckDB 中断句柄，并在缓存导入期间轮询取消状态；停止运行中任务会中断查询并释放 worker，而不是只修改数据库状态。
 
+可选后处理 JS 在 SQL 成功后、返回响应或写 artifact 之前同步执行。脚本必须定义全局 `process(rows, meta)` 并返回对象数组；空/`null`/`空白` `postJs` 跳过引擎，路径与现网一致。后处理失败则整次查询或任务失败，不返回「仅 SQL」半结果。脚本内 HTTP 仅经 Rust `http.request`（`http`/`https`，不跟随重定向）；白名单为空时允许公网并默认拦截本机/私网等受限地址，白名单非空时仅允许名单目标（名单内私网视为已批准）。限额与开关见 `.env.example` 中 `ANYDATAS_JS_*`。同步查询与后台任务的后处理均在 `spawn_blocking` 内执行。
+
 密码使用 Argon2 散列。浏览器只保存 `HttpOnly`、`SameSite=Lax` 会话 Cookie，数据库只保存会话 token 的 SHA-256 摘要；连续 5 次登录失败会锁定 15 分钟。所有数据源、查询、任务和计划接口均从会话解析工作区并在 SQL 查询层约束范围，写操作要求 Owner、Admin 或 Analyst。
 
-AI API Key 使用 AES-256-GCM 加密，主密钥默认保存在数据卷 `/data/.secret-key` 且不会经 API 返回。AI Schema 上下文由后端根据已授权的逻辑表绑定重建，不接受浏览器伪造字段结构；固定规则、Schema、摘要和近期消息使用严格总预算。模型返回的候选内容仍需通过单条只读 SQL 校验，预览不会修改编辑器，只有用户确认后才应用或执行。运行状态由进程内事件总线推送 SSE，SQLite 保持唯一事实来源；断线时前端才回退短轮询。
+AI API Key 使用 AES-256-GCM 加密，主密钥默认保存在数据卷 `/data/.secret-key` 且不会经 API 返回。AI Schema 上下文由后端根据已授权的逻辑表绑定重建，不接受浏览器伪造字段结构；固定规则、Schema、摘要和近期消息使用严格总预算。模型返回的候选内容仍需通过单条只读 SQL 校验，预览不会修改编辑器，只有用户确认后才应用或执行。运行状态由进程内事件总线推送 SSE，SQLite 保持唯一事实来源；断线时前端才回退短轮询。AI 与后处理 JS 共用 `net_guard` 地址分类。
 
 ## 5. API 覆盖
 
@@ -104,18 +111,18 @@ AI API Key 使用 AES-256-GCM 加密，主密钥默认保存在数据卷 `/data/
 | `GET/PATCH/DELETE /api/source-tables/{id}` | 完成 |
 | `POST /api/data-sources/{id}/tables` | 完成 |
 | `GET /api/source-tables/{id}/preview` | 完成 |
-| `POST /api/query` | 完成 |
-| `GET/POST /api/saved-queries` | 完成 |
-| `GET/PUT/DELETE /api/saved-queries/{id}` | 完成 |
-| `GET/POST /api/jobs` | 完成 |
+| `POST /api/query` | 完成；可选 body `postJs`；响应 `postProcessed` / `postProcessMs` |
+| `GET/POST /api/saved-queries` | 完成；读写可选 `postJs` |
+| `GET/PUT/DELETE /api/saved-queries/{id}` | 完成；读写可选 `postJs` |
+| `GET/POST /api/jobs` | 完成；创建快照可选 `postJs`，详情返回 |
 | `GET /api/jobs/summary` | 完成 |
 | `GET/DELETE /api/jobs/{id}` | 完成 |
 | `POST /api/jobs/{id}/cancel` | 完成 |
-| `POST /api/jobs/{id}/retry` | 完成 |
-| `GET/POST /api/schedules` | 完成 |
-| `PUT/DELETE /api/schedules/{id}` | 完成 |
+| `POST /api/jobs/{id}/retry` | 完成；重试复制 job 快照中的 `postJs` |
+| `GET/POST /api/schedules` | 完成；读写可选 `postJs` |
+| `PUT/DELETE /api/schedules/{id}` | 完成；读写可选 `postJs` |
 | `POST /api/schedules/{id}/toggle` | 完成 |
-| `POST /api/schedules/{id}/run` | 完成 |
+| `POST /api/schedules/{id}/run` | 完成；入队时拷贝 schedule 的 `postJs` 到 job |
 | `GET/PUT /api/ai/settings` | 完成 |
 | `POST /api/ai/settings/test` | 完成 |
 | `GET/POST /api/ai/agent/conversations` | 完成 |
@@ -154,6 +161,7 @@ AI API Key 使用 AES-256-GCM 加密，主密钥默认保存在数据卷 `/data/
 - 分组柱状、堆叠柱状、饼图、散点图和雷达图通过真实查询切换；ECharts Canvas 均检测到非空像素。
 - 导入预检通过 CSV 前导零样本验证，覆盖推断、类型改写、确认导入、查询保真和取消清理。
 - AI 设置、密钥不回显、密文落库、连接测试、完整表上下文、多轮追问、SQL 独立预览、写回、执行与刷新恢复通过模拟 OpenAI-compatible HTTP 服务和 Chromium 验证。
+- 后处理 JS：空脚本路径回归、`process` 过滤/派生列、缺失 `process`/throw/非法返回/脚本超限、`http.request` 白名单拦截与允许、无重定向；同步查询与后台 artifact 全量行后处理单测通过。
 
 ARM64 Docker Desktop 首次 bundled DuckDB release 构建实测约 24 分钟、约 4 GB Docker 虚拟机内存；启用 BuildKit 缓存后，Rust 业务代码重建约 22 秒。
 

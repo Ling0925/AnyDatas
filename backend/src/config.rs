@@ -175,9 +175,7 @@ impl Config {
             anyhow::bail!("ANYDATAS_JS_MAX_CONSOLE_LINES must be between 0 and 1000");
         }
         if !(1_024..=268_435_456).contains(&js_max_input_payload_bytes) {
-            anyhow::bail!(
-                "ANYDATAS_JS_MAX_INPUT_PAYLOAD_BYTES must be between 1024 and 268435456"
-            );
+            anyhow::bail!("ANYDATAS_JS_MAX_INPUT_PAYLOAD_BYTES must be between 1024 and 268435456");
         }
         if !(0..=100).contains(&js_http_max_requests) {
             anyhow::bail!("ANYDATAS_JS_HTTP_MAX_REQUESTS must be between 0 and 100");
