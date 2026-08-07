@@ -82,9 +82,20 @@ async fn update_settings(
     Json(request): Json<UpdateAiSettingsRequest>,
 ) -> AppResult<Json<AiSettingsResponse>> {
     auth.require_admin()?;
-    let base_url = normalize_base_url(&request.base_url)?;
-    agent_provider::validate_base_url_network(&state, &base_url).await?;
-    let model = normalize_model(&request.model, request.enabled)?;
+    let base_url = normalize_base_url(&request.base_url).map_err(|error| {
+        tracing::warn!(?error, "AI settings base_url rejected");
+        error
+    })?;
+    agent_provider::validate_base_url_network(&state, &base_url)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%base_url, ?error, "AI settings network validation failed");
+            error
+        })?;
+    let model = normalize_model(&request.model, request.enabled).map_err(|error| {
+        tracing::warn!(?error, "AI settings model rejected");
+        error
+    })?;
     let existing = load_settings(&state, &auth.workspace_id).await?;
     let api_key_ciphertext = if request.clear_api_key {
         None
@@ -122,14 +133,21 @@ async fn update_settings(
     )
     .bind(&auth.workspace_id)
     .bind(request.enabled)
-    .bind(base_url)
-    .bind(model)
+    .bind(&base_url)
+    .bind(&model)
     .bind(api_key_ciphertext)
     .bind(&auth.user_id)
     .bind(&now)
     .bind(&now)
     .execute(&state.pool)
     .await?;
+    tracing::info!(
+        workspace_id = %auth.workspace_id,
+        enabled = request.enabled,
+        base_url = %base_url,
+        model = %model,
+        "AI settings saved"
+    );
     Ok(Json(settings_response(
         load_settings(&state, &auth.workspace_id).await?,
     )))
