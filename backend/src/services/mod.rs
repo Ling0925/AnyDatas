@@ -3,6 +3,7 @@ pub mod agent_provider;
 pub mod execution;
 pub mod job_results;
 pub mod maintenance;
+pub mod net_guard;
 pub mod query_bindings;
 pub mod query_engine;
 pub mod resource_control;

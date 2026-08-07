@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::IpAddr,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
@@ -697,8 +697,11 @@ pub async fn validate_base_url_network(state: &SharedState, base_url: &str) -> A
     let hostname_is_local = host.eq_ignore_ascii_case("localhost")
         || host.to_ascii_lowercase().ends_with(".localhost")
         || host.to_ascii_lowercase().ends_with(".local");
-    let contains_restricted =
-        hostname_is_local || addresses.iter().copied().any(is_restricted_address);
+    let contains_restricted = hostname_is_local
+        || addresses
+            .iter()
+            .copied()
+            .any(crate::services::net_guard::is_restricted_address);
     if contains_restricted && !state.allow_private_ai_endpoints {
         return Err(AppError::BadRequest(
             "AI 接口解析到本机或私有网络；部署者需显式开启 ANYDATAS_AI_ALLOW_PRIVATE_NETWORK"
@@ -706,51 +709,15 @@ pub async fn validate_base_url_network(state: &SharedState, base_url: &str) -> A
         ));
     }
     if endpoint.scheme() == "http"
-        && addresses
-            .iter()
-            .copied()
-            .any(|address| !is_restricted_address(address))
+        && addresses.iter().copied().any(|address| {
+            !crate::services::net_guard::is_restricted_address(address)
+        })
     {
         return Err(AppError::BadRequest(
             "公网 AI 接口必须使用 HTTPS".to_owned(),
         ));
     }
     Ok(endpoint)
-}
-
-fn is_restricted_address(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(address) => is_restricted_ipv4(address),
-        IpAddr::V6(address) => is_restricted_ipv6(address),
-    }
-}
-
-fn is_restricted_ipv4(address: Ipv4Addr) -> bool {
-    let [a, b, c, _] = address.octets();
-    address.is_private()
-        || address.is_loopback()
-        || address.is_link_local()
-        || address.is_unspecified()
-        || address.is_broadcast()
-        || a >= 224
-        || (a == 100 && (64..=127).contains(&b))
-        || (a == 192 && b == 0 && c == 0)
-        || (a == 192 && b == 0 && c == 2)
-        || (a == 198 && (b == 18 || b == 19))
-        || (a == 198 && b == 51 && c == 100)
-        || (a == 203 && b == 0 && c == 113)
-        || a == 0
-}
-
-fn is_restricted_ipv6(address: Ipv6Addr) -> bool {
-    let first = address.segments()[0];
-    address.is_loopback()
-        || address.is_unspecified()
-        || address.is_multicast()
-        || first & 0xfe00 == 0xfc00
-        || first & 0xffc0 == 0xfe80
-        || address.segments()[..2] == [0x2001, 0x0db8]
-        || address.to_ipv4_mapped().is_some_and(is_restricted_ipv4)
 }
 
 /// 按字符压缩上游错误，避免代理返回整页 HTML 时污染 API 响应。
@@ -823,6 +790,7 @@ mod tests {
 
     #[test]
     fn classifies_private_and_public_ai_addresses() {
+        use crate::services::net_guard::is_restricted_address;
         assert!(is_restricted_address("127.0.0.1".parse().unwrap()));
         assert!(is_restricted_address("10.0.0.8".parse().unwrap()));
         assert!(is_restricted_address("169.254.169.254".parse().unwrap()));
