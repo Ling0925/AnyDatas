@@ -141,6 +141,21 @@ async fn claim_and_run_job(state: SharedState) -> Result<(), AppError> {
     }
     match result {
         Ok(result) => {
+            if result.sample.post_processed {
+                append_log(
+                    &state,
+                    &id,
+                    "info",
+                    &format!(
+                        "后处理 JS 完成，{} ms",
+                        result.sample.post_process_ms.unwrap_or(0)
+                    ),
+                )
+                .await?;
+                for line in &result.console {
+                    append_log(&state, &id, "info", &format!("后处理 console: {line}")).await?;
+                }
+            }
             append_log(
                 &state,
                 &id,

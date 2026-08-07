@@ -34,8 +34,6 @@ pub struct AppState {
     pub background_query_timeout_seconds: u64,
     pub file_parse_timeout_seconds: u64,
     pub query_runtime: QueryRuntimeLimits,
-    /// Wired into query execution when post-process lands; kept on state from startup.
-    #[allow(dead_code)]
     pub js_runtime: JsRuntimeLimits,
     pub job_result_retention_days: i64,
     pub metrics: RuntimeMetrics,
@@ -81,11 +79,7 @@ pub struct QueryRuntimeLimits {
 }
 
 /// Limits and network policy for the optional QuickJS post-process runtime.
-///
-/// Fields are consumed by post-process execution in a later task; keep the surface
-/// public and stable even while wiring is incomplete.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct JsRuntimeLimits {
     pub enabled_http: bool,
     pub allow_private_network: bool,
@@ -539,9 +533,7 @@ pub struct QueryRequest {
     pub first_row_as_header: Option<bool>,
     pub limit: Option<usize>,
     /// Optional QuickJS `process(rows, meta)` script; empty/absent keeps SQL-only behavior.
-    /// Consumed by execution post-process wiring (Task 6).
     #[serde(default)]
-    #[allow(dead_code)]
     pub post_js: Option<String>,
 }
 

@@ -3,9 +3,6 @@
 //! Runs user `process(rows, meta)` after SQL succeeds. Optional sandboxed
 //! `http.request` is injected when callers pass a `JsHttpRuntime`.
 
-// Public surface is consumed by execution integration (Task 6).
-#![allow(dead_code)]
-
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -337,7 +334,7 @@ pub struct PostProcessError {
 }
 
 impl PostProcessError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),

@@ -11,7 +11,6 @@ pub enum AppError {
     #[error("{0}")]
     BadRequest(String),
     /// Stable business codes (e.g. `post_js_*`) for API clients; used by post-process.
-    #[allow(dead_code)] // constructed via bad_request_code; full use lands with post-process
     #[error("{message}")]
     BadRequestCoded {
         code: &'static str,
@@ -40,7 +39,6 @@ pub enum AppError {
 }
 
 impl AppError {
-    #[allow(dead_code)] // consumed by post-process engine in a later task
     pub fn bad_request_code(code: &'static str, message: impl Into<String>) -> Self {
         Self::BadRequestCoded {
             code,
