@@ -4,6 +4,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import {
   BarChart3,
+  ChevronDown,
+  ChevronRight,
   Clock3,
   Download,
   Link2,
@@ -23,7 +25,7 @@ import FileSidebar from '../components/FileSidebar.vue'
 import InspectorPanel from '../components/InspectorPanel.vue'
 import SqlEditor from '../components/SqlEditor.vue'
 import { downloadQueryCsv } from '../export'
-import { useWorkspaceStore } from '../stores/workspace'
+import { DEFAULT_POST_JS, useWorkspaceStore } from '../stores/workspace'
 
 const ResultChart = defineAsyncComponent(() => import('../components/ResultChart.vue'))
 
@@ -31,6 +33,7 @@ const router = useRouter()
 const store = useWorkspaceStore()
 const activeTab = ref<'query' | 'preview'>('query')
 const resultMode = ref<'table' | 'chart'>('table')
+const postJsOpen = ref(false)
 const taskDialogVisible = ref(false)
 const taskForm = reactive({ name: '' })
 const taskCreating = ref(false)
@@ -51,6 +54,13 @@ const editorOptions = {
   overviewRulerBorder: false,
   wordWrap: 'on' as const,
   tabSize: 2,
+}
+
+const postJsEditorOptions = {
+  ...editorOptions,
+  fontSize: 13,
+  lineHeight: 20,
+  padding: { top: 10 },
 }
 
 onMounted(async () => {
@@ -152,11 +162,13 @@ async function createTask() {
   if (!store.primarySourceId || !store.queryBindings.length || !taskForm.name.trim()) return
   taskCreating.value = true
   try {
+    const postJs = store.currentPostJs.trim() || undefined
     await api.createJob({
       sourceId: store.primarySourceId,
       tables: store.queryBindings,
       name: taskForm.name.trim(),
       sql: store.currentSql,
+      postJs,
     })
     taskDialogVisible.value = false
     ElMessage.success('任务已加入后台队列')
@@ -165,6 +177,15 @@ async function createTask() {
   } finally {
     taskCreating.value = false
   }
+}
+
+/** 展开后处理面板；首次且内容为空时写入模板，不覆盖已有脚本。 */
+function togglePostJsPanel() {
+  const next = !postJsOpen.value
+  if (next && !store.currentPostJs.trim()) {
+    store.currentPostJs = DEFAULT_POST_JS
+  }
+  postJsOpen.value = next
 }
 
 function insertFormula(name: string, expression: string) {
@@ -338,6 +359,37 @@ function configureSqlCompletion(monaco: any) {
             </div>
           </section>
 
+          <section class="post-js-pane" :class="{ open: postJsOpen }">
+            <button
+              type="button"
+              class="post-js-toggle"
+              :aria-expanded="postJsOpen"
+              @click="togglePostJsPanel"
+            >
+              <component :is="postJsOpen ? ChevronDown : ChevronRight" :size="14" />
+              <strong>后处理 JS（可选）</strong>
+              <span
+                v-if="store.currentPostJs.trim()"
+                class="post-js-enabled"
+              >
+                已启用
+              </span>
+              <small>SQL 成功后再运行 process(rows, meta)；失败则整次查询失败</small>
+            </button>
+            <div v-show="postJsOpen" class="post-js-body">
+              <p class="post-js-hint">
+                返回对象数组；可用 <code>http.request</code>（受部署白名单约束）。空脚本与现网行为一致。
+              </p>
+              <div class="post-js-editor-host">
+                <SqlEditor
+                  v-model="store.currentPostJs"
+                  language="javascript"
+                  :options="postJsEditorOptions"
+                />
+              </div>
+            </div>
+          </section>
+
           <section class="result-pane">
             <div class="pane-toolbar result-toolbar">
               <div class="pane-title">
@@ -347,6 +399,12 @@ function configureSqlCompletion(monaco: any) {
                 </span>
               </div>
               <div class="result-toolbar-actions">
+                <span
+                  v-if="store.queryResult?.postProcessed"
+                  class="result-post-processed"
+                >
+                  已后处理 · {{ store.queryResult.postProcessMs ?? 0 }}ms
+                </span>
                 <span v-if="store.queryResult?.truncated" class="result-warning">结果已截断</span>
                 <div class="result-view-switch" role="group" aria-label="结果视图">
                   <button type="button" :aria-pressed="resultMode === 'table'" @click="resultMode = 'table'">
@@ -434,7 +492,10 @@ function configureSqlCompletion(monaco: any) {
         </el-form-item>
         <div class="dialog-summary">
           <Save :size="16" />
-          <span>保存 SQL 与当前 {{ store.queryBindings.length }} 张逻辑表的绑定。</span>
+          <span>
+            保存 SQL{{ store.currentPostJs.trim() ? '、后处理 JS' : '' }}
+            与当前 {{ store.queryBindings.length }} 张逻辑表的绑定。
+          </span>
         </div>
       </el-form>
       <template #footer>
@@ -450,7 +511,10 @@ function configureSqlCompletion(monaco: any) {
         </el-form-item>
         <div class="dialog-summary">
           <Clock3 :size="16" />
-          <span>任务将使用当前 SQL 和 {{ store.queryBindings.length }} 张逻辑表执行。</span>
+          <span>
+            任务将使用当前 SQL{{ store.currentPostJs.trim() ? '、后处理 JS' : '' }}
+            和 {{ store.queryBindings.length }} 张逻辑表执行。
+          </span>
         </div>
       </el-form>
       <template #footer>

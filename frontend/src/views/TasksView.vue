@@ -46,16 +46,18 @@ const resultLoading = ref(false)
 const resultPage = ref<JobResultPage | null>(null)
 const resultPageNumber = ref(1)
 const resultPageSize = 100
-const jobForm = reactive<{ tables: QueryTableBinding[]; name: string; sql: string }>({
+const jobForm = reactive<{ tables: QueryTableBinding[]; name: string; sql: string; postJs: string }>({
   tables: [],
   name: '',
   sql: 'SELECT *\nFROM data\nLIMIT 1000;',
+  postJs: '',
 })
 const scheduleForm = reactive({
   id: null as string | null,
   tables: [] as QueryTableBinding[],
   name: '',
   sql: 'SELECT *\nFROM data\nLIMIT 1000;',
+  postJs: '',
   preset: 'daily' as 'hourly' | 'daily' | 'weekdays' | 'custom',
   time: '09:00',
   customCron: '0 0 9 * * *',
@@ -242,7 +244,8 @@ function downloadJobResult(id: string) {
 function openJobDialog() {
   jobForm.tables = defaultBindings()
   jobForm.name = ''
-  jobForm.sql = 'SELECT *\nFROM data\nLIMIT 1000;'
+  jobForm.sql = workspace.currentSql || 'SELECT *\nFROM data\nLIMIT 1000;'
+  jobForm.postJs = workspace.currentPostJs || ''
   jobDialogVisible.value = true
 }
 
@@ -254,11 +257,13 @@ async function createJob() {
   }
   saving.value = true
   try {
+    const postJs = jobForm.postJs.trim() || undefined
     await tasks.createJob({
       sourceId,
       tables: jobForm.tables,
       name: jobForm.name.trim(),
       sql: jobForm.sql.trim(),
+      postJs,
     })
     jobDialogVisible.value = false
     ElMessage.success('任务已加入队列')
@@ -305,7 +310,8 @@ function openScheduleDialog(schedule?: ScheduleItem) {
   scheduleForm.id = schedule?.id ?? null
   scheduleForm.tables = schedule?.tables.map((binding) => ({ ...binding })) ?? defaultBindings()
   scheduleForm.name = schedule?.name ?? ''
-  scheduleForm.sql = schedule?.sql ?? 'SELECT *\nFROM data\nLIMIT 1000;'
+  scheduleForm.sql = schedule?.sql ?? (workspace.currentSql || 'SELECT *\nFROM data\nLIMIT 1000;')
+  scheduleForm.postJs = schedule?.postJs ?? (workspace.currentPostJs || '')
   scheduleForm.time = '09:00'
   scheduleForm.timezone = schedule?.timezone ?? 'Asia/Shanghai'
   scheduleForm.enabled = schedule?.enabled ?? true
@@ -334,6 +340,7 @@ async function saveSchedule() {
     tables: scheduleForm.tables,
     name: scheduleForm.name.trim(),
     sql: scheduleForm.sql.trim(),
+    postJs: scheduleForm.postJs.trim() || null,
     cronExpression: currentCron.value,
     timezone: scheduleForm.timezone,
     enabled: scheduleForm.enabled,
@@ -616,6 +623,11 @@ async function deleteSchedule(id: string) {
           <pre>{{ tasks.selectedJob.sql }}</pre>
         </section>
 
+        <section v-if="tasks.selectedJob.postJs?.trim()" class="detail-section">
+          <h3>后处理 JS</h3>
+          <pre>{{ tasks.selectedJob.postJs }}</pre>
+        </section>
+
         <section v-if="tasks.selectedJob.errorMessage" class="detail-section task-error">
           <h3>错误</h3>
           <p>{{ tasks.selectedJob.errorMessage }}</p>
@@ -683,6 +695,16 @@ async function deleteSchedule(id: string) {
             />
           </div>
         </el-form-item>
+        <el-form-item label="后处理 JS（可选）">
+          <div class="dialog-sql-editor post-js-dialog-editor">
+            <SqlEditor
+              v-model="jobForm.postJs"
+              language="javascript"
+              :options="editorOptions"
+            />
+          </div>
+          <p class="form-hint">空脚本表示不启用后处理。可用 process(rows, meta) 与 http.request。</p>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="jobDialogVisible = false">取消</el-button>
@@ -728,6 +750,16 @@ async function deleteSchedule(id: string) {
               :options="editorOptions"
             />
           </div>
+        </el-form-item>
+        <el-form-item label="后处理 JS（可选）">
+          <div class="dialog-sql-editor post-js-dialog-editor">
+            <SqlEditor
+              v-model="scheduleForm.postJs"
+              language="javascript"
+              :options="editorOptions"
+            />
+          </div>
+          <p class="form-hint">计划触发时会将脚本快照写入任务，与 SQL 一并执行。</p>
         </el-form-item>
         <el-checkbox v-model="scheduleForm.enabled">创建后立即启用</el-checkbox>
       </el-form>

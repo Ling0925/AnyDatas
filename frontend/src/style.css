@@ -1816,7 +1816,7 @@ input:focus-visible {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: minmax(250px, 44%) minmax(230px, 1fr);
+  grid-template-rows: minmax(220px, 40%) auto minmax(210px, 1fr);
 }
 
 .editor-pane,
@@ -1965,6 +1965,19 @@ input:focus-visible {
   font-size: 10px;
 }
 
+.result-post-processed {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--primary-border);
+  border-radius: 999px;
+  color: var(--primary-text);
+  background: var(--primary-soft);
+  font-size: 10px;
+  font-weight: 650;
+}
+
 .pane-title code,
 .metadata-list code {
   padding: 2px 5px;
@@ -2098,6 +2111,84 @@ input:focus-visible {
 .editor-host {
   min-height: 0;
   overflow: hidden;
+}
+
+.post-js-pane {
+  min-width: 0;
+  border-bottom: 1px solid var(--line-strong);
+  background: var(--panel);
+}
+
+.post-js-toggle {
+  width: 100%;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  border: 0;
+  color: var(--text);
+  background: var(--surface-hover);
+  cursor: pointer;
+  text-align: left;
+}
+
+.post-js-toggle:hover {
+  background: var(--panel-muted);
+}
+
+.post-js-toggle strong {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.post-js-toggle small {
+  margin-left: auto;
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+.post-js-enabled {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  color: var(--primary-text);
+  background: var(--primary-soft);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.post-js-body {
+  display: grid;
+  grid-template-rows: auto minmax(140px, 160px);
+  border-top: 1px solid var(--line);
+}
+
+.post-js-hint {
+  margin: 0;
+  padding: 8px 14px 0;
+  color: var(--subtle);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.post-js-hint code {
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--primary-text);
+  background: var(--primary-soft);
+  font-size: 10px;
+}
+
+.post-js-editor-host {
+  min-height: 0;
+  overflow: hidden;
+  margin: 8px 12px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--panel);
 }
 
 .editor-loading {
@@ -4421,4 +4512,15 @@ input:focus-visible {
 
 .schedule-sql-editor {
   height: 190px;
+}
+
+.post-js-dialog-editor {
+  height: 150px;
+}
+
+.form-hint {
+  margin: 6px 0 0;
+  color: var(--subtle);
+  font-size: 11px;
+  line-height: 1.45;
 }
