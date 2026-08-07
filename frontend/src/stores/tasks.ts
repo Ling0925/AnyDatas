@@ -83,6 +83,7 @@ export const useTasksStore = defineStore('tasks', () => {
     tables: QueryTableBinding[]
     name: string
     sql: string
+    postJs?: string
   }) {
     const job = await api.createJob(payload)
     jobs.value = [job, ...jobs.value]

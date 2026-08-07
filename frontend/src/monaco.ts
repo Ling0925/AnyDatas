@@ -16,6 +16,7 @@ export function loadSqlEditor(): Promise<Component> {
       import('monaco-editor/esm/vs/editor/editor.api.js'),
       import('monaco-editor/esm/vs/editor/editor.worker?worker'),
       import('monaco-editor/esm/vs/basic-languages/sql/sql.contribution.js'),
+      import('monaco-editor/esm/vs/basic-languages/javascript/javascript.contribution.js'),
     ])
     const environment = self as typeof self & {
       MonacoEnvironment?: { getWorker: () => Worker }

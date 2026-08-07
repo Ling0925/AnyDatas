@@ -201,7 +201,13 @@ export const api = {
   async previewSource(id: string) {
     return (await client.get<PreviewResponse>(`/data-sources/${id}/preview`, { params: { limit: 200 } })).data
   },
-  async runQuery(payload: { sourceId: string; tables: QueryTableBinding[]; sql: string; limit?: number }) {
+  async runQuery(payload: {
+    sourceId: string
+    tables: QueryTableBinding[]
+    sql: string
+    postJs?: string
+    limit?: number
+  }) {
     return (await client.post<QueryResponse>('/query', payload)).data
   },
   async listSavedQueries(sourceId?: string) {
@@ -233,7 +239,13 @@ export const api = {
   jobResultDownloadUrl(id: string) {
     return `/api/jobs/${encodeURIComponent(id)}/result.csv`
   },
-  async createJob(payload: { sourceId: string; tables: QueryTableBinding[]; name: string; sql: string }) {
+  async createJob(payload: {
+    sourceId: string
+    tables: QueryTableBinding[]
+    name: string
+    sql: string
+    postJs?: string
+  }) {
     return (await client.post<Job>('/jobs', payload)).data
   },
   async cancelJob(id: string) {

@@ -19,6 +19,12 @@ const DEFAULT_SQL = 'SELECT *\nFROM data\nLIMIT 200;'
 const ALIAS_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/
 const MAX_ALIAS_LENGTH = 63
 export const MAX_AGENT_TABLES = 16
+export const DEFAULT_POST_JS = `function process(rows, meta) {
+  // rows: 对象数组；返回对象数组
+  // 可用 http.request({ method, url, headers, body, timeoutMs })
+  return rows
+}
+`
 
 export interface AgentTableSelectionResult {
   ok: boolean
@@ -34,6 +40,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const queryBindings = ref<QueryTableBinding[]>([])
   const agentTableBindings = ref<QueryTableBinding[]>([])
   const currentSql = ref(DEFAULT_SQL)
+  const currentPostJs = ref('')
   const preview = ref<PreviewResponse | null>(null)
   const queryResult = ref<QueryResponse | null>(null)
   const savedQueries = ref<SavedQuery[]>([])
@@ -385,10 +392,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     if (!primarySourceId.value || !queryBindings.value.length) return null
     queryLoading.value = true
     try {
+      const postJs = currentPostJs.value.trim() || undefined
       queryResult.value = await api.runQuery({
         sourceId: primarySourceId.value,
         tables: queryBindings.value,
         sql: currentSql.value,
+        postJs,
         limit: 1_000,
       })
       return queryResult.value
@@ -424,19 +433,22 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const query = savedQueries.value.find((item) => item.id === id)
     if (!query) return
     currentSql.value = query.sql
+    currentPostJs.value = query.postJs ?? ''
     await setQueryContext(query.tables)
   }
 
   /**
-   * 原子保存 SQL 与表绑定，首张表对应文件用于兼容历史列表字段。
+   * 原子保存 SQL、可选后处理脚本与表绑定，首张表对应文件用于兼容历史列表字段。
    */
   async function saveCurrentQuery(name: string) {
     if (!primarySourceId.value || !queryBindings.value.length) return null
+    const postJs = currentPostJs.value.trim() || null
     const payload = {
       sourceId: primarySourceId.value,
       tables: queryBindings.value,
       name: name.trim(),
       sql: currentSql.value,
+      postJs,
     }
     const saved = selectedSavedQueryId.value
       ? await api.updateSavedQuery(selectedSavedQueryId.value, payload)
@@ -583,6 +595,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     uploadLoading,
     savedQueriesLoading,
     currentSql,
+    currentPostJs,
     loadSources,
     selectSource,
     selectTable,
