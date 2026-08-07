@@ -57,6 +57,7 @@ const conversationLoading = ref(false)
 const startingRun = ref(false)
 const stoppingRun = ref(false)
 const previewingId = ref<string | null>(null)
+const applyingRunId = ref<string | null>(null)
 const manualPreviews = ref<Record<string, QueryResponse>>({})
 const previewErrors = ref<Record<string, string>>({})
 const conversationSearch = ref('')
@@ -614,19 +615,32 @@ async function previewSql(message: AiAgentMessage) {
 /** 将候选 SQL 交给父工作台应用，编辑器和正式结果区仍保持单一状态来源。 */
 function applySql(sql: string) {
   if (!canUseAgentSql.value) {
-    ElMessage.warning('请先恢复这段对话的有效表格上下文')
+    ElMessage.warning(
+      contextChanged.value
+        ? '表格选择已变化，请先确认上下文或开新对话后再应用 SQL'
+        : '请先在右侧选择 Agent 表格，并确认当前数据上下文',
+    )
     return
   }
   emit('applySql', sql)
 }
 
 /** 将候选 SQL 应用并运行，Agent 的小样本工具结果不会替代正式查询结果。 */
-function runSql(sql: string) {
+function runSql(sql: string, messageId?: string) {
   if (!canUseAgentSql.value) {
-    ElMessage.warning('请先恢复这段对话的有效表格上下文')
+    ElMessage.warning(
+      contextChanged.value
+        ? '表格选择已变化，请先确认上下文或开新对话后再运行 SQL'
+        : '请先在右侧选择 Agent 表格，并确认当前数据上下文',
+    )
     return
   }
+  applyingRunId.value = messageId ?? 'running'
   emit('runSql', sql)
+  // 父组件异步跑完后会跳转；若仍留在本页，短延迟后清 loading，避免按钮卡死。
+  window.setTimeout(() => {
+    if (applyingRunId.value === (messageId ?? 'running')) applyingRunId.value = null
+  }, 120_000)
 }
 
 /**
@@ -983,11 +997,19 @@ async function scrollToBottom(force = true) {
                   size="small"
                   type="primary"
                   aria-label="应用候选 SQL 并运行"
-                  :disabled="!canUseAgentSql"
-                  @click="runSql(message.sql)"
+                  :loading="applyingRunId === message.id"
+                  :disabled="!canUseAgentSql || applyingRunId !== null"
+                  @click="runSql(message.sql, message.id)"
                 >
                   <Play :size="14" />应用并运行
                 </el-button>
+                <p v-if="!canUseAgentSql" class="ai-context-note">
+                  {{
+                    contextChanged
+                      ? '表格上下文已变化，确认后再应用/运行候选 SQL'
+                      : '需先选择表格并确认上下文后才能应用 SQL'
+                  }}
+                </p>
               </div>
 
               <AiResultPreview v-if="messagePreview(message)" :result="messagePreview(message)!" />

@@ -24,12 +24,17 @@ onMounted(async () => {
  * 这样聊天页和查询页共享同一个 SQL 状态，避免出现两个互相覆盖的编辑器。
  */
 async function applyAgentSql(sql: string) {
-  if (store.agentTableBindings.length) {
-    await store.setQueryContext(store.agentTableBindings)
+  try {
+    if (store.agentTableBindings.length) {
+      // 跳过预览刷新：大表 inspect 会阻塞，应用 SQL 时只需同步绑定与编辑器。
+      await store.setQueryContext(store.agentTableBindings, { refreshPreview: false })
+    }
+    store.currentSql = sql
+    await router.push('/workbench')
+    ElMessage.success('候选 SQL 已应用到工作台')
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
   }
-  store.currentSql = sql
-  await router.push('/workbench')
-  ElMessage.success('候选 SQL 已应用到工作台')
 }
 
 /**
@@ -37,16 +42,26 @@ async function applyAgentSql(sql: string) {
  * Agent 的小样本预览不会冒充正式结果，用户仍可继续制图、导出或转为后台任务。
  */
 async function runAgentSql(sql: string) {
-  if (store.agentTableBindings.length) {
-    await store.setQueryContext(store.agentTableBindings)
+  if (!store.agentTableBindings.length) {
+    ElMessage.warning('请先在右侧选择 Agent 要用的表格')
+    return
   }
-  store.currentSql = sql
+  const loading = ElMessage({
+    message: '正在应用并运行查询… 大表首次运行可能需要较长时间建立缓存',
+    type: 'info',
+    duration: 0,
+    showClose: true,
+  })
   try {
+    await store.setQueryContext(store.agentTableBindings, { refreshPreview: false })
+    store.currentSql = sql
     await store.runQuery()
     await router.push('/workbench')
     ElMessage.success('候选 SQL 已运行')
   } catch (error) {
-    ElMessage.error(errorMessage(error))
+    ElMessage.error(`运行失败：${errorMessage(error)}`)
+  } finally {
+    loading.close()
   }
 }
 </script>

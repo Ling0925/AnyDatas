@@ -371,8 +371,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   /**
    * 将当前有序绑定整体替换为保存对象的快照，保证别名与 SQL 同步恢复。
+   * Agent「应用/运行」可跳过预览刷新，避免大 Excel 在点按钮时先卡死整页。
    */
-  async function setQueryContext(tables: QueryTableBinding[]) {
+  async function setQueryContext(
+    tables: QueryTableBinding[],
+    options?: { refreshPreview?: boolean },
+  ) {
     queryBindings.value = tables.filter((binding) => (
       sourceTables.value.some((table) => table.id === binding.tableId)
     ))
@@ -382,6 +386,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       selectedTableId.value = first.id
     }
     queryResult.value = null
+    if (options?.refreshPreview === false) return
     await refreshPreview()
   }
 
@@ -389,7 +394,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
    * 使用完整表绑定执行 SQL，物理 sourceId 仅作为旧接口兼容主文件保留。
    */
   async function runQuery() {
-    if (!primarySourceId.value || !queryBindings.value.length) return null
+    if (!primarySourceId.value || !queryBindings.value.length) {
+      throw new Error('请先绑定至少一张逻辑表再运行查询')
+    }
     queryLoading.value = true
     try {
       const postJs = currentPostJs.value.trim() || undefined
