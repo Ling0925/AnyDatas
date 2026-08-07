@@ -3149,6 +3149,7 @@ mod tests {
                 min_free_space_bytes: 16 * 1024 * 1024,
                 max_artifact_bytes: 512 * 1024 * 1024,
             },
+            js_runtime: crate::models::JsRuntimeLimits::test_default(),
             job_result_retention_days: 30,
             metrics: crate::models::RuntimeMetrics::new(),
             agent_control: Default::default(),

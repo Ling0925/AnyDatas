@@ -10,7 +10,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::Context;
 use config::Config;
-use models::{AppState, QueryRuntimeLimits, RuntimeMetrics};
+use models::{AppState, JsRuntimeLimits, QueryRuntimeLimits, RuntimeMetrics};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tracing::info;
@@ -66,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
             min_free_space_bytes: (config.min_free_space_mb as u64) * 1024 * 1024,
             max_artifact_bytes: (config.job_result_max_mb as u64) * 1024 * 1024,
         },
+        js_runtime: JsRuntimeLimits::from_config(&config),
         job_result_retention_days: config.job_result_retention_days,
         metrics: RuntimeMetrics::new(),
         agent_control: Default::default(),

@@ -34,6 +34,9 @@ pub struct AppState {
     pub background_query_timeout_seconds: u64,
     pub file_parse_timeout_seconds: u64,
     pub query_runtime: QueryRuntimeLimits,
+    /// Wired into query execution when post-process lands; kept on state from startup.
+    #[allow(dead_code)]
+    pub js_runtime: JsRuntimeLimits,
     pub job_result_retention_days: i64,
     pub metrics: RuntimeMetrics,
     pub agent_control: Mutex<HashMap<String, Arc<AgentRunControl>>>,
@@ -75,6 +78,78 @@ pub struct QueryRuntimeLimits {
     pub temp_limit_mb: usize,
     pub min_free_space_bytes: u64,
     pub max_artifact_bytes: u64,
+}
+
+/// Limits and network policy for the optional QuickJS post-process runtime.
+///
+/// Fields are consumed by post-process execution in a later task; keep the surface
+/// public and stable even while wiring is incomplete.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct JsRuntimeLimits {
+    pub enabled_http: bool,
+    pub allow_private_network: bool,
+    pub allowlist: Vec<crate::services::net_guard::AllowlistEntry>,
+    pub max_script_bytes: usize,
+    pub max_input_rows: usize,
+    pub max_output_rows: usize,
+    pub timeout_ms: u64,
+    pub job_timeout_ms: u64,
+    pub memory_mb: usize,
+    pub max_console_lines: usize,
+    pub max_input_payload_bytes: usize,
+    pub http_max_requests: usize,
+    pub http_timeout_ms: u64,
+    pub http_max_timeout_ms: u64,
+    pub http_max_body_bytes: usize,
+    pub http_max_request_body_bytes: usize,
+}
+
+impl JsRuntimeLimits {
+    /// Spec defaults for unit tests that construct `AppState` without full env parsing.
+    #[cfg(test)]
+    pub fn test_default() -> Self {
+        Self {
+            enabled_http: true,
+            allow_private_network: false,
+            allowlist: Vec::new(),
+            max_script_bytes: 65_536,
+            max_input_rows: 20_000,
+            max_output_rows: 20_000,
+            timeout_ms: 5_000,
+            job_timeout_ms: 30_000,
+            memory_mb: 64,
+            max_console_lines: 50,
+            max_input_payload_bytes: 33_554_432,
+            http_max_requests: 8,
+            http_timeout_ms: 3_000,
+            http_max_timeout_ms: 10_000,
+            http_max_body_bytes: 2_097_152,
+            http_max_request_body_bytes: 1_048_576,
+        }
+    }
+
+    /// Build from validated process config assembled at startup.
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        Self {
+            enabled_http: config.js_http_enabled,
+            allow_private_network: config.js_allow_private_network,
+            allowlist: config.js_http_allowlist.clone(),
+            max_script_bytes: config.js_max_script_bytes,
+            max_input_rows: config.js_max_input_rows,
+            max_output_rows: config.js_max_output_rows,
+            timeout_ms: config.js_timeout_ms,
+            job_timeout_ms: config.js_job_timeout_ms,
+            memory_mb: config.js_memory_mb,
+            max_console_lines: config.js_max_console_lines,
+            max_input_payload_bytes: config.js_max_input_payload_bytes,
+            http_max_requests: config.js_http_max_requests,
+            http_timeout_ms: config.js_http_timeout_ms,
+            http_max_timeout_ms: config.js_http_max_timeout_ms,
+            http_max_body_bytes: config.js_http_max_body_bytes,
+            http_max_request_body_bytes: config.js_http_max_request_body_bytes,
+        }
+    }
 }
 
 /// 按缓存键维护互斥量，避免不同 Sheet 的首次查询被一把全局锁串行化。
