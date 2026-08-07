@@ -30,7 +30,8 @@ impl From<post_process::PostProcessError> for BlockingQueryError {
 
 fn map_blocking_error(error: BlockingQueryError) -> AppError {
     match error {
-        BlockingQueryError::Engine(error) => AppError::BadRequest(error.to_string()),
+        // Use the full anyhow chain so nested cache/type errors reach the UI.
+        BlockingQueryError::Engine(error) => AppError::BadRequest(format!("{error:#}")),
         BlockingQueryError::Post(error) => error.into_app_error(),
     }
 }
