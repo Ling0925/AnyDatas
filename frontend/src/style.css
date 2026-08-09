@@ -2134,6 +2134,78 @@ input:focus-visible {
   cursor: not-allowed;
 }
 
+.query-error-panel {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 560px) auto;
+  place-content: center;
+  align-items: start;
+  gap: 12px;
+  padding: 28px;
+  color: var(--text);
+  background: var(--panel);
+}
+
+.query-error-icon {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--red-border);
+  border-radius: 50%;
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.query-error-copy {
+  min-width: 0;
+}
+
+.query-error-copy strong {
+  display: block;
+  margin: 2px 0 6px;
+  color: var(--red);
+  font-size: 13px;
+}
+
+.query-error-copy p {
+  max-height: 150px;
+  margin: 0;
+  overflow: auto;
+  color: var(--text-secondary);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.query-error-copy small {
+  display: block;
+  margin-top: 8px;
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+.query-error-panel > button {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: var(--subtle);
+  background: transparent;
+  cursor: pointer;
+}
+
+.query-error-panel > button:hover {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
 .result-chart-panel {
   min-width: 0;
   min-height: 0;
