@@ -15,7 +15,7 @@ jobs:
   backend:
     name: Rust backend
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: backend
@@ -38,11 +38,13 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      - name: Run backend tests
+        # 冷缓存时先链接测试依赖，后续 Clippy 可复用同一 dev profile，避免 DuckDB 被重复完整编译。
+        # 45 分钟上限覆盖 GitHub 托管机首次源码构建，同时仍能识别真正卡死的任务。
+        run: cargo test --locked
+
       - name: Run strict Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
-
-      - name: Run backend tests
-        run: cargo test --locked
 
   frontend:
     name: Vue frontend
