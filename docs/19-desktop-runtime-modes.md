@@ -116,6 +116,13 @@ pnpm --dir desktop test:renderer
 pnpm --dir frontend build
 ```
 
+Windows x64 桌面安装包使用 `desktop-v<version>` Tag 触发 `.github/workflows/desktop-release.yml`，只占用一个 Windows runner。工作流会生成并冒烟启动：
+
+- `AnyDatas-Setup-<version>-x64.exe`
+- `AnyDatas-Setup-<version>-x64.exe.sha256`
+
+安装包携带 Vue 静态资源，但不内置 Rust 服务端；单机模式仍按第 4 节下载并校验锁定的服务端 Tag。当前安装包未做 Windows 代码签名，外部分发前应配置受信任证书。
+
 可选真实进程集成：
 
 ```bash

@@ -1,0 +1,40 @@
+appId: com.anydatas.desktop
+productName: AnyDatas
+asar: true
+npmRebuild: false
+
+directories:
+  output: release
+
+files:
+  - dist/**/*
+  - package.json
+  # 主进程依赖已由 esbuild 打进 main.js；排除源码依赖可显著缩小安装包和攻击面。
+  - "!node_modules/**/*"
+
+# 前端作为只读资源放在 app.asar 外；主进程通过 process.resourcesPath 定位，
+# 这样开发目录和安装目录都使用同一套页面且不依赖用户机器上的源码树。
+extraResources:
+  - from: ../frontend/dist
+    to: frontend/dist
+    filter:
+      - "**/*"
+
+win:
+  executableName: AnyDatas
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: AnyDatas-Setup-${version}-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: AnyDatas
+  uninstallDisplayName: AnyDatas
+  deleteAppDataOnUninstall: false

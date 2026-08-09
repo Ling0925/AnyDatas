@@ -15,4 +15,5 @@ monitoring/metrics-token
 backend/target/
 frontend/node_modules/
 frontend/dist/
+.pnpm-store/
 var-rust/

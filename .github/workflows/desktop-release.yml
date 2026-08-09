@@ -1,0 +1,77 @@
+name: Desktop Windows
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: anydatas-desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Build and publish Windows x64
+    runs-on: windows-2025
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.10.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            desktop/pnpm-lock.yaml
+            frontend/pnpm-lock.yaml
+
+      - name: Install desktop and renderer dependencies
+        shell: pwsh
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir desktop install --frozen-lockfile
+
+      - name: Verify desktop release version
+        shell: pwsh
+        run: node desktop/scripts/verify-desktop-release-tag.mjs "$env:GITHUB_REF_NAME"
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: pnpm --dir desktop package:win
+
+      - name: Verify packaged application
+        shell: pwsh
+        run: pnpm --dir desktop verify:win-package -- --smoke
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyDatas-Windows-x64
+          path: |
+            desktop/release/AnyDatas-Setup-*.exe
+            desktop/release/AnyDatas-Setup-*.exe.sha256
+          if-no-files-found: error
+
+      - name: Publish desktop release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = Get-ChildItem `
+            desktop/release/AnyDatas-Setup-*.exe, `
+            desktop/release/AnyDatas-Setup-*.exe.sha256 | ForEach-Object FullName
+          gh release create "$env:GITHUB_REF_NAME" $assets `
+            --verify-tag `
+            --generate-notes `
+            --title "AnyDatas Desktop $($env:GITHUB_REF_NAME -replace '^desktop-v', '')"

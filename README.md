@@ -84,6 +84,15 @@ pnpm --dir desktop install
 pnpm --dir desktop dev
 ```
 
+Windows x64 desktop installer (output: `desktop/release/AnyDatas-Setup-<version>-x64.exe`):
+
+```bash
+pnpm --dir desktop package:win
+pnpm --dir desktop verify:win-package
+```
+
+Pushing `desktop-v<desktop/package.json version>` triggers the Windows-only desktop Release workflow. The installer is currently unsigned, so Windows SmartScreen may require an explicit confirmation.
+
 Standalone mode downloads the server Tag locked in `desktop/src/main.ts`. For a future split server repository, set `ANYDATAS_SERVER_REPOSITORY=owner/repository`; private-release testing may supply `ANYDATAS_GITHUB_TOKEN` in the process environment, but production clients must not embed a GitHub token.
 
 To test the production bundle through Rust:

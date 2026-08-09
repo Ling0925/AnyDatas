@@ -1,3 +1,4 @@
+import { join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { app, BrowserWindow, dialog, ipcMain } from "electron"
 import { LocalApiClient } from "./api-client.js"
@@ -12,6 +13,7 @@ import type { IpcRegistrar } from "./ipc.js"
 import { isNavigationAllowed } from "./navigation.js"
 import type { NavigationPolicy } from "./navigation.js"
 import { ApiProxy, resolveApiTarget } from "./proxy.js"
+import { productionFrontendDirectory } from "./production-paths.js"
 import { FileSourceScheduler, NativeSchedulerTimer } from "./scheduler.js"
 import { FileSourceStore } from "./store.js"
 
@@ -52,10 +54,21 @@ function serverReleaseMetadataUrl(tag: string): URL {
   return new URL(`https://api.github.com/repos/${repository}/releases/tags/${tag}`)
 }
 
+/**
+ * 根据当前运行形态定位随桌面端发布的 Vue 资源。
+ *
+ * 打包后不再依赖 app.asar 的内部层级，开发态则保留当前仓库布局，便于本地 smoke 复用。
+ */
+function frontendDirectory(): string {
+  return productionFrontendDirectory({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    moduleUrl: import.meta.url,
+  })
+}
+
 function createWindow(): BrowserWindow {
-  const productionFrontend = fileURLToPath(
-    new URL("../../frontend/dist/index.html", import.meta.url),
-  )
+  const productionFrontend = join(frontendDirectory(), "index.html")
   const navigationPolicy: NavigationPolicy = isDev
     ? { kind: "dev", origin: DEV_RENDERER_URL }
     : { kind: "production", fileUrl: pathToFileURL(productionFrontend).href }
@@ -133,7 +146,7 @@ async function startRuntime(): Promise<void> {
         return new StandaloneBackendAdapter({
           installer,
           userData,
-          webDirectory: fileURLToPath(new URL("../../frontend/dist", import.meta.url)),
+          webDirectory: frontendDirectory(),
         })
       }
       return new RemoteBackendAdapter({ serverUrl: resolveApiTarget(selection.serverUrl) })
