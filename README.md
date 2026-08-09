@@ -9,7 +9,7 @@ AnyDatas is being rebuilt as a desktop-first, single-server data analysis workbe
 5. Save reusable SQL, build multi-series charts, or export results as CSV.
 6. Move expensive queries to the background and optionally schedule them.
 
-The previous Python/FastAPI implementation remains in `app/`, `templates/`, and `static/` as migration reference. The active rewrite lives in `backend/` and `frontend/`.
+The previous Python/FastAPI implementation remains in `app/`, `templates/`, and `static/` as migration reference. The active rewrite lives in `backend/`, `frontend/`, and `desktop/`.
 
 ## Architecture
 
@@ -18,6 +18,7 @@ The previous Python/FastAPI implementation remains in `app/`, `templates/`, and 
 - Deployment: one container and one persistent volume
 - Background execution: an in-process worker backed by a durable SQLite queue
 - Scheduling: cron expressions evaluated by the Rust service
+- Desktop runtime: Electron selects a verified downloaded standalone server or a user-provided remote server
 
 No Redis, Kubernetes, external worker service, or Docker socket is required for this MVP.
 
@@ -36,16 +37,18 @@ Implemented:
 - Cached table reuse so repeated queries do not reparse Excel/CSV
 - Independent logical-table preview and field inspection
 - SQL-based calculated fields
-- Reusable saved queries that persist SQL and ordered multi-table bindings
+- Optional server-side QuickJS post-processing (`process(rows, meta)`) after DuckDB SQL, with deployment-scoped `http.request` allowlisting; shared by interactive queries, saved queries, background jobs, and schedules
+- Reusable saved queries that persist SQL, optional post-process JS, and ordered multi-table bindings
 - Result tables, grouped/stacked bar, line, area, pie, scatter and radar charts with up to four measures, and formula-safe CSV export
 - Workspace OpenAI Chat Completions-compatible settings and a server-persisted Agent Runtime with native tools, resumable conversations, run steps, cancel, retry, and rolling summaries
-- Background jobs with multi-table snapshots, progress, logs, complete DuckDB result artifacts, server pagination, CSV download, stop, retry, retention, and deletion
-- Multi-table cron schedules with timezone, enable/disable, edit, run-now, and deletion
+- Background jobs with multi-table snapshots, optional post-process JS snapshot, progress, logs, complete DuckDB result artifacts (final post-processed table), server pagination, CSV download, stop, retry, retention, and deletion
+- Multi-table cron schedules with timezone, enable/disable, edit, run-now, optional post-process JS, and deletion
 - Password setup/login, HttpOnly sessions, logout, login throttling, and workspace RBAC enforcement
 - Liveness/readiness probes, authenticated Prometheus metrics, worker alerts, request IDs, browser security headers, and AI endpoint SSRF protection
 - Consistent referenced-file backups, verified volume restore, and active Rust/Vue release gates in CI
 - Vue history routing served by the Rust process
 - Chinese desktop interface
+- First-run standalone/remote mode selection, GitHub Release runtime download with SHA-256 verification, random-port child-process management, and pre-login protocol negotiation
 
 Not yet migrated from the legacy implementation:
 
@@ -73,6 +76,15 @@ pnpm dev
 ```
 
 Open `http://127.0.0.1:5173`.
+
+Desktop development (shows the runtime selector unless `ANYDATAS_API_TARGET` is set):
+
+```bash
+pnpm --dir desktop install
+pnpm --dir desktop dev
+```
+
+Standalone mode downloads the server Tag locked in `desktop/src/main.ts`. For a future split server repository, set `ANYDATAS_SERVER_REPOSITORY=owner/repository`; private-release testing may supply `ANYDATAS_GITHUB_TOKEN` in the process environment, but production clients must not embed a GitHub token.
 
 To test the production bundle through Rust:
 

@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, SocketAddr},
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
@@ -403,7 +403,9 @@ pub async fn call_chat(
     reasoning_effort: &str,
     stream_sink: Option<mpsc::UnboundedSender<AssistantStreamUpdate>>,
 ) -> AppResult<AssistantTurn> {
-    let endpoint = validate_base_url_network(state, &settings.base_url).await?;
+    let resolved = validate_base_url_network(state, &settings.base_url).await?;
+    let request_timeout = std::time::Duration::from_secs(state.agent_timeout_seconds);
+    let client = resolved.pinned_client(request_timeout)?;
     let request_chars = messages
         .iter()
         .filter_map(|message| message.content.as_deref())
@@ -420,10 +422,9 @@ pub async fn call_chat(
     );
     let mut include_reasoning_effort = settings.reasoning_effort_supported.load(Ordering::Relaxed);
     let response = loop {
-        let mut request = state
-            .http_client
-            .post(endpoint.clone())
-            .timeout(std::time::Duration::from_secs(state.agent_timeout_seconds))
+        let mut request = client
+            .post(resolved.url.clone())
+            .timeout(request_timeout)
             .json(&ChatCompletionRequest {
                 model: &settings.model,
                 messages,
@@ -670,11 +671,36 @@ fn chat_endpoint(base_url: &str) -> AppResult<Url> {
     Url::parse(&endpoint).map_err(|_| AppError::BadRequest("Chat 接口地址无效".to_owned()))
 }
 
+/// 经私网校验后的出站目标：保留原始 URL（HTTPS 的 SNI 与证书校验仍用主机名），同时携带
+/// 已核验的具体地址，供请求阶段把 DNS 固定到这些 IP。
+pub struct ResolvedEndpoint {
+    pub url: Url,
+    host: String,
+    socket_addrs: Vec<SocketAddr>,
+}
+
+impl ResolvedEndpoint {
+    /// 构建一次性 HTTP 客户端，把目标主机名固定解析到校验时得到的 IP，从而堵住
+    /// “校验用一次 DNS、请求时再解析到 169.254.169.254/内网” 的 rebinding TOCTOU；
+    /// 同时保留禁止重定向。主机名本身是 IP 字面量时该固定是等价 no-op。
+    fn pinned_client(&self, request_timeout: Duration) -> AppResult<reqwest::Client> {
+        reqwest::Client::builder()
+            .timeout(request_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve_to_addrs(&self.host, &self.socket_addrs)
+            .build()
+            .map_err(|error| AppError::Internal(format!("无法初始化受限 HTTP 客户端: {error}")))
+    }
+}
+
 /// 解析 OpenAI-compatible 地址并拒绝默认不可访问的本机、私网和保留网段。
 ///
-/// DNS 校验与禁止重定向共同缩小 SSRF 面；确需连接局域网模型时必须由部署者显式
-/// 开启环境变量，工作区管理员不能自行扩大服务器网络权限。
-pub async fn validate_base_url_network(state: &SharedState, base_url: &str) -> AppResult<Url> {
+/// DNS 校验、禁止重定向与“请求阶段固定到已核验 IP”共同缩小 SSRF 面；确需连接局域网模型时
+/// 必须由部署者显式开启环境变量，工作区管理员不能自行扩大服务器网络权限。
+pub async fn validate_base_url_network(
+    state: &SharedState,
+    base_url: &str,
+) -> AppResult<ResolvedEndpoint> {
     let endpoint = chat_endpoint(base_url)?;
     let host = endpoint
         .host_str()
@@ -697,8 +723,11 @@ pub async fn validate_base_url_network(state: &SharedState, base_url: &str) -> A
     let hostname_is_local = host.eq_ignore_ascii_case("localhost")
         || host.to_ascii_lowercase().ends_with(".localhost")
         || host.to_ascii_lowercase().ends_with(".local");
-    let contains_restricted =
-        hostname_is_local || addresses.iter().copied().any(is_restricted_address);
+    let contains_restricted = hostname_is_local
+        || addresses
+            .iter()
+            .copied()
+            .any(crate::services::net_guard::is_restricted_address);
     if contains_restricted && !state.allow_private_ai_endpoints {
         return Err(AppError::BadRequest(
             "AI 接口解析到本机或私有网络；部署者需显式开启 ANYDATAS_AI_ALLOW_PRIVATE_NETWORK"
@@ -709,48 +738,22 @@ pub async fn validate_base_url_network(state: &SharedState, base_url: &str) -> A
         && addresses
             .iter()
             .copied()
-            .any(|address| !is_restricted_address(address))
+            .any(|address| !crate::services::net_guard::is_restricted_address(address))
     {
         return Err(AppError::BadRequest(
             "公网 AI 接口必须使用 HTTPS".to_owned(),
         ));
     }
-    Ok(endpoint)
-}
-
-fn is_restricted_address(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(address) => is_restricted_ipv4(address),
-        IpAddr::V6(address) => is_restricted_ipv6(address),
-    }
-}
-
-fn is_restricted_ipv4(address: Ipv4Addr) -> bool {
-    let [a, b, c, _] = address.octets();
-    address.is_private()
-        || address.is_loopback()
-        || address.is_link_local()
-        || address.is_unspecified()
-        || address.is_broadcast()
-        || a >= 224
-        || (a == 100 && (64..=127).contains(&b))
-        || (a == 192 && b == 0 && c == 0)
-        || (a == 192 && b == 0 && c == 2)
-        || (a == 198 && (b == 18 || b == 19))
-        || (a == 198 && b == 51 && c == 100)
-        || (a == 203 && b == 0 && c == 113)
-        || a == 0
-}
-
-fn is_restricted_ipv6(address: Ipv6Addr) -> bool {
-    let first = address.segments()[0];
-    address.is_loopback()
-        || address.is_unspecified()
-        || address.is_multicast()
-        || first & 0xfe00 == 0xfc00
-        || first & 0xffc0 == 0xfe80
-        || address.segments()[..2] == [0x2001, 0x0db8]
-        || address.to_ipv4_mapped().is_some_and(is_restricted_ipv4)
+    let socket_addrs = addresses
+        .into_iter()
+        .map(|address| SocketAddr::new(address, port))
+        .collect();
+    let host = host.to_owned();
+    Ok(ResolvedEndpoint {
+        url: endpoint,
+        host,
+        socket_addrs,
+    })
 }
 
 /// 按字符压缩上游错误，避免代理返回整页 HTML 时污染 API 响应。
@@ -823,6 +826,7 @@ mod tests {
 
     #[test]
     fn classifies_private_and_public_ai_addresses() {
+        use crate::services::net_guard::is_restricted_address;
         assert!(is_restricted_address("127.0.0.1".parse().unwrap()));
         assert!(is_restricted_address("10.0.0.8".parse().unwrap()));
         assert!(is_restricted_address("169.254.169.254".parse().unwrap()));

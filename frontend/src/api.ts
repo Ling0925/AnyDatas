@@ -30,8 +30,12 @@ import type {
   QueryTableBinding,
 } from './types'
 
+// Electron preload 会把本地 API 代理地址注入 __ANYDATAS_API_BASE__（如 http://127.0.0.1:28090）；
+// 网页端保持默认 /api 行为不变。globalThis 类型断言是本文件唯一允许的 as 用法。
+const API_BASE: string = (globalThis as { __ANYDATAS_API_BASE__?: string }).__ANYDATAS_API_BASE__ ?? ''
+
 const client = axios.create({
-  baseURL: '/api',
+  baseURL: API_BASE ? `${API_BASE}/api` : '/api',
   timeout: 120_000,
   withCredentials: true,
 })
@@ -156,6 +160,12 @@ export const api = {
     form.append('file', file)
     return (await client.post<DataSource>('/data-sources', form)).data
   },
+  /** 本地文件采集用它把新文件覆盖到既有数据源，服务器复用原逻辑表配置解析。 */
+  async replaceSource(id: string, file: File) {
+    const form = new FormData()
+    form.append('file', file)
+    return (await client.post<DataSource>(`/data-sources/${encodeURIComponent(id)}/replace`, form)).data
+  },
   async inspectSource(file: File) {
     const form = new FormData()
     form.append('file', file)
@@ -201,7 +211,13 @@ export const api = {
   async previewSource(id: string) {
     return (await client.get<PreviewResponse>(`/data-sources/${id}/preview`, { params: { limit: 200 } })).data
   },
-  async runQuery(payload: { sourceId: string; tables: QueryTableBinding[]; sql: string; limit?: number }) {
+  async runQuery(payload: {
+    sourceId: string
+    tables: QueryTableBinding[]
+    sql: string
+    postJs?: string
+    limit?: number
+  }) {
     return (await client.post<QueryResponse>('/query', payload)).data
   },
   async listSavedQueries(sourceId?: string) {
@@ -233,7 +249,13 @@ export const api = {
   jobResultDownloadUrl(id: string) {
     return `/api/jobs/${encodeURIComponent(id)}/result.csv`
   },
-  async createJob(payload: { sourceId: string; tables: QueryTableBinding[]; name: string; sql: string }) {
+  async createJob(payload: {
+    sourceId: string
+    tables: QueryTableBinding[]
+    name: string
+    sql: string
+    postJs?: string
+  }) {
     return (await client.post<Job>('/jobs', payload)).data
   },
   async cancelJob(id: string) {

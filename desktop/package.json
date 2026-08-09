@@ -1,0 +1,28 @@
+{
+  "name": "anydatas-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:renderer": "pnpm --dir ../frontend build && pnpm build && electron scripts/check-production-renderer.mjs",
+    "test:renderer:ci": "pnpm --dir ../frontend build && pnpm build && electron --no-sandbox scripts/check-production-renderer.mjs",
+    "build": "node scripts/build.mjs",
+    "dev": "pnpm build && concurrently --kill-others --success first -n vite,electron \"pnpm --dir ../frontend dev\" \"wait-on tcp:127.0.0.1:5173 && cross-env ANYDATAS_ELECTRON_DEV=1 electron .\""
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "concurrently": "^10.0.4",
+    "cross-env": "^10.1.0",
+    "electron": "^43.3.0",
+    "esbuild": "0.28.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10",
+    "wait-on": "^9.1.0"
+  }
+}

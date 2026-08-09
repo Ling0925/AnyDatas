@@ -6,8 +6,35 @@ use crate::{
     db,
     error::{AppError, AppResult},
     models::{QueryRequest, QueryResponse, QueryTableBinding, SharedState, SourceTableRow},
-    services::{query_engine, resource_control},
+    services::{post_process, query_engine, resource_control},
 };
+
+/// Errors raised inside the blocking query thread so async code can map
+/// `PostProcessError` codes without going through `anyhow` strings.
+enum BlockingQueryError {
+    Engine(anyhow::Error),
+    Post(post_process::PostProcessError),
+}
+
+impl From<anyhow::Error> for BlockingQueryError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Engine(error)
+    }
+}
+
+impl From<post_process::PostProcessError> for BlockingQueryError {
+    fn from(error: post_process::PostProcessError) -> Self {
+        Self::Post(error)
+    }
+}
+
+fn map_blocking_error(error: BlockingQueryError) -> AppError {
+    match error {
+        // Use the full anyhow chain so nested cache/type errors reach the UI.
+        BlockingQueryError::Engine(error) => AppError::BadRequest(format!("{error:#}")),
+        BlockingQueryError::Post(error) => error.into_app_error(),
+    }
+}
 
 /// 执行当前工作区的交互式查询，工作区参数确保每个绑定都经过租户权限校验。
 pub async fn execute_request(
@@ -36,6 +63,9 @@ pub async fn execute_job_to_artifact(
 ) -> AppResult<query_engine::QueryArtifactExecution> {
     let sources = resolve_query_sources(&state, request, None).await?;
     let sql = request.sql.clone();
+    let post_js = post_process::normalize_post_js(request.post_js.as_deref());
+    let js_limits = state.js_runtime.clone();
+    let js_timeout_ms = js_limits.job_timeout_ms;
     let cache_root = state.data_dir.join("table-cache");
     let work_root = state.data_dir.join("query-work");
     let query_state = state.clone();
@@ -47,9 +77,9 @@ pub async fn execute_job_to_artifact(
         "查询执行器",
     )
     .await?;
-    let handle = tokio::task::spawn_blocking(move || {
+    let handle = tokio::task::spawn_blocking(move || -> Result<_, BlockingQueryError> {
         let _permit = permit;
-        query_engine::execute_query_to_artifact(
+        let mut execution = query_engine::execute_query_to_artifact(
             sources,
             &sql,
             200,
@@ -62,6 +92,69 @@ pub async fn execute_job_to_artifact(
                 execution_control: Some((&query_state.query_control, &query_execution_id)),
             },
         )
+        .map_err(BlockingQueryError::Engine)?;
+
+        if let Some(script) = post_js {
+            let sql_elapsed_ms = execution.sample.elapsed_ms;
+            let (columns, rows, _sql_total) = query_engine::read_artifact_all_rows(
+                &artifact_path,
+                js_limits.max_input_rows,
+                &query_state.query_runtime,
+                &work_root,
+            )
+            .map_err(|error| {
+                let message = error.to_string();
+                if message.contains("后处理输入行数超过限制") {
+                    BlockingQueryError::Post(post_process::PostProcessError::new(
+                        "post_js_limit_input_rows",
+                        message,
+                    ))
+                } else {
+                    BlockingQueryError::Engine(error)
+                }
+            })?;
+
+            let http =
+                post_process::JsHttpRuntime::new(&js_limits).map_err(BlockingQueryError::Post)?;
+            let out = post_process::run_post_process(
+                &script,
+                &columns,
+                &rows,
+                &js_limits,
+                js_timeout_ms,
+                Some(&http),
+            )
+            .map_err(BlockingQueryError::Post)?;
+
+            let artifact_size_bytes = query_engine::replace_artifact_with_rows(
+                &artifact_path,
+                &out.columns,
+                &out.rows,
+                &query_state.query_runtime,
+            )
+            .map_err(BlockingQueryError::Engine)?;
+
+            let sample_limit = 200usize;
+            let total_rows = out.rows.len();
+            let truncated = total_rows > sample_limit;
+            let sample_rows = out.rows.into_iter().take(sample_limit).collect::<Vec<_>>();
+            let post_ms = out.elapsed.as_millis();
+
+            execution.sample = QueryResponse {
+                columns: out.columns,
+                row_count: sample_rows.len(),
+                rows: sample_rows,
+                elapsed_ms: sql_elapsed_ms.saturating_add(post_ms),
+                truncated,
+                post_processed: true,
+                post_process_ms: Some(post_ms),
+            };
+            execution.total_rows = total_rows;
+            execution.artifact_size_bytes = artifact_size_bytes;
+            execution.console = out.console;
+        }
+
+        Ok(execution)
     });
     let result = match tokio::time::timeout(
         Duration::from_secs(state.background_query_timeout_seconds),
@@ -80,7 +173,7 @@ pub async fn execute_job_to_artifact(
             )));
         }
     };
-    let execution = result.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let execution = result.map_err(map_blocking_error)?;
     persist_cache_updates(&state, &execution.cache_updates).await?;
     Ok(execution)
 }
@@ -94,6 +187,13 @@ async fn execute_request_inner(
 ) -> AppResult<QueryResponse> {
     let sources = resolve_query_sources(&state, request, workspace_id.as_deref()).await?;
     let sql = request.sql.clone();
+    let post_js = post_process::normalize_post_js(request.post_js.as_deref());
+    let js_limits = state.js_runtime.clone();
+    let js_timeout_ms = if job_id.is_some() {
+        js_limits.job_timeout_ms
+    } else {
+        js_limits.timeout_ms
+    };
     let limit = request.limit.unwrap_or(1_000).clamp(1, 5_000);
     let cache_root = state.data_dir.join("table-cache");
     let work_root = state.data_dir.join("query-work");
@@ -114,10 +214,10 @@ async fn execute_request_inner(
     )
     .await?;
 
-    let handle = tokio::task::spawn_blocking(move || {
+    let handle = tokio::task::spawn_blocking(move || -> Result<_, BlockingQueryError> {
         // 许可必须由真实查询线程持有，HTTP 超时返回后也不会错误释放并发名额。
         let _permit = permit;
-        query_engine::execute_query(
+        let mut execution = query_engine::execute_query(
             sources,
             &sql,
             limit,
@@ -129,6 +229,34 @@ async fn execute_request_inner(
                 execution_control: Some((&query_state.query_control, &query_execution_id)),
             },
         )
+        .map_err(BlockingQueryError::Engine)?;
+
+        if let Some(script) = post_js {
+            let sql_elapsed_ms = execution.response.elapsed_ms;
+            let http =
+                post_process::JsHttpRuntime::new(&js_limits).map_err(BlockingQueryError::Post)?;
+            let out = post_process::run_post_process(
+                &script,
+                &execution.response.columns,
+                &execution.response.rows,
+                &js_limits,
+                js_timeout_ms,
+                Some(&http),
+            )
+            .map_err(BlockingQueryError::Post)?;
+
+            let post_ms = out.elapsed.as_millis();
+            execution.response.columns = out.columns;
+            execution.response.rows = out.rows;
+            execution.response.row_count = execution.response.rows.len();
+            execution.response.post_processed = true;
+            execution.response.post_process_ms = Some(post_ms);
+            execution.response.elapsed_ms = sql_elapsed_ms.saturating_add(post_ms);
+            // Post-process replaces the SQL window; do not advertise SQL-stage truncation.
+            execution.response.truncated = false;
+        }
+
+        Ok(execution)
     });
     let result = match tokio::time::timeout(Duration::from_secs(timeout_seconds), handle).await {
         Ok(result) => {
@@ -147,7 +275,7 @@ async fn execute_request_inner(
         }
     };
 
-    let execution = result.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let execution = result.map_err(map_blocking_error)?;
     persist_cache_updates(&state, &execution.cache_updates).await?;
     Ok(execution.response)
 }

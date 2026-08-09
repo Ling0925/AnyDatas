@@ -4,6 +4,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import {
   BarChart3,
+  ChevronDown,
+  ChevronRight,
   Clock3,
   Download,
   Link2,
@@ -14,6 +16,7 @@ import {
   Sparkles,
   Table2,
   Trash2,
+  Upload,
   X,
 } from '@lucide/vue'
 
@@ -23,7 +26,7 @@ import FileSidebar from '../components/FileSidebar.vue'
 import InspectorPanel from '../components/InspectorPanel.vue'
 import SqlEditor from '../components/SqlEditor.vue'
 import { downloadQueryCsv } from '../export'
-import { useWorkspaceStore } from '../stores/workspace'
+import { DEFAULT_POST_JS, useWorkspaceStore } from '../stores/workspace'
 
 const ResultChart = defineAsyncComponent(() => import('../components/ResultChart.vue'))
 
@@ -31,6 +34,7 @@ const router = useRouter()
 const store = useWorkspaceStore()
 const activeTab = ref<'query' | 'preview'>('query')
 const resultMode = ref<'table' | 'chart'>('table')
+const postJsOpen = ref(false)
 const taskDialogVisible = ref(false)
 const taskForm = reactive({ name: '' })
 const taskCreating = ref(false)
@@ -53,6 +57,13 @@ const editorOptions = {
   tabSize: 2,
 }
 
+const postJsEditorOptions = {
+  ...editorOptions,
+  fontSize: 13,
+  lineHeight: 20,
+  padding: { top: 10 },
+}
+
 onMounted(async () => {
   try {
     await store.loadSources()
@@ -66,6 +77,8 @@ onUnmounted(() => completionDisposable?.dispose())
 async function runQuery() {
   try {
     await store.runQuery()
+    // AI 建议了图表时，结果默认以该图表呈现（用户仍可切回表格或手调）。
+    if (store.appliedChart && store.queryResult) resultMode.value = 'chart'
   } catch (error) {
     ElMessage.error(errorMessage(error))
   }
@@ -124,7 +137,12 @@ async function deleteSavedQuery() {
     await ElMessageBox.confirm(
       `删除保存的查询“${store.selectedSavedQuery.name}”？`,
       '删除查询',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger',
+      },
     )
     await store.deleteCurrentSavedQuery()
     ElMessage.success('查询已删除')
@@ -136,7 +154,6 @@ async function deleteSavedQuery() {
 async function refreshPreview() {
   try {
     await store.refreshPreview()
-    ElMessage.success('预览已刷新')
   } catch (error) {
     ElMessage.error(errorMessage(error))
   }
@@ -152,19 +169,31 @@ async function createTask() {
   if (!store.primarySourceId || !store.queryBindings.length || !taskForm.name.trim()) return
   taskCreating.value = true
   try {
+    const postJs = store.currentPostJs.trim() || undefined
     await api.createJob({
       sourceId: store.primarySourceId,
       tables: store.queryBindings,
       name: taskForm.name.trim(),
       sql: store.currentSql,
+      postJs,
     })
     taskDialogVisible.value = false
     ElMessage.success('任务已加入后台队列')
+    await router.push('/tasks')
   } catch (error) {
     ElMessage.error(errorMessage(error))
   } finally {
     taskCreating.value = false
   }
+}
+
+/** 展开后处理面板；首次且内容为空时写入模板，不覆盖已有脚本。 */
+function togglePostJsPanel() {
+  const next = !postJsOpen.value
+  if (next && !store.currentPostJs.trim()) {
+    store.currentPostJs = DEFAULT_POST_JS
+  }
+  postJsOpen.value = next
 }
 
 function insertFormula(name: string, expression: string) {
@@ -271,20 +300,14 @@ function configureSqlCompletion(monaco: any) {
                     <Trash2 :size="15" />
                   </el-button>
                 </el-tooltip>
-                <el-tooltip content="转为后台任务" placement="bottom">
-                  <el-button class="icon-button plain" aria-label="转为后台任务" @click="openTaskDialog">
-                    <ListPlus :size="16" />
-                  </el-button>
-                </el-tooltip>
-                <el-tooltip content="打开 AI 分析" placement="bottom">
-                  <el-button
-                    class="icon-button ai-action"
-                    aria-label="打开 AI 分析"
-                    @click="openAiWorkspace"
-                  >
-                    <Sparkles :size="16" />
-                  </el-button>
-                </el-tooltip>
+                <el-button class="labeled-action" @click="openTaskDialog">
+                  <ListPlus :size="15" />
+                  后台任务
+                </el-button>
+                <el-button class="labeled-action ai-action" @click="openAiWorkspace">
+                  <Sparkles :size="15" />
+                  AI 分析
+                </el-button>
                 <el-button
                   type="primary"
                   aria-label="运行查询"
@@ -338,6 +361,37 @@ function configureSqlCompletion(monaco: any) {
             </div>
           </section>
 
+          <section class="post-js-pane" :class="{ open: postJsOpen }">
+            <button
+              type="button"
+              class="post-js-toggle"
+              :aria-expanded="postJsOpen"
+              @click="togglePostJsPanel"
+            >
+              <component :is="postJsOpen ? ChevronDown : ChevronRight" :size="14" />
+              <strong>后处理 JS（可选）</strong>
+              <span
+                v-if="store.currentPostJs.trim()"
+                class="post-js-enabled"
+              >
+                已启用
+              </span>
+              <small>SQL 成功后再运行 process(rows, meta)；失败则整次查询失败</small>
+            </button>
+            <div v-show="postJsOpen" class="post-js-body">
+              <p class="post-js-hint">
+                返回对象数组；可用 <code>http.request</code>（受部署白名单约束）。空脚本与现网行为一致。
+              </p>
+              <div class="post-js-editor-host">
+                <SqlEditor
+                  v-model="store.currentPostJs"
+                  language="javascript"
+                  :options="postJsEditorOptions"
+                />
+              </div>
+            </div>
+          </section>
+
           <section class="result-pane">
             <div class="pane-toolbar result-toolbar">
               <div class="pane-title">
@@ -347,7 +401,15 @@ function configureSqlCompletion(monaco: any) {
                 </span>
               </div>
               <div class="result-toolbar-actions">
-                <span v-if="store.queryResult?.truncated" class="result-warning">结果已截断</span>
+                <span
+                  v-if="store.queryResult?.postProcessed"
+                  class="result-post-processed"
+                >
+                  已后处理 · {{ store.queryResult.postProcessMs ?? 0 }}ms
+                </span>
+                <span v-if="store.queryResult?.truncated" class="result-warning">
+                  仅显示前 {{ store.queryResult.rowCount.toLocaleString() }} 行（已截断）
+                </span>
                 <div class="result-view-switch" role="group" aria-label="结果视图">
                   <button type="button" :aria-pressed="resultMode === 'table'" @click="resultMode = 'table'">
                     <Table2 :size="13" /> 表格
@@ -384,6 +446,7 @@ function configureSqlCompletion(monaco: any) {
               v-else-if="store.queryResult"
               :columns="store.queryResult.columns"
               :rows="store.queryResult.rows"
+              :applied-config="store.appliedChart"
             />
           </section>
         </div>
@@ -398,7 +461,13 @@ function configureSqlCompletion(monaco: any) {
               </span>
             </div>
             <el-tooltip content="刷新预览" placement="bottom">
-              <el-button class="icon-button plain" aria-label="刷新预览" @click="refreshPreview">
+              <el-button
+                class="icon-button plain"
+                aria-label="刷新预览"
+                :loading="store.previewLoading"
+                :disabled="store.previewLoading"
+                @click="refreshPreview"
+              >
                 <RefreshCw :size="15" />
               </el-button>
             </el-tooltip>
@@ -414,8 +483,18 @@ function configureSqlCompletion(monaco: any) {
 
       <div v-else class="workspace-empty">
         <span class="empty-icon"><Table2 :size="30" /></span>
-        <h2>选择或上传一个数据文件</h2>
-        <p>展开文件后选择工作表，并加入查询上下文</p>
+        <template v-if="!store.sources.length">
+          <h2>上传第一个数据文件开始分析</h2>
+          <p>支持 Excel 与 CSV，导入前可选择工作表与字段类型</p>
+          <el-button type="primary" :loading="store.uploadLoading" @click="store.requestUpload()">
+            <Upload :size="16" />
+            上传文件
+          </el-button>
+        </template>
+        <template v-else>
+          <h2>选择一个工作表</h2>
+          <p>展开左侧文件，选择工作表并加入查询上下文</p>
+        </template>
       </div>
     </section>
 
@@ -434,7 +513,10 @@ function configureSqlCompletion(monaco: any) {
         </el-form-item>
         <div class="dialog-summary">
           <Save :size="16" />
-          <span>保存 SQL 与当前 {{ store.queryBindings.length }} 张逻辑表的绑定。</span>
+          <span>
+            保存 SQL{{ store.currentPostJs.trim() ? '、后处理 JS' : '' }}
+            与当前 {{ store.queryBindings.length }} 张逻辑表的绑定。
+          </span>
         </div>
       </el-form>
       <template #footer>
@@ -450,7 +532,10 @@ function configureSqlCompletion(monaco: any) {
         </el-form-item>
         <div class="dialog-summary">
           <Clock3 :size="16" />
-          <span>任务将使用当前 SQL 和 {{ store.queryBindings.length }} 张逻辑表执行。</span>
+          <span>
+            任务将使用当前 SQL{{ store.currentPostJs.trim() ? '、后处理 JS' : '' }}
+            和 {{ store.queryBindings.length }} 张逻辑表执行。
+          </span>
         </div>
       </el-form>
       <template #footer>

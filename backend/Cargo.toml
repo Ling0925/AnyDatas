@@ -21,12 +21,14 @@ fs2 = "0.4"
 hex = "0.4"
 regex = "1.12"
 rand_core = { version = "0.6", features = ["getrandom"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 ring = "0.17"
+rquickjs = { version = "0.12", features = ["bindgen", "classes", "properties"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "macros", "migrate"] }
+subtle = "2.6"
 thiserror = "2.0"
 time = "0.3"
 tokio = { version = "1.49", features = ["full"] }
@@ -37,3 +39,4 @@ uuid = { version = "1.21", features = ["v4", "serde"] }
 
 [dev-dependencies]
 tempfile = "3.25"
+tower = { version = "0.5", features = ["util"] }

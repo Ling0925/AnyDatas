@@ -11,6 +11,8 @@ monitoring/metrics-token
 backend/target
 frontend/node_modules
 frontend/dist
+desktop/node_modules
+desktop/dist
 output
 backups
 sites

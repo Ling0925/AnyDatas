@@ -71,7 +71,7 @@ async fn list(
     let rows = sqlx::query_as::<_, JobRow>(
         r#"
         SELECT j.id, j.source_id, d.name AS source_name, j.schedule_id, j.name,
-               j.kind, j.sql_text, j.status, j.progress, j.trigger_type,
+               j.kind, j.sql_text, j.post_js, j.status, j.progress, j.trigger_type,
                NULL AS result_json, j.result_row_count,
                j.result_artifact_key, j.result_artifact_format,
                j.result_size_bytes, j.result_expires_at,
@@ -165,6 +165,7 @@ async fn create(
         &bindings.tables,
         &request.name,
         &request.sql,
+        request.post_js.as_deref(),
         None,
         "manual",
     )
@@ -200,8 +201,10 @@ async fn cancel(
         level: "warning".into(),
         message: "用户停止了任务".into(),
     });
-    sqlx::query(
-        "UPDATE jobs SET status = 'canceled', finished_at = ?, updated_at = ?, logs_json = ? WHERE id = ?",
+    // 状态守卫：worker 可能在读取与更新之间已把任务写成 succeeded/failed。若守卫落空，
+    // 说明任务已到达终态，直接返回当前状态，绝不用 canceled 覆盖已完成结果或制品字段。
+    let canceled = sqlx::query(
+        "UPDATE jobs SET status = 'canceled', finished_at = ?, updated_at = ?, logs_json = ? WHERE id = ? AND status IN ('queued', 'running')",
     )
     .bind(&now)
     .bind(&now)
@@ -209,6 +212,15 @@ async fn cancel(
     .bind(&id)
     .execute(&state.pool)
     .await?;
+    if canceled.rows_affected() == 0 {
+        return Ok(Json(
+            hydrate_job(
+                &state,
+                required_job(&state, &id, Some(&auth.workspace_id)).await?,
+            )
+            .await?,
+        ));
+    }
     let interrupt_handle = {
         let mut queries = state
             .query_control
@@ -248,6 +260,7 @@ async fn retry(
         &tables,
         &job.name,
         &job.sql_text,
+        job.post_js.as_deref(),
         job.schedule_id.as_deref(),
         "retry",
     )
@@ -284,12 +297,14 @@ async fn delete_one(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn enqueue_job(
     state: &SharedState,
     source_id: &str,
     tables: &[QueryTableBinding],
     name: &str,
     sql: &str,
+    post_js: Option<&str>,
     schedule_id: Option<&str>,
     trigger_type: &str,
 ) -> AppResult<String> {
@@ -300,13 +315,17 @@ pub async fn enqueue_job(
         level: "info".into(),
         message: "任务已进入队列".into(),
     }];
+    let post_js = post_js
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
     let mut transaction = state.pool.begin().await?;
     sqlx::query(
         r#"
         INSERT INTO jobs (
-            id, source_id, schedule_id, name, sql_text, status, progress,
+            id, source_id, schedule_id, name, sql_text, post_js, status, progress,
             trigger_type, logs_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?)
         "#,
     )
     .bind(&id)
@@ -314,6 +333,7 @@ pub async fn enqueue_job(
     .bind(schedule_id)
     .bind(name.trim())
     .bind(sql.trim())
+    .bind(post_js)
     .bind(trigger_type)
     .bind(serde_json::to_string(&logs).map_err(|error| AppError::Internal(error.to_string()))?)
     .bind(&now)
@@ -361,7 +381,7 @@ pub async fn required_job(
     sqlx::query_as::<_, JobRow>(
         r#"
         SELECT j.id, j.source_id, d.name AS source_name, j.schedule_id, j.name,
-               j.kind, j.sql_text, j.status, j.progress, j.trigger_type,
+               j.kind, j.sql_text, j.post_js, j.status, j.progress, j.trigger_type,
                j.result_json, j.result_row_count,
                j.result_artifact_key, j.result_artifact_format,
                j.result_size_bytes, j.result_expires_at,

@@ -68,11 +68,26 @@ export interface AiAgentConversationSummary {
   updatedAt: string
 }
 
+export type AgentChartType = 'bar' | 'stacked-bar' | 'line' | 'area' | 'pie' | 'scatter' | 'radar'
+export type AgentChartAggregation = 'sum' | 'average' | 'max' | 'min'
+
+/** AI 随候选 SQL 给出的图表建议：按结果列名引用，映射到现有 ResultChart 渲染。 */
+export interface AgentChartSpec {
+  type: AgentChartType
+  category: string
+  values: string[]
+  groups?: string[]
+  aggregation?: AgentChartAggregation
+  title?: string
+  rationale?: string
+}
+
 export interface AiAgentMessage {
   id: string
   role: AiChatRole
   content: string
   sql: string | null
+  chart?: AgentChartSpec
   model: string | null
   toolRuns: AiToolRun[]
   sequence: number
@@ -247,6 +262,8 @@ export interface QueryResponse {
   rowCount: number
   elapsedMs: number
   truncated: boolean
+  postProcessed?: boolean
+  postProcessMs?: number | null
 }
 
 export interface SavedQuery {
@@ -255,6 +272,7 @@ export interface SavedQuery {
   sourceName: string
   name: string
   sql: string
+  postJs?: string | null
   tables: QueryTableBinding[]
   createdAt: string
   updatedAt: string
@@ -265,6 +283,7 @@ export interface SavedQueryPayload {
   tables: QueryTableBinding[]
   name: string
   sql: string
+  postJs?: string | null
 }
 
 export interface JobLog {
@@ -283,6 +302,7 @@ export interface Job {
   name: string
   kind: string
   sql: string
+  postJs?: string | null
   tables: QueryTableBinding[]
   status: JobStatus
   progress: number
@@ -322,6 +342,7 @@ export interface ScheduleItem {
   sourceName: string
   name: string
   sql: string
+  postJs?: string | null
   tables: QueryTableBinding[]
   cronExpression: string
   timezone: string
@@ -337,6 +358,7 @@ export interface SchedulePayload {
   tables: QueryTableBinding[]
   name: string
   sql: string
+  postJs?: string | null
   cronExpression: string
   timezone: string
   enabled: boolean

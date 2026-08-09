@@ -24,6 +24,8 @@ use crate::{
 
 const SCHEMA_SAMPLE_ROWS: usize = 2_000;
 const CANCEL_CHECK_INTERVAL: usize = 1_024;
+/// DuckDB rejects zero-column tables; empty post-process results use this marker.
+const EMPTY_RESULT_MARKER_COLUMN: &str = "__anydatas_empty";
 
 #[derive(Debug, Clone)]
 pub struct QuerySource {
@@ -61,6 +63,8 @@ pub struct QueryArtifactExecution {
     pub cache_updates: Vec<QueryCacheUpdate>,
     pub total_rows: usize,
     pub artifact_size_bytes: u64,
+    /// Captured `console.*` lines from optional post-process JS (empty when unused).
+    pub console: Vec<String>,
 }
 
 pub struct QueryExecutionContext<'a> {
@@ -235,6 +239,7 @@ pub fn execute_query_to_artifact(
                 cache_updates,
                 total_rows,
                 artifact_size_bytes,
+                console: Vec::new(),
             })
         }
         Err(error) => {
@@ -270,8 +275,151 @@ pub fn read_artifact_page(
         offset
     );
     let mut response = collect_query_response(&connection, &query_sql, limit, started)?;
+    response = normalize_empty_marker_response(response);
+    let total_rows = if response.columns.is_empty() && response.rows.is_empty() {
+        0
+    } else {
+        total_rows
+    };
     response.truncated = offset.saturating_add(response.rows.len()) < total_rows;
     Ok((response, total_rows))
+}
+
+/// Read every row from a persisted artifact for post-process input.
+///
+/// Fails when `total_rows > max_rows` so callers can map the error to
+/// `post_js_limit_input_rows` without loading an oversized result set.
+pub fn read_artifact_all_rows(
+    artifact_path: &Path,
+    max_rows: usize,
+    runtime: &QueryRuntimeLimits,
+    work_root: &Path,
+) -> Result<(Vec<FieldDefinition>, Vec<Vec<Value>>, usize)> {
+    let started = Instant::now();
+    let workspace = QueryWorkspace::create(work_root)?;
+    let connection = Connection::open(artifact_path).context("无法打开后台结果")?;
+    configure_connection(&connection, runtime, Some(&workspace.temp_path()))?;
+    connection.execute_batch("SET enable_external_access = false;")?;
+    let total_rows: i64 = connection.query_row(
+        &format!("SELECT COUNT(*) FROM {}", quote_identifier("result")),
+        [],
+        |row| row.get(0),
+    )?;
+    let total_rows = usize::try_from(total_rows).context("结果行数超出平台范围")?;
+    if total_rows > max_rows {
+        bail!("后处理输入行数超过限制（{} > {}）", total_rows, max_rows);
+    }
+    let query_sql = format!("SELECT * FROM {}", quote_identifier("result"));
+    // limit == total_rows keeps collect from treating a full read as truncated.
+    let response = collect_query_response(&connection, &query_sql, total_rows.max(1), started)?;
+    let response = normalize_empty_marker_response(response);
+    let total_rows = if response.columns.is_empty() && response.rows.is_empty() {
+        0
+    } else {
+        total_rows
+    };
+    Ok((response.columns, response.rows, total_rows))
+}
+
+/// Replace the artifact `result` table with post-process output columns/rows.
+///
+/// Writes via a temp file + atomic rename so a failed rewrite never leaves a
+/// half-applied post-process table in place of the SQL result.
+pub fn replace_artifact_with_rows(
+    artifact_path: &Path,
+    columns: &[FieldDefinition],
+    rows: &[Vec<Value>],
+    runtime: &QueryRuntimeLimits,
+) -> Result<u64> {
+    let parent = artifact_path.parent().context("后台结果路径缺少父目录")?;
+    fs::create_dir_all(parent)?;
+    maintenance::ensure_free_space(parent, runtime.min_free_space_bytes, 0)?;
+    let artifact_id = Uuid::new_v4();
+    let temporary_path = artifact_path.with_extension(format!("{artifact_id}.rewrite.tmp"));
+    let temporary_directory = parent.join(format!(".result-rewrite-{artifact_id}"));
+    let result = (|| -> Result<()> {
+        let connection = Connection::open(&temporary_path).context("无法初始化后处理结果数据库")?;
+        configure_connection(&connection, runtime, Some(&temporary_directory))?;
+        connection.execute_batch("SET enable_external_access = false;")?;
+        // DuckDB requires ≥1 column; empty process() results use an internal marker.
+        let write_columns = if columns.is_empty() {
+            vec![FieldDefinition {
+                name: EMPTY_RESULT_MARKER_COLUMN.to_owned(),
+                data_type: "布尔".to_owned(),
+                nullable: true,
+            }]
+        } else {
+            columns.to_vec()
+        };
+        create_named_table(&connection, "result", &write_columns)?;
+        if !columns.is_empty() {
+            let mut appender = connection.appender("result")?;
+            for (row_index, row) in rows.iter().enumerate() {
+                let values = columns
+                    .iter()
+                    .enumerate()
+                    .map(|(index, column)| {
+                        let value = row.get(index).unwrap_or(&Value::Null);
+                        json_to_duck(value, &column.data_type).with_context(|| {
+                            format!(
+                                "后处理结果第 {} 行字段“{}”无法写入产物",
+                                row_index + 1,
+                                column.name
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                appender.append_row(appender_params_from_iter(values))?;
+            }
+            appender.flush()?;
+            drop(appender);
+        }
+        connection.execute_batch("CHECKPOINT;")?;
+        drop(connection);
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(&temporary_directory);
+    match result {
+        Ok(()) => {
+            let temporary_size = fs::metadata(&temporary_path)?.len();
+            if temporary_size > runtime.max_artifact_bytes {
+                let _ = fs::remove_file(&temporary_path);
+                bail!(
+                    "后台结果产物大小 {:.2} MB 超过单任务上限 {:.2} MB",
+                    temporary_size as f64 / 1024.0 / 1024.0,
+                    runtime.max_artifact_bytes as f64 / 1024.0 / 1024.0
+                );
+            }
+            if artifact_path.exists() {
+                fs::remove_file(artifact_path)?;
+            }
+            fs::rename(&temporary_path, artifact_path)?;
+            let artifact_size_bytes = fs::metadata(artifact_path)?.len();
+            if let Err(error) =
+                maintenance::ensure_free_space(parent, runtime.min_free_space_bytes, 0)
+            {
+                let _ = fs::remove_file(artifact_path);
+                return Err(error.context("后台结果已删除"));
+            }
+            Ok(artifact_size_bytes)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temporary_path);
+            Err(error)
+        }
+    }
+}
+
+/// Hide the internal empty-result marker column from API consumers.
+fn normalize_empty_marker_response(mut response: QueryResponse) -> QueryResponse {
+    if response.columns.len() == 1
+        && response.columns[0].name == EMPTY_RESULT_MARKER_COLUMN
+        && response.rows.is_empty()
+    {
+        response.columns.clear();
+        response.row_count = 0;
+    }
+    response
 }
 
 /// 将完整后台结果逐行写为 CSV，调用方可以把 Writer 接到 HTTP 流而无需中间大文件。
@@ -294,7 +442,18 @@ pub fn write_artifact_csv(
         .context("DuckDB 未返回结果结构")?
         .column_names();
     let mut writer = csv::WriterBuilder::new().from_writer(output);
-    writer.write_record(&names)?;
+    if names.len() == 1 && names[0] == EMPTY_RESULT_MARKER_COLUMN {
+        // Empty post-process result: emit a headerless empty CSV.
+        writer.flush()?;
+        return Ok(());
+    }
+    // 结果列名来自上传文件的表头，同样可能以公式字符开头（如 =HYPERLINK(...)），必须与数据值
+    // 一样中和，否则他人下载 CSV 后在 Excel 打开表头即被当作公式执行。
+    let header = names
+        .iter()
+        .map(|name| neutralize_csv_formula(name))
+        .collect::<Vec<_>>();
+    writer.write_record(&header)?;
     while let Some(row) = rows.next()? {
         let record = (0..names.len())
             .map(|index| {
@@ -356,6 +515,8 @@ fn collect_query_response(
         rows: result_rows,
         elapsed_ms: started.elapsed().as_millis(),
         truncated,
+        post_processed: false,
+        post_process_ms: None,
     })
 }
 
@@ -400,13 +561,21 @@ pub fn validate_alias(alias: &str) -> Result<()> {
 }
 
 /// 计算配置内容的稳定缓存键；同一逻辑表更新版本后自然生成新文件，旧查询不会读到脏缓存。
+///
+/// 每个变长字段前置其字节长度做域分隔：否则无分隔拼接会让 (sheet="AB", start="C1") 与
+/// (sheet="A", start="BC1") 得到相同哈希，第二次查询命中第一次的缓存并静默返回错误区间数据。
 fn source_cache_key(source: &QuerySource) -> String {
     let mut digest = Sha256::new();
-    digest.update(source.table_id.as_bytes());
+    for field in [
+        source.table_id.as_bytes(),
+        source.sheet.as_bytes(),
+        source.start_cell.as_bytes(),
+        source.end_cell.as_deref().unwrap_or("").as_bytes(),
+    ] {
+        digest.update((field.len() as u64).to_le_bytes());
+        digest.update(field);
+    }
     digest.update(source.config_version.to_le_bytes());
-    digest.update(source.sheet.as_bytes());
-    digest.update(source.start_cell.as_bytes());
-    digest.update(source.end_cell.as_deref().unwrap_or("").as_bytes());
     digest.update([u8::from(source.first_row_as_header)]);
     hex::encode(digest.finalize())
 }
@@ -644,16 +813,64 @@ pub fn validate_read_only_sql(sql: &str) -> Result<()> {
     if !(lowered.starts_with("select") || lowered.starts_with("with")) {
         bail!("仅允许 SELECT 或 WITH 查询");
     }
-    if clean.contains(';') {
+    // 关键字黑名单与分号检查只作用于剥离了字符串字面量、引用标识符和注释后的“结构性 SQL”，
+    // 避免把出现在数据值或列名里的英文单词（'update'、'load'、'set' 等）误判为文件/DDL 操作。
+    // 真正的隔离由引擎层 enable_external_access=false + 只读 ATTACH 保证，黑名单只是二次防御。
+    let structural = strip_sql_literals_and_comments(clean);
+    if structural.contains(';') {
         bail!("一次只能执行一条查询");
     }
     let forbidden = Regex::new(
         r"(?i)\b(attach|copy|install|load|call|pragma|create|insert|update|delete|drop|alter|export|import|set|read_csv|read_csv_auto|read_parquet|read_json|read_ndjson|glob)\b",
     )?;
-    if forbidden.is_match(clean) {
+    if forbidden.is_match(&structural) {
         bail!("查询包含不允许的文件或数据库操作");
     }
     Ok(())
+}
+
+/// 去除单引号字符串字面量、双引号标识符与 SQL 注释，仅保留可安全应用关键字黑名单的结构骨架。
+/// 引号内的 `''` / `""` 转义会被正确跳过；结果只用于校验，不会被执行。
+fn strip_sql_literals_and_comments(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    while let Some(current) = chars.next() {
+        match current {
+            '\'' | '"' => {
+                out.push(' ');
+                while let Some(inner) = chars.next() {
+                    if inner == current {
+                        if chars.peek() == Some(&current) {
+                            chars.next();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            }
+            '-' if chars.peek() == Some(&'-') => {
+                for inner in chars.by_ref() {
+                    if inner == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut previous = '\0';
+                for inner in chars.by_ref() {
+                    if previous == '*' && inner == '/' {
+                        break;
+                    }
+                    previous = inner;
+                }
+                out.push(' ');
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 struct QueryWorkspace {
@@ -718,18 +935,37 @@ fn configure_connection(
 
 /// 创建缓存数据表并根据采样类型选择 DuckDB 列类型，兼顾聚合性能与原始值兼容性。
 fn create_cache_table(connection: &Connection, columns: &[FieldDefinition]) -> Result<()> {
-    let definitions = columns
-        .iter()
-        .map(|column| {
-            format!(
-                "{} {}",
-                quote_identifier(&column.name),
-                duck_column_type(&column.data_type)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    connection.execute_batch(&format!("CREATE TABLE cached_data ({definitions});"))?;
+    create_named_table(connection, "cached_data", columns)
+}
+
+/// Create a DuckDB table with the given name and field definitions.
+///
+/// Empty column lists produce a zero-column table so post-process `return []`
+/// can still materialize a valid artifact.
+fn create_named_table(
+    connection: &Connection,
+    table_name: &str,
+    columns: &[FieldDefinition],
+) -> Result<()> {
+    let definitions = if columns.is_empty() {
+        String::new()
+    } else {
+        columns
+            .iter()
+            .map(|column| {
+                format!(
+                    "{} {}",
+                    quote_identifier(&column.name),
+                    duck_column_type(&column.data_type)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    connection.execute_batch(&format!(
+        "CREATE TABLE {} ({definitions});",
+        quote_identifier(table_name)
+    ))?;
     Ok(())
 }
 
@@ -802,15 +1038,25 @@ fn display_value(value: &Value) -> String {
     }
 }
 
+/// f64 尾数只有 53 位，超过 2^53 的整数无法被精确表示。
+const MAX_EXACT_F64_INTEGER: f64 = 9_007_199_254_740_992.0;
+
 fn integer_value(value: &Value) -> Option<i64> {
     if let Some(value) = value.as_i64() {
         return Some(value);
     }
-    let number = value.as_str()?.trim().parse::<f64>().ok()?;
-    (number.is_finite()
-        && number.fract() == 0.0
-        && number >= i64::MIN as f64
-        && number <= i64::MAX as f64)
+    let text = value.as_str()?.trim();
+    // 先做精确整数解析，与字段类型推断 (spreadsheet::infer_fields) 使用的 parse::<i64>()
+    // 保持一致；否则 18 位身份证号、16-19 位银行卡/订单/雪花 ID 会在经 f64 转换时被静默舍入
+    // （例如 110101199003074258 变成 110101199003074256），破坏后续 JOIN/GROUP BY/导出。
+    if let Ok(value) = text.parse::<i64>() {
+        return Some(value);
+    }
+    // 仅为兼容 "42.0" 这类以小数写法书写的整数才回退浮点；超过 f64 精确整数范围的值无法
+    // 安全表示，宁可让转换显式失败也不静默取近似（旧实现的 `<= i64::MAX as f64` 上界等于
+    // 2^63，会把 (i64::MAX, 2^63) 的值饱和成 i64::MAX）。
+    let number = text.parse::<f64>().ok()?;
+    (number.is_finite() && number.fract() == 0.0 && number.abs() <= MAX_EXACT_F64_INTEGER)
         .then_some(number as i64)
 }
 
@@ -940,16 +1186,20 @@ fn duck_value_to_json(value: DuckValue) -> Value {
     }
 }
 
+/// 中和电子表格公式注入：以公式触发字符开头的文本前置单引号。触发集除 `= + - @` 外，
+/// 还包含制表符和回车——它们同样是标准 CSV 注入字符集的一部分。
+fn neutralize_csv_formula(value: &str) -> String {
+    if value.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{value}")
+    } else {
+        value.to_owned()
+    }
+}
+
 fn duck_value_to_csv(value: DuckValue) -> String {
     match value {
         DuckValue::Null => String::new(),
-        DuckValue::Text(value) | DuckValue::Enum(value) => {
-            if value.starts_with(['=', '+', '-', '@']) {
-                format!("'{value}")
-            } else {
-                value
-            }
-        }
+        DuckValue::Text(value) | DuckValue::Enum(value) => neutralize_csv_formula(&value),
         value => match duck_value_to_json(value) {
             Value::Null => String::new(),
             Value::String(value) => value,
@@ -999,6 +1249,67 @@ mod tests {
             result.response.rows,
             vec![vec![Value::from("00123")], vec![Value::from("00456")]]
         );
+    }
+
+    #[test]
+    fn preserves_large_integers_beyond_f64_precision() {
+        // 18 位身份证号超过 2^53，旧实现经 f64 会舍入为相邻值。
+        assert_eq!(
+            integer_value(&Value::String("110101199003074258".to_owned())),
+            Some(110_101_199_003_074_258)
+        );
+        assert_eq!(integer_value(&Value::from(42_i64)), Some(42));
+        // 以小数写法书写的整数仍兼容。
+        assert_eq!(integer_value(&Value::String("42.0".to_owned())), Some(42));
+        // 超过 f64 精确整数范围的值无法安全表示，应显式失败而非静默饱和。
+        assert_eq!(
+            integer_value(&Value::String("99999999999999999999".to_owned())),
+            None
+        );
+        assert_eq!(
+            integer_value(&Value::String("not-a-number".to_owned())),
+            None
+        );
+    }
+
+    #[test]
+    fn read_only_validator_ignores_keywords_inside_literals_and_comments() {
+        // 关键字出现在字符串字面量里应当放行。
+        validate_read_only_sql(
+            "SELECT status FROM data WHERE status IN ('create', 'update', 'delete')",
+        )
+        .unwrap();
+        validate_read_only_sql("SELECT * FROM data WHERE note = 'has ; semicolon'").unwrap();
+        validate_read_only_sql("SELECT 1 -- drop everything\nFROM data").unwrap();
+        // 真正的多语句与危险操作仍被拒绝。
+        assert!(validate_read_only_sql("SELECT 1; DROP TABLE data").is_err());
+        assert!(validate_read_only_sql("SELECT * FROM read_csv('x.csv')").is_err());
+        assert!(validate_read_only_sql("PRAGMA database_list").is_err());
+    }
+
+    #[test]
+    fn cache_key_is_domain_separated_across_field_boundaries() {
+        let path = PathBuf::from("/tmp/anydatas-cache-key-test.xlsx");
+        let mut first = csv_source(&path, "same-table", "data");
+        first.file_kind = "excel".to_owned();
+        first.sheet = "AB".to_owned();
+        first.start_cell = "C1".to_owned();
+        let mut second = first.clone();
+        second.sheet = "A".to_owned();
+        second.start_cell = "BC1".to_owned();
+        assert_ne!(source_cache_key(&first), source_cache_key(&second));
+        // 相同配置仍得到相同键，保证缓存复用。
+        assert_eq!(source_cache_key(&first), source_cache_key(&first.clone()));
+    }
+
+    #[test]
+    fn neutralizes_csv_formula_triggers() {
+        assert_eq!(
+            neutralize_csv_formula("=cmd|'/C calc'!A1"),
+            "'=cmd|'/C calc'!A1"
+        );
+        assert_eq!(neutralize_csv_formula("\t=1+1"), "'\t=1+1");
+        assert_eq!(neutralize_csv_formula("正常列名"), "正常列名");
     }
 
     #[test]
@@ -1110,6 +1421,176 @@ mod tests {
             .collect::<csv::Result<Vec<_>>>()
             .unwrap();
         assert_eq!(records.len(), 1_000);
+        fs::remove_dir_all(test_dir).unwrap();
+    }
+
+    #[test]
+    fn replaces_artifact_with_post_process_rows() {
+        let test_dir = test_directory();
+        let source_path = test_dir.join("replace.csv");
+        fs::write(&source_path, "id,amount\n1,10\n2,20\n3,30\n").unwrap();
+        let cache_root = test_dir.join("cache");
+        let work_root = test_dir.join("work");
+        let artifact_path = test_dir.join("results").join("replace.duckdb");
+        let locks = CacheBuildLocks::default();
+        let runtime = test_runtime();
+        execute_query_to_artifact(
+            vec![csv_source(&source_path, "replace", "data")],
+            "SELECT * FROM data ORDER BY id",
+            20,
+            &artifact_path,
+            QueryExecutionContext {
+                cache_root: &cache_root,
+                work_root: &work_root,
+                cache_build_locks: &locks,
+                runtime: &runtime,
+                execution_control: None,
+            },
+        )
+        .unwrap();
+
+        let (columns, rows, total) =
+            read_artifact_all_rows(&artifact_path, 100, &runtime, &work_root).unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(columns.len(), 2);
+        assert_eq!(rows.len(), 3);
+
+        let new_columns = vec![
+            FieldDefinition {
+                name: "amount".to_owned(),
+                data_type: "小数".to_owned(),
+                nullable: true,
+            },
+            FieldDefinition {
+                name: "doubled".to_owned(),
+                data_type: "小数".to_owned(),
+                nullable: true,
+            },
+        ];
+        let new_rows = vec![
+            vec![Value::from(20.0), Value::from(40.0)],
+            vec![Value::from(30.0), Value::from(60.0)],
+        ];
+        let size =
+            replace_artifact_with_rows(&artifact_path, &new_columns, &new_rows, &runtime).unwrap();
+        assert!(size > 0);
+
+        let (page, total_rows) =
+            read_artifact_page(&artifact_path, 0, 20, &runtime, &work_root).unwrap();
+        assert_eq!(total_rows, 2);
+        assert_eq!(page.columns.len(), 2);
+        assert_eq!(page.columns[1].name, "doubled");
+        assert_eq!(
+            page.rows,
+            vec![
+                vec![Value::from(20.0), Value::from(40.0)],
+                vec![Value::from(30.0), Value::from(60.0)]
+            ]
+        );
+
+        let err = read_artifact_all_rows(&artifact_path, 1, &runtime, &work_root).unwrap_err();
+        assert!(err.to_string().contains("后处理输入行数超过限制"));
+        fs::remove_dir_all(test_dir).unwrap();
+    }
+
+    #[test]
+    fn post_process_rewrites_full_artifact_not_sample() {
+        use crate::models::JsRuntimeLimits;
+        use crate::services::post_process::{self, JsHttpRuntime};
+
+        let test_dir = test_directory();
+        let source_path = test_dir.join("post-full.csv");
+        let mut writer = BufWriter::new(fs::File::create(&source_path).unwrap());
+        writeln!(writer, "amount").unwrap();
+        for value in 0..250 {
+            writeln!(writer, "{value}").unwrap();
+        }
+        writer.flush().unwrap();
+        drop(writer);
+
+        let cache_root = test_dir.join("cache");
+        let work_root = test_dir.join("work");
+        let artifact_path = test_dir.join("results").join("post-full.duckdb");
+        let locks = CacheBuildLocks::default();
+        let runtime = test_runtime();
+        let result = execute_query_to_artifact(
+            vec![csv_source(&source_path, "post-full", "data")],
+            "SELECT amount FROM data ORDER BY amount",
+            20,
+            &artifact_path,
+            QueryExecutionContext {
+                cache_root: &cache_root,
+                work_root: &work_root,
+                cache_build_locks: &locks,
+                runtime: &runtime,
+                execution_control: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.total_rows, 250);
+        assert_eq!(result.sample.rows.len(), 20);
+
+        let (columns, rows, total) =
+            read_artifact_all_rows(&artifact_path, 20_000, &runtime, &work_root).unwrap();
+        assert_eq!(total, 250);
+        assert_eq!(rows.len(), 250);
+
+        let limits = JsRuntimeLimits::test_default();
+        let http = JsHttpRuntime::new(&limits).unwrap();
+        let script = r#"
+            function process(rows) {
+              return rows
+                .filter(r => r.amount >= 200)
+                .map(r => ({ amount: r.amount, doubled: r.amount * 2 }));
+            }
+        "#;
+        let out =
+            post_process::run_post_process(script, &columns, &rows, &limits, 5_000, Some(&http))
+                .unwrap();
+        assert_eq!(out.rows.len(), 50);
+        assert!(out.columns.iter().any(|c| c.name == "doubled"));
+
+        replace_artifact_with_rows(&artifact_path, &out.columns, &out.rows, &runtime).unwrap();
+        let (page, total_rows) =
+            read_artifact_page(&artifact_path, 0, 200, &runtime, &work_root).unwrap();
+        assert_eq!(total_rows, 50);
+        assert_eq!(page.rows.len(), 50);
+        assert!(!page.truncated);
+        assert_eq!(page.columns.len(), 2);
+        fs::remove_dir_all(test_dir).unwrap();
+    }
+
+    #[test]
+    fn replaces_artifact_with_empty_result() {
+        let test_dir = test_directory();
+        let source_path = test_dir.join("empty-post.csv");
+        fs::write(&source_path, "amount\n1\n2\n").unwrap();
+        let cache_root = test_dir.join("cache");
+        let work_root = test_dir.join("work");
+        let artifact_path = test_dir.join("results").join("empty-post.duckdb");
+        let locks = CacheBuildLocks::default();
+        let runtime = test_runtime();
+        execute_query_to_artifact(
+            vec![csv_source(&source_path, "empty-post", "data")],
+            "SELECT amount FROM data",
+            20,
+            &artifact_path,
+            QueryExecutionContext {
+                cache_root: &cache_root,
+                work_root: &work_root,
+                cache_build_locks: &locks,
+                runtime: &runtime,
+                execution_control: None,
+            },
+        )
+        .unwrap();
+
+        replace_artifact_with_rows(&artifact_path, &[], &[], &runtime).unwrap();
+        let (page, total_rows) =
+            read_artifact_page(&artifact_path, 0, 20, &runtime, &work_root).unwrap();
+        assert_eq!(total_rows, 0);
+        assert!(page.columns.is_empty());
+        assert!(page.rows.is_empty());
         fs::remove_dir_all(test_dir).unwrap();
     }
 

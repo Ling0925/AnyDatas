@@ -145,6 +145,8 @@ pub struct AgentMessage {
     pub role: String,
     pub content: String,
     pub sql: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chart: Option<ChartSpec>,
     pub model: Option<String>,
     pub tool_runs: Vec<AgentToolRun>,
     pub sequence: i64,
@@ -217,6 +219,7 @@ struct MessageRow {
     role: String,
     content: String,
     sql_text: Option<String>,
+    chart_spec_json: Option<String>,
     model: Option<String>,
     tool_runs_json: String,
     sequence: i64,
@@ -291,6 +294,7 @@ struct ResolvedContext {
 struct AgentCompletion {
     message: String,
     sql: Option<String>,
+    chart: Option<ChartSpec>,
     tool_runs: Vec<AgentToolRun>,
     finish_reason: String,
 }
@@ -361,7 +365,7 @@ pub async fn get_conversation(
     let row = required_conversation(state, identity, conversation_id).await?;
     let messages = sqlx::query_as::<_, MessageRow>(
         r#"
-        SELECT id, role, content, sql_text, model, tool_runs_json, sequence, created_at
+        SELECT id, role, content, sql_text, chart_spec_json, model, tool_runs_json, sequence, created_at
         FROM ai_messages
         WHERE conversation_id = ? AND state = 'active'
         ORDER BY sequence
@@ -1019,10 +1023,11 @@ async fn execute_agent_loop(
             } else {
                 turn.content.trim().to_owned()
             };
-            let (message, sql) = split_reply_and_sql(&content);
+            let (message, sql, chart) = split_reply_sql_and_chart(&content);
             return Ok(AgentCompletion {
                 message,
                 sql,
+                chart,
                 tool_runs,
                 finish_reason: turn.finish_reason.unwrap_or_else(|| "stop".to_owned()),
             });
@@ -1208,6 +1213,8 @@ async fn execute_sql_tool(
         start_cell: None,
         first_row_as_header: None,
         limit: Some(TOOL_QUERY_LIMIT),
+        // Agent tools never attach post-process scripts.
+        post_js: None,
     };
     let query_id = tool_query_id(run_id);
     let result = tokio::select! {
@@ -1370,6 +1377,23 @@ async fn prepare_model_messages(
             "当前会话没有附加任何表格：不得猜测字段、表名或数据内容，也不得声称已检查数据；",
         );
         system.push_str("可以回答一般问题，若任务依赖数据则明确提示用户先选择所需表格。");
+    } else {
+        system.push_str(
+            "当查询结果适合可视化时，在 ```sql 代码块之后再附一个 ```chart 代码块，内容是 JSON：",
+        );
+        system.push_str(
+            "{\"type\":\"bar|stacked-bar|line|area|pie|scatter|radar 之一\",\"category\":\"维度列名\",",
+        );
+        system.push_str(
+            "\"values\":[\"1 到 4 个度量列名\"],\"aggregation\":\"sum|average|max|min\",",
+        );
+        system.push_str(
+            "\"groups\":[\"可选分组列名\"],\"title\":\"可选\",\"rationale\":\"可选，一句为什么这么画\"}。",
+        );
+        system.push_str(
+            "只使用该 SQL 的输出列名，type 从上述 7 种里选；不确定是否该配图就不要给 chart 块。",
+        );
+        system.push_str("chart 块只是可视化建议，永远不会被执行。");
     }
     let current_sql = request_context.current_sql.as_deref().unwrap_or("(空)");
     let reasoning_instruction = request_context.reasoning_effort.instruction();
@@ -1684,7 +1708,7 @@ async fn load_active_messages(
 ) -> AppResult<Vec<MessageRow>> {
     Ok(sqlx::query_as::<_, MessageRow>(
         r#"
-        SELECT id, role, content, sql_text, model, tool_runs_json, sequence, created_at
+        SELECT id, role, content, sql_text, chart_spec_json, model, tool_runs_json, sequence, created_at
         FROM ai_messages
         WHERE conversation_id = ? AND state = 'active'
         ORDER BY sequence
@@ -1858,6 +1882,113 @@ fn sanitize_value(value: Value) -> Value {
 }
 
 /// 从模型最终文本提取唯一 SQL 代码块；无 SQL 的澄清或解释回复保持原样。
+const CHART_TYPES: [&str; 7] = [
+    "bar",
+    "stacked-bar",
+    "line",
+    "area",
+    "pie",
+    "scatter",
+    "radar",
+];
+const CHART_AGGREGATIONS: [&str; 4] = ["sum", "average", "max", "min"];
+
+/// 模型随候选 SQL 给出的图表建议，按 SELECT 输出列名引用；纯数据白名单，不含任何可执行内容。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartSpec {
+    #[serde(rename = "type")]
+    pub chart_type: String,
+    pub category: String,
+    #[serde(default)]
+    pub values: Vec<String>,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    #[serde(default)]
+    pub aggregation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+}
+
+fn truncate_chars_opt(value: Option<String>, max: usize) -> Option<String> {
+    value.map(|text| text.chars().take(max).collect())
+}
+
+/// 归一化并校验图表配置；类型/条数不满足白名单时返回 None（静默丢弃，不影响 SQL 与回复）。
+fn validate_chart_spec(spec: ChartSpec) -> Option<ChartSpec> {
+    if !CHART_TYPES.contains(&spec.chart_type.as_str()) || spec.category.trim().is_empty() {
+        return None;
+    }
+    let values: Vec<String> = spec
+        .values
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect();
+    if values.is_empty() || values.len() > 4 {
+        return None;
+    }
+    let aggregation = if CHART_AGGREGATIONS.contains(&spec.aggregation.as_str()) {
+        spec.aggregation
+    } else {
+        "sum".to_owned()
+    };
+    let groups: Vec<String> = spec
+        .groups
+        .into_iter()
+        .filter(|group| !group.trim().is_empty())
+        .take(1)
+        .collect();
+    Some(ChartSpec {
+        chart_type: spec.chart_type,
+        category: spec.category,
+        values,
+        groups,
+        aggregation,
+        title: truncate_chars_opt(spec.title, 120),
+        rationale: truncate_chars_opt(spec.rationale, 240),
+    })
+}
+
+/// 在提取候选 SQL 后再扫描 ```chart 代码块，解析并校验为 ChartSpec；缺失或非法时返回 None，
+/// 绝不影响候选 SQL 与回复文本。
+fn extract_chart_block(content: &str) -> (String, Option<ChartSpec>) {
+    let mut cursor = 0usize;
+    while let Some(relative) = content[cursor..].find("```") {
+        let fence_start = cursor + relative;
+        let language_start = fence_start + 3;
+        let Some(relative_body) = content[language_start..].find('\n') else {
+            break;
+        };
+        let body_start = language_start + relative_body + 1;
+        let language = content[language_start..body_start - 1]
+            .trim()
+            .to_ascii_lowercase();
+        let Some(relative_end) = content[body_start..].find("```") else {
+            break;
+        };
+        let fence_end = body_start + relative_end;
+        if language == "chart" {
+            let body = content[body_start..fence_end].trim();
+            let parsed = serde_json::from_str::<ChartSpec>(body)
+                .ok()
+                .and_then(validate_chart_spec);
+            let reply = format!("{}{}", &content[..fence_start], &content[fence_end + 3..]);
+            return (reply.trim().to_owned(), parsed);
+        }
+        cursor = fence_end + 3;
+    }
+    (content.to_owned(), None)
+}
+
+/// 组合：先按现有逻辑提取候选 SQL，再提取图表建议。
+fn split_reply_sql_and_chart(content: &str) -> (String, Option<String>, Option<ChartSpec>) {
+    let (reply, sql) = split_reply_and_sql(content);
+    let (reply, chart) = extract_chart_block(&reply);
+    (reply, sql, chart)
+}
+
 fn split_reply_and_sql(content: &str) -> (String, Option<String>) {
     let content = content.trim();
     let mut cursor = 0usize;
@@ -2164,18 +2295,25 @@ async fn complete_run(
     .bind(&row.conversation_id)
     .fetch_one(&mut *transaction)
     .await?;
+    let chart_spec_json = completion
+        .chart
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| AppError::Internal(error.to_string()))?;
     sqlx::query(
         r#"
         INSERT INTO ai_messages (
-            id, conversation_id, role, content, sql_text, model, tool_runs_json,
-            state, sequence, created_at
-        ) VALUES (?, ?, 'assistant', ?, ?, ?, ?, 'active', ?, ?)
+            id, conversation_id, role, content, sql_text, chart_spec_json, model,
+            tool_runs_json, state, sequence, created_at
+        ) VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, 'active', ?, ?)
         "#,
     )
     .bind(&assistant_id)
     .bind(&row.conversation_id)
     .bind(completion.message)
     .bind(completion.sql)
+    .bind(chart_spec_json)
     .bind(model)
     .bind(tool_runs_json)
     .bind(sequence)
@@ -2383,11 +2521,16 @@ fn parse_tables(value: &str) -> AppResult<Vec<QueryTableBinding>> {
 fn message_response(row: MessageRow) -> AppResult<AgentMessage> {
     let tool_runs = serde_json::from_str(&row.tool_runs_json)
         .map_err(|error| AppError::Internal(format!("AI 工具记录损坏: {error}")))?;
+    let chart = row
+        .chart_spec_json
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<ChartSpec>(value).ok());
     Ok(AgentMessage {
         id: row.id,
         role: row.role,
         content: row.content,
         sql: row.sql_text,
+        chart,
         model: row.model,
         tool_runs,
         sequence: row.sequence,
@@ -2566,6 +2709,91 @@ mod tests {
         let (message, sql) = split_reply_and_sql("```sql\nDELETE FROM data\n```");
         assert!(message.contains("DELETE"));
         assert!(sql.is_none());
+    }
+
+    #[test]
+    fn validates_and_normalizes_chart_spec() {
+        let ok = validate_chart_spec(ChartSpec {
+            chart_type: "bar".into(),
+            category: "月份".into(),
+            values: vec!["销售额".into(), "利润".into()],
+            groups: vec!["区域".into(), "多余".into()],
+            aggregation: "sum".into(),
+            title: None,
+            rationale: None,
+        })
+        .unwrap();
+        assert_eq!(ok.groups.len(), 1);
+        assert_eq!(ok.values.len(), 2);
+
+        let unknown_type = validate_chart_spec(ChartSpec {
+            chart_type: "bubble".into(),
+            category: "a".into(),
+            values: vec!["b".into()],
+            groups: vec![],
+            aggregation: "sum".into(),
+            title: None,
+            rationale: None,
+        });
+        assert!(unknown_type.is_none());
+
+        let empty_values = validate_chart_spec(ChartSpec {
+            chart_type: "bar".into(),
+            category: "a".into(),
+            values: vec![],
+            groups: vec![],
+            aggregation: "sum".into(),
+            title: None,
+            rationale: None,
+        });
+        assert!(empty_values.is_none());
+
+        let too_many = validate_chart_spec(ChartSpec {
+            chart_type: "bar".into(),
+            category: "a".into(),
+            values: (0..5).map(|value| value.to_string()).collect(),
+            groups: vec![],
+            aggregation: "sum".into(),
+            title: None,
+            rationale: None,
+        });
+        assert!(too_many.is_none());
+
+        let bad_aggregation = validate_chart_spec(ChartSpec {
+            chart_type: "pie".into(),
+            category: "a".into(),
+            values: vec!["b".into()],
+            groups: vec![],
+            aggregation: "median".into(),
+            title: None,
+            rationale: None,
+        })
+        .unwrap();
+        assert_eq!(bad_aggregation.aggregation, "sum");
+    }
+
+    #[test]
+    fn extracts_chart_block_alongside_sql() {
+        let (reply, sql, chart) = split_reply_sql_and_chart(
+            "先看结果：\n```sql\nSELECT 月份, SUM(额) AS 额 FROM data GROUP BY 月份\n```\n```chart\n{\"type\":\"bar\",\"category\":\"月份\",\"values\":[\"额\"],\"aggregation\":\"sum\"}\n```",
+        );
+        assert!(sql.is_some());
+        let chart = chart.expect("chart parsed");
+        assert_eq!(chart.chart_type, "bar");
+        assert_eq!(chart.category, "月份");
+        assert!(!reply.contains("```"));
+    }
+
+    #[test]
+    fn ignores_invalid_or_missing_chart_block() {
+        let (_reply, sql, chart) =
+            split_reply_sql_and_chart("```sql\nSELECT 1\n```\n```chart\n{not json}\n```");
+        assert!(sql.is_some());
+        assert!(chart.is_none());
+
+        let (_reply2, sql2, chart2) = split_reply_sql_and_chart("```sql\nSELECT 1\n```");
+        assert!(sql2.is_some());
+        assert!(chart2.is_none());
     }
 
     #[test]
@@ -3131,7 +3359,6 @@ mod tests {
             metrics_token: None,
             allow_private_ai_endpoints: true,
             secret_key: [7u8; 32],
-            http_client: reqwest::Client::new(),
             query_control: Default::default(),
             cache_build_locks: Default::default(),
             query_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
@@ -3149,6 +3376,7 @@ mod tests {
                 min_free_space_bytes: 16 * 1024 * 1024,
                 max_artifact_bytes: 512 * 1024 * 1024,
             },
+            js_runtime: crate::models::JsRuntimeLimits::test_default(),
             job_result_retention_days: 30,
             metrics: crate::models::RuntimeMetrics::new(),
             agent_control: Default::default(),

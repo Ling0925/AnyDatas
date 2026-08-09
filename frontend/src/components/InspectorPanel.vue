@@ -161,6 +161,7 @@ async function deleteTable() {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消',
+      confirmButtonClass: 'el-button--danger',
     })
     await store.deleteTable(table.id)
     ElMessage.success('逻辑表已删除')

@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 
 import { api } from '../api'
 import type {
+  AgentChartSpec,
   DataSource,
   ImportInspection,
   InspectImportTablePayload,
@@ -19,6 +20,12 @@ const DEFAULT_SQL = 'SELECT *\nFROM data\nLIMIT 200;'
 const ALIAS_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/
 const MAX_ALIAS_LENGTH = 63
 export const MAX_AGENT_TABLES = 16
+export const DEFAULT_POST_JS = `function process(rows, meta) {
+  // rows: 对象数组；返回对象数组
+  // 可用 http.request({ method, url, headers, body, timeoutMs })
+  return rows
+}
+`
 
 export interface AgentTableSelectionResult {
   ok: boolean
@@ -34,11 +41,24 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const queryBindings = ref<QueryTableBinding[]>([])
   const agentTableBindings = ref<QueryTableBinding[]>([])
   const currentSql = ref(DEFAULT_SQL)
+  const currentPostJs = ref('')
   const preview = ref<PreviewResponse | null>(null)
   const queryResult = ref<QueryResponse | null>(null)
+  // AI 建议的图表配置：由 Agent「应用」候选 SQL 时写入，供结果区按列名渲染；
+  // runQuery 不清除它（应用图表触发的那次运行需要保留），手动切换上下文时清空。
+  const appliedChart = ref<AgentChartSpec | null>(null)
+  function setAppliedChart(spec: AgentChartSpec | null) {
+    appliedChart.value = spec
+  }
   const savedQueries = ref<SavedQuery[]>([])
   const selectedSavedQueryId = ref<string | null>(null)
   const sourceLoading = ref(false)
+  // 空态里的「上传」入口可能在中心区，而文件 input 归属侧栏；用一个自增信号让任意空态
+  // 都能触发侧栏打开文件选择框，无需跨组件传 ref。
+  const uploadRequestId = ref(0)
+  function requestUpload() {
+    uploadRequestId.value += 1
+  }
   const previewLoading = ref(false)
   const queryLoading = ref(false)
   const uploadLoading = ref(false)
@@ -364,8 +384,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   /**
    * 将当前有序绑定整体替换为保存对象的快照，保证别名与 SQL 同步恢复。
+   * Agent「应用/运行」可跳过预览刷新，避免大 Excel 在点按钮时先卡死整页。
    */
-  async function setQueryContext(tables: QueryTableBinding[]) {
+  async function setQueryContext(
+    tables: QueryTableBinding[],
+    options?: { refreshPreview?: boolean },
+  ) {
     queryBindings.value = tables.filter((binding) => (
       sourceTables.value.some((table) => table.id === binding.tableId)
     ))
@@ -375,6 +399,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       selectedTableId.value = first.id
     }
     queryResult.value = null
+    if (options?.refreshPreview === false) return
     await refreshPreview()
   }
 
@@ -382,13 +407,17 @@ export const useWorkspaceStore = defineStore('workspace', () => {
    * 使用完整表绑定执行 SQL，物理 sourceId 仅作为旧接口兼容主文件保留。
    */
   async function runQuery() {
-    if (!primarySourceId.value || !queryBindings.value.length) return null
+    if (!primarySourceId.value || !queryBindings.value.length) {
+      throw new Error('请先绑定至少一张逻辑表再运行查询')
+    }
     queryLoading.value = true
     try {
+      const postJs = currentPostJs.value.trim() || undefined
       queryResult.value = await api.runQuery({
         sourceId: primarySourceId.value,
         tables: queryBindings.value,
         sql: currentSql.value,
+        postJs,
         limit: 1_000,
       })
       return queryResult.value
@@ -424,19 +453,23 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const query = savedQueries.value.find((item) => item.id === id)
     if (!query) return
     currentSql.value = query.sql
+    currentPostJs.value = query.postJs ?? ''
+    appliedChart.value = null
     await setQueryContext(query.tables)
   }
 
   /**
-   * 原子保存 SQL 与表绑定，首张表对应文件用于兼容历史列表字段。
+   * 原子保存 SQL、可选后处理脚本与表绑定，首张表对应文件用于兼容历史列表字段。
    */
   async function saveCurrentQuery(name: string) {
     if (!primarySourceId.value || !queryBindings.value.length) return null
+    const postJs = currentPostJs.value.trim() || null
     const payload = {
       sourceId: primarySourceId.value,
       tables: queryBindings.value,
       name: name.trim(),
       sql: currentSql.value,
+      postJs,
     }
     const saved = selectedSavedQueryId.value
       ? await api.updateSavedQuery(selectedSavedQueryId.value, payload)
@@ -484,6 +517,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const escapedName = name.replaceAll('"', '""')
     const tableAlias = queryBindings.value[0]?.alias ?? 'data'
     currentSql.value = `SELECT *,\n  ${expression} AS "${escapedName}"\nFROM ${tableAlias}\nLIMIT 200;`
+    appliedChart.value = null
   }
 
   /** 返回文件的默认逻辑表，旧 SQL 和首次打开都以它作为 data 绑定。 */
@@ -566,6 +600,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     selectedTable,
     preview,
     queryResult,
+    appliedChart,
+    setAppliedChart,
     queryBindings,
     boundTables,
     primarySourceId,
@@ -578,11 +614,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     selectedSavedQueryId,
     selectedSavedQuery,
     sourceLoading,
+    uploadRequestId,
+    requestUpload,
     previewLoading,
     queryLoading,
     uploadLoading,
     savedQueriesLoading,
     currentSql,
+    currentPostJs,
     loadSources,
     selectSource,
     selectTable,

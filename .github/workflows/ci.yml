@@ -1,8 +1,11 @@
 name: CI
 
 on:
-  push:
+  workflow_dispatch:
   pull_request:
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -13,9 +16,9 @@ concurrency:
 
 jobs:
   backend:
-    name: Rust backend
+    name: Rust backend tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: backend
@@ -28,21 +31,49 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.0
-          components: rustfmt, clippy
+          components: rustfmt
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend -> target
+          shared-key: backend-tests
 
       - name: Check formatting
         run: cargo fmt --all --check
 
-      - name: Run strict Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
-
       - name: Run backend tests
+        # 45 分钟上限覆盖 GitHub 托管机首次源码构建，同时仍能识别真正卡死的任务。
         run: cargo test --locked
+
+  backend_clippy:
+    name: Rust backend Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+          shared-key: backend-clippy
+
+      - name: Run strict Clippy
+        # DuckDB 的测试与 Clippy 静态归档不能同时留在 GitHub Runner 的小磁盘上。
+        # 独立 Runner 既隔离磁盘占用又并行执行，冷缓存耗时不再累加到同一个作业。
+        run: cargo clippy --all-targets --locked -- -D warnings
 
   frontend:
     name: Vue frontend
@@ -70,6 +101,44 @@ jobs:
 
       - name: Build production frontend
         run: pnpm --dir frontend build
+
+  desktop:
+    name: Electron desktop
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.10.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            desktop/pnpm-lock.yaml
+            frontend/pnpm-lock.yaml
+
+      - name: Install desktop and renderer dependencies
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir desktop install --frozen-lockfile
+
+      - name: Run desktop tests and typecheck
+        run: |
+          pnpm --dir desktop test
+          pnpm --dir desktop typecheck
+
+      - name: Verify production Electron renderer
+        # GitHub 托管 Runner 无法把 Electron 下载的 chrome-sandbox 设为 root:4755；
+        # 仅 smoke 子进程禁用 OS sandbox，产品 BrowserWindow 仍保持 sandbox: true。
+        run: xvfb-run -a pnpm --dir desktop test:renderer:ci
 
   operations:
     name: Operations and configuration
@@ -114,7 +183,7 @@ jobs:
 
   container:
     name: Production container
-    needs: [backend, frontend, operations]
+    needs: [backend, backend_clippy, frontend, desktop, operations]
     runs-on: ubuntu-latest
     timeout-minutes: 45
 

@@ -6,11 +6,15 @@ mod models;
 mod services;
 mod workers;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    io::{self, Write},
+    net::SocketAddr,
+    sync::Arc,
+};
 
 use anyhow::Context;
 use config::Config;
-use models::{AppState, QueryRuntimeLimits, RuntimeMetrics};
+use models::{AppState, JsRuntimeLimits, QueryRuntimeLimits, RuntimeMetrics};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tracing::info;
@@ -31,10 +35,6 @@ async fn main() -> anyhow::Result<()> {
     tokio::fs::create_dir_all(config.upload_dir()).await?;
     tokio::fs::create_dir_all(config.staging_dir()).await?;
     let secret_key = services::secrets::load_or_create(&config.data_dir)?;
-    let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(90))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
     let pool = db::connect(&config.database_url).await?;
     db::recover_interrupted_jobs(&pool).await?;
     db::recover_interrupted_agent_runs(&pool).await?;
@@ -48,7 +48,6 @@ async fn main() -> anyhow::Result<()> {
         metrics_token: config.metrics_token.clone(),
         allow_private_ai_endpoints: config.allow_private_ai_endpoints,
         secret_key,
-        http_client,
         query_control: Default::default(),
         cache_build_locks: Default::default(),
         query_semaphore: Arc::new(Semaphore::new(config.query_max_concurrency)),
@@ -66,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
             min_free_space_bytes: (config.min_free_space_mb as u64) * 1024 * 1024,
             max_artifact_bytes: (config.job_result_max_mb as u64) * 1024 * 1024,
         },
+        js_runtime: JsRuntimeLimits::from_config(&config),
         job_result_retention_days: config.job_result_retention_days,
         metrics: RuntimeMetrics::new(),
         agent_control: Default::default(),
@@ -94,7 +94,19 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(&config.bind)
         .await
         .with_context(|| format!("failed to bind {}", config.bind))?;
-    info!(address = %config.bind, "AnyDatas API started");
+    let address = listener.local_addr()?;
+    info!(address = %address, "AnyDatas API started");
+    // Electron 使用端口 0 避免固定端口冲突，因此必须输出实际监听地址再进入服务循环。
+    // 机器可读的单行消息让主进程无需解析 tracing 文本，也便于发行二进制在 108 上独立验收。
+    println!(
+        "ANYDATAS_READY {}",
+        serde_json::json!({
+            "address": address.to_string(),
+            "serverVersion": env!("CARGO_PKG_VERSION"),
+            "protocolVersion": 1,
+        })
+    );
+    io::stdout().flush()?;
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

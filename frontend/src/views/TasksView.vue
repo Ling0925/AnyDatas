@@ -46,16 +46,18 @@ const resultLoading = ref(false)
 const resultPage = ref<JobResultPage | null>(null)
 const resultPageNumber = ref(1)
 const resultPageSize = 100
-const jobForm = reactive<{ tables: QueryTableBinding[]; name: string; sql: string }>({
+const jobForm = reactive<{ tables: QueryTableBinding[]; name: string; sql: string; postJs: string }>({
   tables: [],
   name: '',
   sql: 'SELECT *\nFROM data\nLIMIT 1000;',
+  postJs: '',
 })
 const scheduleForm = reactive({
   id: null as string | null,
   tables: [] as QueryTableBinding[],
   name: '',
   sql: 'SELECT *\nFROM data\nLIMIT 1000;',
+  postJs: '',
   preset: 'daily' as 'hourly' | 'daily' | 'weekdays' | 'custom',
   time: '09:00',
   customCron: '0 0 9 * * *',
@@ -108,10 +110,28 @@ const currentCron = computed(() => {
     ? `0 ${minute} ${hour} * * MON-FRI`
     : `0 ${minute} ${hour} * * *`
 })
+const TZ_LABELS: Record<string, string> = {
+  'Asia/Shanghai': '中国标准时间',
+  UTC: '协调世界时',
+}
+
+/** 把当前计划配置渲染成人类可读的一句话，避免用户面对裸 6 段 cron。 */
+const cronPreview = computed(() => {
+  const tz = TZ_LABELS[scheduleForm.timezone] ?? scheduleForm.timezone
+  if (scheduleForm.preset === 'hourly') return '每小时整点执行一次'
+  if (scheduleForm.preset === 'custom') {
+    return `自定义 Cron：${scheduleForm.customCron.trim() || '（未填写）'}`
+  }
+  const cadence = scheduleForm.preset === 'weekdays' ? '工作日' : '每天'
+  return `${cadence} ${scheduleForm.time}（${tz}）执行`
+})
+
 const displayedResult = computed(() => resultPage.value ?? tasks.selectedJob?.result ?? null)
 
 let pollTimer: ReturnType<typeof setTimeout> | undefined
 let stopped = false
+let pollFailures = 0
+let refreshPaused = false
 
 onMounted(async () => {
   try {
@@ -139,12 +159,27 @@ watch(
 function schedulePoll() {
   if (stopped) return
   pollTimer = setTimeout(async () => {
-    if (activeTab.value === 'runs') {
-      try {
+    try {
+      if (activeTab.value === 'runs') {
         if (tasks.activeCount > 0) await tasks.loadJobs()
         else await tasks.loadSummary()
-      } catch {
-        // A transient refresh failure should not interrupt the current screen.
+      } else if (activeTab.value === 'schedules') {
+        // 计划页此前从不自动刷新，导致下次运行时间与启停状态静默过期；一并纳入轮询。
+        await tasks.loadSchedules()
+      }
+      // 恢复成功：若此前提示过“自动刷新中断”，明确告知已恢复，避免用户误判数据仍是陈旧的。
+      if (refreshPaused) {
+        refreshPaused = false
+        ElMessage.success('自动刷新已恢复')
+      }
+      pollFailures = 0
+    } catch {
+      // 轮询失败不能中断循环（否则将永久停更），但也不该完全静默。连续失败到阈值时
+      // 提示一次“自动刷新已暂停”，让用户知道当前列表可能不是最新的，随后继续静默重试。
+      pollFailures += 1
+      if (pollFailures >= 3 && !refreshPaused) {
+        refreshPaused = true
+        ElMessage.warning('自动刷新暂时中断，正在后台重试…')
       }
     }
     schedulePoll()
@@ -198,6 +233,12 @@ async function setFilter(value: JobStatus | '') {
   await reloadJobs()
 }
 
+async function clearJobFilters() {
+  tasks.statusFilter = ''
+  tasks.search = ''
+  await reloadJobs()
+}
+
 async function selectJob(id: string) {
   try {
     await tasks.selectJob(id)
@@ -242,23 +283,38 @@ function downloadJobResult(id: string) {
 function openJobDialog() {
   jobForm.tables = defaultBindings()
   jobForm.name = ''
-  jobForm.sql = 'SELECT *\nFROM data\nLIMIT 1000;'
+  jobForm.sql = workspace.currentSql || 'SELECT *\nFROM data\nLIMIT 1000;'
+  jobForm.postJs = workspace.currentPostJs || ''
   jobDialogVisible.value = true
 }
 
 async function createJob() {
+  if (!jobForm.name.trim()) {
+    ElMessage.warning('请输入任务名称')
+    return
+  }
+  if (!jobForm.tables.length) {
+    ElMessage.warning('请至少选择一张查询表')
+    return
+  }
+  if (!jobForm.sql.trim()) {
+    ElMessage.warning('请输入 SQL')
+    return
+  }
   const sourceId = sourceIdForBindings(jobForm.tables)
-  if (!sourceId || !jobForm.tables.length || !jobForm.name.trim() || !jobForm.sql.trim()) {
-    ElMessage.warning('请完整填写任务信息')
+  if (!sourceId) {
+    ElMessage.warning('无法确定数据来源，请重新选择查询表')
     return
   }
   saving.value = true
   try {
+    const postJs = jobForm.postJs.trim() || undefined
     await tasks.createJob({
       sourceId,
       tables: jobForm.tables,
       name: jobForm.name.trim(),
       sql: jobForm.sql.trim(),
+      postJs,
     })
     jobDialogVisible.value = false
     ElMessage.success('任务已加入队列')
@@ -271,10 +327,16 @@ async function createJob() {
 
 async function cancelJob(id: string) {
   try {
+    await ElMessageBox.confirm('停止这个任务？正在执行的查询将被中断，已产生的进度会丢失。', '停止任务', {
+      type: 'warning',
+      confirmButtonText: '停止',
+      cancelButtonText: '取消',
+      confirmButtonClass: 'el-button--danger',
+    })
     await tasks.cancelJob(id)
     ElMessage.success('任务已停止')
   } catch (error) {
-    ElMessage.error(errorMessage(error))
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(errorMessage(error))
   }
 }
 
@@ -293,6 +355,7 @@ async function deleteJob(id: string) {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消',
+      confirmButtonClass: 'el-button--danger',
     })
     await tasks.deleteJob(id)
     ElMessage.success('任务记录已删除')
@@ -305,7 +368,8 @@ function openScheduleDialog(schedule?: ScheduleItem) {
   scheduleForm.id = schedule?.id ?? null
   scheduleForm.tables = schedule?.tables.map((binding) => ({ ...binding })) ?? defaultBindings()
   scheduleForm.name = schedule?.name ?? ''
-  scheduleForm.sql = schedule?.sql ?? 'SELECT *\nFROM data\nLIMIT 1000;'
+  scheduleForm.sql = schedule?.sql ?? (workspace.currentSql || 'SELECT *\nFROM data\nLIMIT 1000;')
+  scheduleForm.postJs = schedule?.postJs ?? (workspace.currentPostJs || '')
   scheduleForm.time = '09:00'
   scheduleForm.timezone = schedule?.timezone ?? 'Asia/Shanghai'
   scheduleForm.enabled = schedule?.enabled ?? true
@@ -323,10 +387,31 @@ function cronPreset(expression: string): 'hourly' | 'daily' | 'weekdays' | 'cust
   return 'custom'
 }
 
+/** 自定义 Cron 的最小结构校验：期望 6 段（秒 分 时 日 月 周），完整语义仍由后端校验。 */
+function isValidCron(expression: string): boolean {
+  return expression.trim().split(/\s+/).length === 6
+}
+
 async function saveSchedule() {
+  if (!scheduleForm.name.trim()) {
+    ElMessage.warning('请输入计划名称')
+    return
+  }
+  if (!scheduleForm.tables.length) {
+    ElMessage.warning('请至少选择一张查询表')
+    return
+  }
+  if (!scheduleForm.sql.trim()) {
+    ElMessage.warning('请输入 SQL')
+    return
+  }
+  if (scheduleForm.preset === 'custom' && !isValidCron(scheduleForm.customCron)) {
+    ElMessage.warning('Cron 需为 6 段（秒 分 时 日 月 周），例如 0 0 9 * * *')
+    return
+  }
   const sourceId = sourceIdForBindings(scheduleForm.tables)
-  if (!sourceId || !scheduleForm.tables.length || !scheduleForm.name.trim() || !scheduleForm.sql.trim() || !currentCron.value) {
-    ElMessage.warning('请完整填写计划信息')
+  if (!sourceId || !currentCron.value) {
+    ElMessage.warning('计划配置不完整')
     return
   }
   const payload: SchedulePayload = {
@@ -334,6 +419,7 @@ async function saveSchedule() {
     tables: scheduleForm.tables,
     name: scheduleForm.name.trim(),
     sql: scheduleForm.sql.trim(),
+    postJs: scheduleForm.postJs.trim() || null,
     cronExpression: currentCron.value,
     timezone: scheduleForm.timezone,
     enabled: scheduleForm.enabled,
@@ -394,6 +480,7 @@ async function deleteSchedule(id: string) {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消',
+      confirmButtonClass: 'el-button--danger',
     })
     await tasks.deleteSchedule(id)
     ElMessage.success('计划已删除')
@@ -482,10 +569,11 @@ async function deleteSchedule(id: string) {
                 {{ job.sourceName }} · {{ job.tables.length }} 张表
               </small>
             </span>
-            <span v-if="job.status === 'running' || job.status === 'queued'" class="job-progress">
+            <span v-if="job.status === 'running'" class="job-progress">
               <span><i :style="{ width: `${job.progress}%` }" /></span>
               <small>{{ job.progress }}%</small>
             </span>
+            <span v-else-if="job.status === 'queued'" class="job-queued">排队中…</span>
             <span v-else class="job-result-count">
               {{ job.resultRowCount === null ? '—' : `${job.resultRowCount.toLocaleString()} 行` }}
             </span>
@@ -493,7 +581,15 @@ async function deleteSchedule(id: string) {
           </button>
           <div v-if="!tasks.jobs.length && !tasks.loading" class="task-empty">
             <ListChecks :size="28" />
-            <span>当前没有任务记录</span>
+            <span v-if="tasks.statusFilter || tasks.search.trim()">没有符合筛选或搜索的任务</span>
+            <span v-else>当前没有任务记录</span>
+            <el-button
+              v-if="tasks.statusFilter || tasks.search.trim()"
+              text
+              @click="clearJobFilters"
+            >
+              清除筛选
+            </el-button>
           </div>
         </div>
       </template>
@@ -616,6 +712,11 @@ async function deleteSchedule(id: string) {
           <pre>{{ tasks.selectedJob.sql }}</pre>
         </section>
 
+        <section v-if="tasks.selectedJob.postJs?.trim()" class="detail-section">
+          <h3>后处理 JS</h3>
+          <pre>{{ tasks.selectedJob.postJs }}</pre>
+        </section>
+
         <section v-if="tasks.selectedJob.errorMessage" class="detail-section task-error">
           <h3>错误</h3>
           <p>{{ tasks.selectedJob.errorMessage }}</p>
@@ -669,7 +770,7 @@ async function deleteSchedule(id: string) {
     <el-dialog v-model="jobDialogVisible" title="新建后台任务" width="620px">
       <el-form label-position="top">
         <el-form-item label="任务名称">
-          <el-input v-model="jobForm.name" maxlength="80" />
+          <el-input v-model="jobForm.name" maxlength="80" @keyup.enter="createJob" />
         </el-form-item>
         <el-form-item label="查询表">
           <TableBindingEditor v-model="jobForm.tables" :tables="workspace.sourceTables" />
@@ -683,6 +784,16 @@ async function deleteSchedule(id: string) {
             />
           </div>
         </el-form-item>
+        <el-form-item label="后处理 JS（可选）">
+          <div class="dialog-sql-editor post-js-dialog-editor">
+            <SqlEditor
+              v-model="jobForm.postJs"
+              language="javascript"
+              :options="editorOptions"
+            />
+          </div>
+          <p class="form-hint">空脚本表示不启用后处理。可用 process(rows, meta) 与 http.request。</p>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="jobDialogVisible = false">取消</el-button>
@@ -693,7 +804,7 @@ async function deleteSchedule(id: string) {
     <el-dialog v-model="scheduleDialogVisible" :title="scheduleForm.id ? '编辑计划' : '新建计划'" width="660px">
       <el-form label-position="top">
         <el-form-item label="计划名称">
-          <el-input v-model="scheduleForm.name" maxlength="80" />
+          <el-input v-model="scheduleForm.name" maxlength="80" @keyup.enter="saveSchedule" />
         </el-form-item>
         <el-form-item label="查询表">
           <TableBindingEditor v-model="scheduleForm.tables" :tables="workspace.sourceTables" />
@@ -713,13 +824,15 @@ async function deleteSchedule(id: string) {
           <el-form-item v-else-if="scheduleForm.preset === 'custom'" label="Cron 表达式">
             <el-input v-model="scheduleForm.customCron" />
           </el-form-item>
-          <el-form-item v-else label="时区">
+          <!-- 时区决定 每天/工作日/自定义 的实际触发时刻，必须对这些预设常显；仅每小时可省略。 -->
+          <el-form-item v-if="scheduleForm.preset !== 'hourly'" label="时区">
             <el-select v-model="scheduleForm.timezone">
               <el-option label="中国标准时间" value="Asia/Shanghai" />
               <el-option label="协调世界时" value="UTC" />
             </el-select>
           </el-form-item>
         </div>
+        <p v-if="cronPreview" class="schedule-cron-preview">{{ cronPreview }}</p>
         <el-form-item label="SQL">
           <div class="dialog-sql-editor schedule-sql-editor">
             <SqlEditor
@@ -729,7 +842,19 @@ async function deleteSchedule(id: string) {
             />
           </div>
         </el-form-item>
-        <el-checkbox v-model="scheduleForm.enabled">创建后立即启用</el-checkbox>
+        <el-form-item label="后处理 JS（可选）">
+          <div class="dialog-sql-editor post-js-dialog-editor">
+            <SqlEditor
+              v-model="scheduleForm.postJs"
+              language="javascript"
+              :options="editorOptions"
+            />
+          </div>
+          <p class="form-hint">计划触发时会将脚本快照写入任务，与 SQL 一并执行。</p>
+        </el-form-item>
+        <el-checkbox v-model="scheduleForm.enabled">
+          {{ scheduleForm.id ? '启用此计划' : '创建后立即启用' }}
+        </el-checkbox>
       </el-form>
       <template #footer>
         <el-button @click="scheduleDialogVisible = false">取消</el-button>

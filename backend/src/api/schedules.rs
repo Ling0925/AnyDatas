@@ -37,7 +37,7 @@ async fn list(
     let rows = sqlx::query_as::<_, ScheduleRow>(
         r#"
         SELECT s.id, s.source_id, d.name AS source_name, s.name, s.sql_text,
-               s.cron_expression, s.timezone, s.enabled, s.next_run_at,
+               s.post_js, s.cron_expression, s.timezone, s.enabled, s.next_run_at,
                s.last_run_at, s.created_at, s.updated_at
         FROM schedules s
         JOIN data_sources d ON d.id = s.source_id
@@ -73,15 +73,16 @@ async fn create(
     sqlx::query(
         r#"
         INSERT INTO schedules (
-            id, source_id, name, sql_text, cron_expression, timezone,
+            id, source_id, name, sql_text, post_js, cron_expression, timezone,
             enabled, next_run_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&id)
     .bind(&bindings.primary_source_id)
     .bind(request.name.trim())
     .bind(request.sql.trim())
+    .bind(normalize_optional_text(request.post_js.as_deref()))
     .bind(request.cron_expression.trim())
     .bind(&request.timezone)
     .bind(request.enabled)
@@ -124,7 +125,7 @@ async fn update(
     sqlx::query(
         r#"
         UPDATE schedules
-        SET source_id = ?, name = ?, sql_text = ?, cron_expression = ?,
+        SET source_id = ?, name = ?, sql_text = ?, post_js = ?, cron_expression = ?,
             timezone = ?, enabled = ?, next_run_at = ?, updated_at = ?
         WHERE id = ?
         "#,
@@ -132,6 +133,7 @@ async fn update(
     .bind(&bindings.primary_source_id)
     .bind(request.name.trim())
     .bind(request.sql.trim())
+    .bind(normalize_optional_text(request.post_js.as_deref()))
     .bind(request.cron_expression.trim())
     .bind(&request.timezone)
     .bind(request.enabled)
@@ -192,6 +194,7 @@ async fn run_now(
         &tables,
         &schedule.name,
         &schedule.sql_text,
+        schedule.post_js.as_deref(),
         Some(&schedule.id),
         "manual_schedule",
     )
@@ -249,6 +252,12 @@ async fn hydrate_schedule(state: &SharedState, row: ScheduleRow) -> AppResult<Sc
     Ok(schedule)
 }
 
+fn normalize_optional_text(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 pub fn next_run(expression: &str, timezone: &str) -> AppResult<Option<String>> {
     let schedule = Schedule::from_str(expression.trim())
         .map_err(|error| AppError::BadRequest(format!("Cron 表达式无效: {error}")))?;
@@ -268,7 +277,7 @@ pub async fn required_schedule(
     sqlx::query_as::<_, ScheduleRow>(
         r#"
         SELECT s.id, s.source_id, d.name AS source_name, s.name, s.sql_text,
-               s.cron_expression, s.timezone, s.enabled, s.next_run_at,
+               s.post_js, s.cron_expression, s.timezone, s.enabled, s.next_run_at,
                s.last_run_at, s.created_at, s.updated_at
         FROM schedules s
         JOIN data_sources d ON d.id = s.source_id

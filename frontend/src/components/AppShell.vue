@@ -7,8 +7,10 @@ import {
   ChevronDown,
   Database,
   FileSpreadsheet,
+  FolderSync,
   ListChecks,
   LogOut,
+  ServerCog,
   Settings2,
   Sparkles,
 } from '@lucide/vue'
@@ -27,8 +29,10 @@ const aiSettingsVisible = ref(false)
 const activePath = computed(() => {
   if (route.path.startsWith('/tasks')) return '/tasks'
   if (route.path.startsWith('/agent')) return '/agent'
+  if (route.path.startsWith('/file-sources')) return '/file-sources'
   return '/workbench'
 })
+const hasDesktop = Boolean((window as { desktop?: unknown }).desktop)
 const initials = computed(() => auth.user?.name.trim().slice(0, 2).toUpperCase() || 'U')
 const canManageAi = computed(() => auth.user?.role === 'owner' || auth.user?.role === 'admin')
 const roleLabels: Record<WorkspaceRole, string> = {
@@ -39,6 +43,10 @@ const roleLabels: Record<WorkspaceRole, string> = {
 }
 
 async function handleUserCommand(command: string) {
+  if (command === 'backend' && hasDesktop) {
+    await router.push({ path: '/connection', query: { change: '1' } })
+    return
+  }
   if (command !== 'logout' || loggingOut.value) return
   loggingOut.value = true
   try {
@@ -61,10 +69,11 @@ async function handleUserCommand(command: string) {
         <span>AnyDatas</span>
       </button>
 
-      <nav class="workspace-switch" aria-label="工作区">
+      <nav class="workspace-switch" aria-label="主导航">
         <button
           type="button"
           :class="{ active: activePath === '/workbench' }"
+          :aria-current="activePath === '/workbench' ? 'page' : undefined"
           @click="router.push('/workbench')"
         >
           <Database :size="16" />
@@ -73,6 +82,7 @@ async function handleUserCommand(command: string) {
         <button
           type="button"
           :class="{ active: activePath === '/agent' }"
+          :aria-current="activePath === '/agent' ? 'page' : undefined"
           @click="router.push('/agent')"
         >
           <Sparkles :size="16" />
@@ -81,10 +91,20 @@ async function handleUserCommand(command: string) {
         <button
           type="button"
           :class="{ active: activePath === '/tasks' }"
+          :aria-current="activePath === '/tasks' ? 'page' : undefined"
           @click="router.push('/tasks')"
         >
           <ListChecks :size="16" />
           后台任务
+        </button>
+        <button
+          v-if="hasDesktop"
+          type="button"
+          :class="{ active: activePath === '/file-sources' }"
+          @click="router.push('/file-sources')"
+        >
+          <FolderSync :size="16" />
+          文件采集
         </button>
       </nav>
 
@@ -120,7 +140,11 @@ async function handleUserCommand(command: string) {
                 <strong>{{ auth.user?.name }}</strong>
                 <span>{{ auth.user?.email }}</span>
               </li>
-              <el-dropdown-item command="logout" divided :disabled="loggingOut">
+              <el-dropdown-item v-if="hasDesktop" command="backend" divided>
+                <ServerCog :size="15" />
+                运行模式
+              </el-dropdown-item>
+              <el-dropdown-item command="logout" :divided="!hasDesktop" :disabled="loggingOut">
                 <LogOut :size="15" />
                 退出登录
               </el-dropdown-item>
