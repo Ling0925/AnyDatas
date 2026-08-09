@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
@@ -30,6 +30,9 @@ const form = reactive({
   password: '',
   passwordConfirmation: '',
 })
+type ValidationField = 'email' | 'name' | 'workspaceName' | 'password' | 'passwordConfirmation'
+const validationError = ref('')
+const validationField = ref<ValidationField | null>(null)
 
 /**
  * 根据服务端状态切换“首次初始化”和“普通登录”模式。
@@ -46,29 +49,67 @@ const isSetup = computed(() => auth.setupRequired)
 const submitLabel = computed(() => (isSetup.value ? '创建并进入工作区' : '登录'))
 
 /**
+ * 持久展示客户端校验错误，并记录需要标红的字段。
+ * 为什么这么做：顶部 Toast 容易被用户错过；好处：按钮点击后错误会留在表单内，直到用户开始修正。
+ */
+function setValidationError(field: ValidationField, message: string) {
+  validationField.value = field
+  validationError.value = message
+}
+
+/**
+ * 用户修改任意字段时清除旧提示。
+ * 为什么这么做：错误对应的是上一次提交快照；好处：修正后不会继续显示已经过期的红色状态。
+ */
+function clearValidationError() {
+  validationField.value = null
+  validationError.value = ''
+}
+
+/**
+ * 按页面展示顺序校验认证表单，并把第一个问题固定显示在对应字段。
+ * 为什么这么做：浏览器原生校验可能直接拦截 submit 且提示不明显；好处：网页和 Electron 都获得一致的中文反馈。
+ */
+function validateForm() {
+  if (isSetup.value && !form.name.trim()) {
+    setValidationError('name', '请输入管理员姓名')
+    return false
+  }
+  if (isSetup.value && !form.workspaceName.trim()) {
+    setValidationError('workspaceName', '请输入工作区名称')
+    return false
+  }
+  if (!form.email.trim()) {
+    setValidationError('email', '请输入邮箱')
+    return false
+  }
+  if (!/^\S+@\S+\.\S+$/u.test(form.email.trim())) {
+    setValidationError('email', '请输入有效的邮箱地址')
+    return false
+  }
+  if (!form.password) {
+    setValidationError('password', '请输入密码')
+    return false
+  }
+  if (isSetup.value && form.password.length < 12) {
+    setValidationError('password', `密码至少需要 12 位，当前为 ${form.password.length} 位`)
+    return false
+  }
+  if (isSetup.value && form.password !== form.passwordConfirmation) {
+    setValidationError('passwordConfirmation', '两次输入的密码不一致')
+    return false
+  }
+  clearValidationError()
+  return true
+}
+
+/**
  * 校验并提交登录或首次初始化表单。
  * 为什么这么做：沿用既有校验、接口和安全重定向规则，避免视觉重构改变认证行为；
  * 好处：新页面只承担展示升级，登录、初始化和错误反馈仍保持原有可靠路径。
  */
 async function submit() {
-  if (!form.email.trim() || !form.password) {
-    ElMessage.warning('请输入邮箱和密码')
-    return
-  }
-  if (isSetup.value) {
-    if (!form.name.trim() || !form.workspaceName.trim()) {
-      ElMessage.warning('请完整填写管理员与工作区信息')
-      return
-    }
-    if (form.password.length < 12) {
-      ElMessage.warning('密码至少需要 12 位')
-      return
-    }
-    if (form.password !== form.passwordConfirmation) {
-      ElMessage.warning('两次输入的密码不一致')
-      return
-    }
-  }
+  if (!validateForm()) return
 
   try {
     if (isSetup.value) {
@@ -87,7 +128,9 @@ async function submit() {
       : '/workbench'
     await router.replace(redirect)
   } catch (error) {
-    ElMessage.error(errorMessage(error))
+    validationField.value = null
+    validationError.value = errorMessage(error)
+    ElMessage.error(validationError.value)
   }
 }
 </script>
@@ -177,35 +220,46 @@ async function submit() {
           show-icon
         />
 
-        <form class="auth-form" @submit.prevent="submit">
-          <label v-if="isSetup" class="auth-field">
+        <form class="auth-form" novalidate @input="clearValidationError" @submit.prevent="submit">
+          <el-alert
+            v-if="validationError"
+            class="auth-alert auth-validation-alert"
+            :title="validationError"
+            type="error"
+            :closable="false"
+            show-icon
+          />
+
+          <label v-if="isSetup" class="auth-field" :class="{ 'is-invalid': validationField === 'name' }">
             <span>管理员姓名</span>
-            <el-input v-model="form.name" size="large" autocomplete="name" maxlength="80">
+            <el-input v-model="form.name" size="large" autocomplete="name" maxlength="80" :aria-invalid="validationField === 'name'">
               <template #prefix><UserRound :size="16" /></template>
             </el-input>
           </label>
 
-          <label v-if="isSetup" class="auth-field">
+          <label v-if="isSetup" class="auth-field" :class="{ 'is-invalid': validationField === 'workspaceName' }">
             <span>工作区名称</span>
-            <el-input v-model="form.workspaceName" size="large" autocomplete="organization" maxlength="80">
+            <el-input v-model="form.workspaceName" size="large" autocomplete="organization" maxlength="80" :aria-invalid="validationField === 'workspaceName'">
               <template #prefix><Building2 :size="16" /></template>
             </el-input>
           </label>
 
-          <label class="auth-field">
+          <label class="auth-field" :class="{ 'is-invalid': validationField === 'email' }">
             <span>邮箱</span>
-            <el-input v-model="form.email" size="large" type="email" autocomplete="email">
+            <el-input v-model="form.email" size="large" type="email" autocomplete="email" :aria-invalid="validationField === 'email'">
               <template #prefix><Mail :size="16" /></template>
             </el-input>
           </label>
 
-          <label class="auth-field">
+          <label class="auth-field" :class="{ 'is-invalid': validationField === 'password' }">
             <span>密码</span>
             <el-input
               v-model="form.password"
               size="large"
               type="password"
+              :minlength="isSetup ? 12 : undefined"
               :autocomplete="isSetup ? 'new-password' : 'current-password'"
+              :aria-invalid="validationField === 'password'"
               show-password
             >
               <template #prefix><LockKeyhole :size="16" /></template>
@@ -213,13 +267,14 @@ async function submit() {
             <small v-if="isSetup">至少 12 位</small>
           </label>
 
-          <label v-if="isSetup" class="auth-field">
+          <label v-if="isSetup" class="auth-field" :class="{ 'is-invalid': validationField === 'passwordConfirmation' }">
             <span>确认密码</span>
             <el-input
               v-model="form.passwordConfirmation"
               size="large"
               type="password"
               autocomplete="new-password"
+              :aria-invalid="validationField === 'passwordConfirmation'"
               show-password
             >
               <template #prefix><LockKeyhole :size="16" /></template>
@@ -603,6 +658,10 @@ async function submit() {
   margin-bottom: 18px;
 }
 
+.auth-validation-alert {
+  margin-bottom: 0;
+}
+
 .auth-form {
   display: grid;
   gap: 16px;
@@ -622,6 +681,15 @@ async function submit() {
   color: var(--muted);
   font-size: 10px;
   font-weight: 500;
+}
+
+.auth-field.is-invalid > span {
+  color: var(--el-color-danger);
+}
+
+.auth-field.is-invalid :deep(.el-input__wrapper) {
+  border-color: var(--el-color-danger);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--el-color-danger) 14%, transparent);
 }
 
 .auth-field :deep(.el-input__wrapper) {
