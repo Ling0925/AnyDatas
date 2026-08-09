@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
@@ -403,7 +403,9 @@ pub async fn call_chat(
     reasoning_effort: &str,
     stream_sink: Option<mpsc::UnboundedSender<AssistantStreamUpdate>>,
 ) -> AppResult<AssistantTurn> {
-    let endpoint = validate_base_url_network(state, &settings.base_url).await?;
+    let resolved = validate_base_url_network(state, &settings.base_url).await?;
+    let request_timeout = std::time::Duration::from_secs(state.agent_timeout_seconds);
+    let client = resolved.pinned_client(request_timeout)?;
     let request_chars = messages
         .iter()
         .filter_map(|message| message.content.as_deref())
@@ -420,10 +422,9 @@ pub async fn call_chat(
     );
     let mut include_reasoning_effort = settings.reasoning_effort_supported.load(Ordering::Relaxed);
     let response = loop {
-        let mut request = state
-            .http_client
-            .post(endpoint.clone())
-            .timeout(std::time::Duration::from_secs(state.agent_timeout_seconds))
+        let mut request = client
+            .post(resolved.url.clone())
+            .timeout(request_timeout)
             .json(&ChatCompletionRequest {
                 model: &settings.model,
                 messages,
@@ -670,11 +671,36 @@ fn chat_endpoint(base_url: &str) -> AppResult<Url> {
     Url::parse(&endpoint).map_err(|_| AppError::BadRequest("Chat 接口地址无效".to_owned()))
 }
 
+/// 经私网校验后的出站目标：保留原始 URL（HTTPS 的 SNI 与证书校验仍用主机名），同时携带
+/// 已核验的具体地址，供请求阶段把 DNS 固定到这些 IP。
+pub struct ResolvedEndpoint {
+    pub url: Url,
+    host: String,
+    socket_addrs: Vec<SocketAddr>,
+}
+
+impl ResolvedEndpoint {
+    /// 构建一次性 HTTP 客户端，把目标主机名固定解析到校验时得到的 IP，从而堵住
+    /// “校验用一次 DNS、请求时再解析到 169.254.169.254/内网” 的 rebinding TOCTOU；
+    /// 同时保留禁止重定向。主机名本身是 IP 字面量时该固定是等价 no-op。
+    fn pinned_client(&self, request_timeout: Duration) -> AppResult<reqwest::Client> {
+        reqwest::Client::builder()
+            .timeout(request_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve_to_addrs(&self.host, &self.socket_addrs)
+            .build()
+            .map_err(|error| AppError::Internal(format!("无法初始化受限 HTTP 客户端: {error}")))
+    }
+}
+
 /// 解析 OpenAI-compatible 地址并拒绝默认不可访问的本机、私网和保留网段。
 ///
-/// DNS 校验与禁止重定向共同缩小 SSRF 面；确需连接局域网模型时必须由部署者显式
-/// 开启环境变量，工作区管理员不能自行扩大服务器网络权限。
-pub async fn validate_base_url_network(state: &SharedState, base_url: &str) -> AppResult<Url> {
+/// DNS 校验、禁止重定向与“请求阶段固定到已核验 IP”共同缩小 SSRF 面；确需连接局域网模型时
+/// 必须由部署者显式开启环境变量，工作区管理员不能自行扩大服务器网络权限。
+pub async fn validate_base_url_network(
+    state: &SharedState,
+    base_url: &str,
+) -> AppResult<ResolvedEndpoint> {
     let endpoint = chat_endpoint(base_url)?;
     let host = endpoint
         .host_str()
@@ -718,7 +744,16 @@ pub async fn validate_base_url_network(state: &SharedState, base_url: &str) -> A
             "公网 AI 接口必须使用 HTTPS".to_owned(),
         ));
     }
-    Ok(endpoint)
+    let socket_addrs = addresses
+        .into_iter()
+        .map(|address| SocketAddr::new(address, port))
+        .collect();
+    let host = host.to_owned();
+    Ok(ResolvedEndpoint {
+        url: endpoint,
+        host,
+        socket_addrs,
+    })
 }
 
 /// 按字符压缩上游错误，避免代理返回整页 HTML 时污染 API 响应。

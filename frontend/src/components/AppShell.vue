@@ -64,10 +64,11 @@ async function handleUserCommand(command: string) {
         <span>AnyDatas</span>
       </button>
 
-      <nav class="workspace-switch" aria-label="工作区">
+      <nav class="workspace-switch" aria-label="主导航">
         <button
           type="button"
           :class="{ active: activePath === '/workbench' }"
+          :aria-current="activePath === '/workbench' ? 'page' : undefined"
           @click="router.push('/workbench')"
         >
           <Database :size="16" />
@@ -76,6 +77,7 @@ async function handleUserCommand(command: string) {
         <button
           type="button"
           :class="{ active: activePath === '/agent' }"
+          :aria-current="activePath === '/agent' ? 'page' : undefined"
           @click="router.push('/agent')"
         >
           <Sparkles :size="16" />
@@ -84,6 +86,7 @@ async function handleUserCommand(command: string) {
         <button
           type="button"
           :class="{ active: activePath === '/tasks' }"
+          :aria-current="activePath === '/tasks' ? 'page' : undefined"
           @click="router.push('/tasks')"
         >
           <ListChecks :size="16" />

@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 
 import { api } from '../api'
 import type {
+  AgentChartSpec,
   DataSource,
   ImportInspection,
   InspectImportTablePayload,
@@ -43,9 +44,21 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const currentPostJs = ref('')
   const preview = ref<PreviewResponse | null>(null)
   const queryResult = ref<QueryResponse | null>(null)
+  // AI 建议的图表配置：由 Agent「应用」候选 SQL 时写入，供结果区按列名渲染；
+  // runQuery 不清除它（应用图表触发的那次运行需要保留），手动切换上下文时清空。
+  const appliedChart = ref<AgentChartSpec | null>(null)
+  function setAppliedChart(spec: AgentChartSpec | null) {
+    appliedChart.value = spec
+  }
   const savedQueries = ref<SavedQuery[]>([])
   const selectedSavedQueryId = ref<string | null>(null)
   const sourceLoading = ref(false)
+  // 空态里的「上传」入口可能在中心区，而文件 input 归属侧栏；用一个自增信号让任意空态
+  // 都能触发侧栏打开文件选择框，无需跨组件传 ref。
+  const uploadRequestId = ref(0)
+  function requestUpload() {
+    uploadRequestId.value += 1
+  }
   const previewLoading = ref(false)
   const queryLoading = ref(false)
   const uploadLoading = ref(false)
@@ -441,6 +454,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     if (!query) return
     currentSql.value = query.sql
     currentPostJs.value = query.postJs ?? ''
+    appliedChart.value = null
     await setQueryContext(query.tables)
   }
 
@@ -503,6 +517,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const escapedName = name.replaceAll('"', '""')
     const tableAlias = queryBindings.value[0]?.alias ?? 'data'
     currentSql.value = `SELECT *,\n  ${expression} AS "${escapedName}"\nFROM ${tableAlias}\nLIMIT 200;`
+    appliedChart.value = null
   }
 
   /** 返回文件的默认逻辑表，旧 SQL 和首次打开都以它作为 data 绑定。 */
@@ -585,6 +600,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     selectedTable,
     preview,
     queryResult,
+    appliedChart,
+    setAppliedChart,
     queryBindings,
     boundTables,
     primarySourceId,
@@ -597,6 +614,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     selectedSavedQueryId,
     selectedSavedQuery,
     sourceLoading,
+    uploadRequestId,
+    requestUpload,
     previewLoading,
     queryLoading,
     uploadLoading,

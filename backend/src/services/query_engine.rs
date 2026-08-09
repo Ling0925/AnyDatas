@@ -447,7 +447,13 @@ pub fn write_artifact_csv(
         writer.flush()?;
         return Ok(());
     }
-    writer.write_record(&names)?;
+    // 结果列名来自上传文件的表头，同样可能以公式字符开头（如 =HYPERLINK(...)），必须与数据值
+    // 一样中和，否则他人下载 CSV 后在 Excel 打开表头即被当作公式执行。
+    let header = names
+        .iter()
+        .map(|name| neutralize_csv_formula(name))
+        .collect::<Vec<_>>();
+    writer.write_record(&header)?;
     while let Some(row) = rows.next()? {
         let record = (0..names.len())
             .map(|index| {
@@ -555,13 +561,21 @@ pub fn validate_alias(alias: &str) -> Result<()> {
 }
 
 /// 计算配置内容的稳定缓存键；同一逻辑表更新版本后自然生成新文件，旧查询不会读到脏缓存。
+///
+/// 每个变长字段前置其字节长度做域分隔：否则无分隔拼接会让 (sheet="AB", start="C1") 与
+/// (sheet="A", start="BC1") 得到相同哈希，第二次查询命中第一次的缓存并静默返回错误区间数据。
 fn source_cache_key(source: &QuerySource) -> String {
     let mut digest = Sha256::new();
-    digest.update(source.table_id.as_bytes());
+    for field in [
+        source.table_id.as_bytes(),
+        source.sheet.as_bytes(),
+        source.start_cell.as_bytes(),
+        source.end_cell.as_deref().unwrap_or("").as_bytes(),
+    ] {
+        digest.update((field.len() as u64).to_le_bytes());
+        digest.update(field);
+    }
     digest.update(source.config_version.to_le_bytes());
-    digest.update(source.sheet.as_bytes());
-    digest.update(source.start_cell.as_bytes());
-    digest.update(source.end_cell.as_deref().unwrap_or("").as_bytes());
     digest.update([u8::from(source.first_row_as_header)]);
     hex::encode(digest.finalize())
 }
@@ -799,16 +813,64 @@ pub fn validate_read_only_sql(sql: &str) -> Result<()> {
     if !(lowered.starts_with("select") || lowered.starts_with("with")) {
         bail!("仅允许 SELECT 或 WITH 查询");
     }
-    if clean.contains(';') {
+    // 关键字黑名单与分号检查只作用于剥离了字符串字面量、引用标识符和注释后的“结构性 SQL”，
+    // 避免把出现在数据值或列名里的英文单词（'update'、'load'、'set' 等）误判为文件/DDL 操作。
+    // 真正的隔离由引擎层 enable_external_access=false + 只读 ATTACH 保证，黑名单只是二次防御。
+    let structural = strip_sql_literals_and_comments(clean);
+    if structural.contains(';') {
         bail!("一次只能执行一条查询");
     }
     let forbidden = Regex::new(
         r"(?i)\b(attach|copy|install|load|call|pragma|create|insert|update|delete|drop|alter|export|import|set|read_csv|read_csv_auto|read_parquet|read_json|read_ndjson|glob)\b",
     )?;
-    if forbidden.is_match(clean) {
+    if forbidden.is_match(&structural) {
         bail!("查询包含不允许的文件或数据库操作");
     }
     Ok(())
+}
+
+/// 去除单引号字符串字面量、双引号标识符与 SQL 注释，仅保留可安全应用关键字黑名单的结构骨架。
+/// 引号内的 `''` / `""` 转义会被正确跳过；结果只用于校验，不会被执行。
+fn strip_sql_literals_and_comments(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    while let Some(current) = chars.next() {
+        match current {
+            '\'' | '"' => {
+                out.push(' ');
+                while let Some(inner) = chars.next() {
+                    if inner == current {
+                        if chars.peek() == Some(&current) {
+                            chars.next();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            }
+            '-' if chars.peek() == Some(&'-') => {
+                for inner in chars.by_ref() {
+                    if inner == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut previous = '\0';
+                for inner in chars.by_ref() {
+                    if previous == '*' && inner == '/' {
+                        break;
+                    }
+                    previous = inner;
+                }
+                out.push(' ');
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 struct QueryWorkspace {
@@ -976,15 +1038,25 @@ fn display_value(value: &Value) -> String {
     }
 }
 
+/// f64 尾数只有 53 位，超过 2^53 的整数无法被精确表示。
+const MAX_EXACT_F64_INTEGER: f64 = 9_007_199_254_740_992.0;
+
 fn integer_value(value: &Value) -> Option<i64> {
     if let Some(value) = value.as_i64() {
         return Some(value);
     }
-    let number = value.as_str()?.trim().parse::<f64>().ok()?;
-    (number.is_finite()
-        && number.fract() == 0.0
-        && number >= i64::MIN as f64
-        && number <= i64::MAX as f64)
+    let text = value.as_str()?.trim();
+    // 先做精确整数解析，与字段类型推断 (spreadsheet::infer_fields) 使用的 parse::<i64>()
+    // 保持一致；否则 18 位身份证号、16-19 位银行卡/订单/雪花 ID 会在经 f64 转换时被静默舍入
+    // （例如 110101199003074258 变成 110101199003074256），破坏后续 JOIN/GROUP BY/导出。
+    if let Ok(value) = text.parse::<i64>() {
+        return Some(value);
+    }
+    // 仅为兼容 "42.0" 这类以小数写法书写的整数才回退浮点；超过 f64 精确整数范围的值无法
+    // 安全表示，宁可让转换显式失败也不静默取近似（旧实现的 `<= i64::MAX as f64` 上界等于
+    // 2^63，会把 (i64::MAX, 2^63) 的值饱和成 i64::MAX）。
+    let number = text.parse::<f64>().ok()?;
+    (number.is_finite() && number.fract() == 0.0 && number.abs() <= MAX_EXACT_F64_INTEGER)
         .then_some(number as i64)
 }
 
@@ -1114,16 +1186,20 @@ fn duck_value_to_json(value: DuckValue) -> Value {
     }
 }
 
+/// 中和电子表格公式注入：以公式触发字符开头的文本前置单引号。触发集除 `= + - @` 外，
+/// 还包含制表符和回车——它们同样是标准 CSV 注入字符集的一部分。
+fn neutralize_csv_formula(value: &str) -> String {
+    if value.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{value}")
+    } else {
+        value.to_owned()
+    }
+}
+
 fn duck_value_to_csv(value: DuckValue) -> String {
     match value {
         DuckValue::Null => String::new(),
-        DuckValue::Text(value) | DuckValue::Enum(value) => {
-            if value.starts_with(['=', '+', '-', '@']) {
-                format!("'{value}")
-            } else {
-                value
-            }
-        }
+        DuckValue::Text(value) | DuckValue::Enum(value) => neutralize_csv_formula(&value),
         value => match duck_value_to_json(value) {
             Value::Null => String::new(),
             Value::String(value) => value,
@@ -1173,6 +1249,67 @@ mod tests {
             result.response.rows,
             vec![vec![Value::from("00123")], vec![Value::from("00456")]]
         );
+    }
+
+    #[test]
+    fn preserves_large_integers_beyond_f64_precision() {
+        // 18 位身份证号超过 2^53，旧实现经 f64 会舍入为相邻值。
+        assert_eq!(
+            integer_value(&Value::String("110101199003074258".to_owned())),
+            Some(110_101_199_003_074_258)
+        );
+        assert_eq!(integer_value(&Value::from(42_i64)), Some(42));
+        // 以小数写法书写的整数仍兼容。
+        assert_eq!(integer_value(&Value::String("42.0".to_owned())), Some(42));
+        // 超过 f64 精确整数范围的值无法安全表示，应显式失败而非静默饱和。
+        assert_eq!(
+            integer_value(&Value::String("99999999999999999999".to_owned())),
+            None
+        );
+        assert_eq!(
+            integer_value(&Value::String("not-a-number".to_owned())),
+            None
+        );
+    }
+
+    #[test]
+    fn read_only_validator_ignores_keywords_inside_literals_and_comments() {
+        // 关键字出现在字符串字面量里应当放行。
+        validate_read_only_sql(
+            "SELECT status FROM data WHERE status IN ('create', 'update', 'delete')",
+        )
+        .unwrap();
+        validate_read_only_sql("SELECT * FROM data WHERE note = 'has ; semicolon'").unwrap();
+        validate_read_only_sql("SELECT 1 -- drop everything\nFROM data").unwrap();
+        // 真正的多语句与危险操作仍被拒绝。
+        assert!(validate_read_only_sql("SELECT 1; DROP TABLE data").is_err());
+        assert!(validate_read_only_sql("SELECT * FROM read_csv('x.csv')").is_err());
+        assert!(validate_read_only_sql("PRAGMA database_list").is_err());
+    }
+
+    #[test]
+    fn cache_key_is_domain_separated_across_field_boundaries() {
+        let path = PathBuf::from("/tmp/anydatas-cache-key-test.xlsx");
+        let mut first = csv_source(&path, "same-table", "data");
+        first.file_kind = "excel".to_owned();
+        first.sheet = "AB".to_owned();
+        first.start_cell = "C1".to_owned();
+        let mut second = first.clone();
+        second.sheet = "A".to_owned();
+        second.start_cell = "BC1".to_owned();
+        assert_ne!(source_cache_key(&first), source_cache_key(&second));
+        // 相同配置仍得到相同键，保证缓存复用。
+        assert_eq!(source_cache_key(&first), source_cache_key(&first.clone()));
+    }
+
+    #[test]
+    fn neutralizes_csv_formula_triggers() {
+        assert_eq!(
+            neutralize_csv_formula("=cmd|'/C calc'!A1"),
+            "'=cmd|'/C calc'!A1"
+        );
+        assert_eq!(neutralize_csv_formula("\t=1+1"), "'\t=1+1");
+        assert_eq!(neutralize_csv_formula("正常列名"), "正常列名");
     }
 
     #[test]
@@ -1587,7 +1724,4 @@ mod tests {
             max_artifact_bytes: 512 * 1024 * 1024,
         }
     }
-
-
-
 }

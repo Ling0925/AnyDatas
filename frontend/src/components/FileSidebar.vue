@@ -72,6 +72,9 @@ watch(
   { immediate: true },
 )
 
+// 允许其它区域（如中心空态的主按钮）通过 store 信号打开文件选择框。
+watch(() => store.uploadRequestId, () => fileInput.value?.click())
+
 /** 格式化文件大小，紧凑展示不会挤压文件和 Sheet 名称。 */
 function formatSize(bytes: number): string {
   if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`
@@ -287,6 +290,7 @@ async function removeSource(id: string, name: string) {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消',
+      confirmButtonClass: 'el-button--danger',
     })
     await store.deleteSource(id)
     ElMessage.success('文件已删除')
@@ -391,7 +395,21 @@ async function removeSource(id: string, name: string) {
       </div>
       <div v-if="!filteredSources.length && !store.sourceLoading" class="sidebar-empty">
         <FileSpreadsheet :size="26" />
-        <span>{{ store.sources.length ? '没有匹配的文件或工作表' : '上传文件开始分析' }}</span>
+        <template v-if="store.sources.length">
+          <span>没有匹配的文件或工作表</span>
+        </template>
+        <template v-else>
+          <span>还没有数据文件</span>
+          <el-button
+            type="primary"
+            :loading="store.uploadLoading"
+            @click="fileInput?.click()"
+          >
+            <Upload :size="15" />
+            上传文件
+          </el-button>
+          <small>支持 Excel（.xlsx/.xls/.xlsb/.ods）与 CSV</small>
+        </template>
       </div>
     </div>
   </aside>

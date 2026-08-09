@@ -31,10 +31,6 @@ async fn main() -> anyhow::Result<()> {
     tokio::fs::create_dir_all(config.upload_dir()).await?;
     tokio::fs::create_dir_all(config.staging_dir()).await?;
     let secret_key = services::secrets::load_or_create(&config.data_dir)?;
-    let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(90))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
     let pool = db::connect(&config.database_url).await?;
     db::recover_interrupted_jobs(&pool).await?;
     db::recover_interrupted_agent_runs(&pool).await?;
@@ -48,7 +44,6 @@ async fn main() -> anyhow::Result<()> {
         metrics_token: config.metrics_token.clone(),
         allow_private_ai_endpoints: config.allow_private_ai_endpoints,
         secret_key,
-        http_client,
         query_control: Default::default(),
         cache_build_locks: Default::default(),
         query_semaphore: Arc::new(Semaphore::new(config.query_max_concurrency)),

@@ -27,6 +27,7 @@ import { api, errorMessage } from '../api'
 import { useAuthStore } from '../stores/auth'
 import { useWorkspaceStore } from '../stores/workspace'
 import type {
+  AgentChartSpec,
   AiAgentConversationDetail,
   AiAgentConversationSummary,
   AiAgentMessage,
@@ -38,10 +39,11 @@ import type {
 import AiMarkdown from './AiMarkdown.vue'
 import AiAgentTimeline from './AiAgentTimeline.vue'
 import AiResultPreview from './AiResultPreview.vue'
+import AiChartPreview from './AiChartPreview.vue'
 
 const emit = defineEmits<{
-  applySql: [sql: string]
-  runSql: [sql: string]
+  applySql: [payload: { sql: string; chart?: AgentChartSpec }]
+  runSql: [payload: { sql: string; chart?: AgentChartSpec }]
 }>()
 
 const auth = useAuthStore()
@@ -114,6 +116,20 @@ const canUseAgentSql = computed(() => Boolean(
   && currentContextReady.value
   && !contextChanged.value,
 ))
+/** 当发送被禁用时给出可读原因，避免按钮静默置灰让人以为界面坏了。 */
+const sendDisabledReason = computed(() => {
+  if (sending.value) return ''
+  if (contextChanged.value) return '数据上下文已变更，请先按新选择继续或恢复原选择'
+  if (!currentContextReady.value) return '所选表格无效或超过 16 张，请调整右侧数据上下文'
+  if (!draft.value.trim()) return '请先输入问题'
+  return ''
+})
+const sqlDisabledReason = computed(() => {
+  if (contextChanged.value) return '数据上下文已变更，请先确认或恢复选择'
+  if (!store.agentTableBindings.length) return '当前为纯对话模式，请先在右侧选择数据表'
+  if (!currentContextReady.value) return '所选表格无效或超过 16 张'
+  return ''
+})
 const starterPrompts = computed(() => (
   store.agentTableBindings.length ? dataStarterPrompts : generalStarterPrompts
 ))
@@ -127,7 +143,8 @@ const workbenchContextMatches = computed(() => {
 })
 const slashCommandVisible = computed(() => {
   const value = draft.value.trim().toLocaleLowerCase()
-  return value === '/' || (value.startsWith('/') && '/all'.startsWith(value))
+  if (value === '/') return true
+  return value.startsWith('/') && ['/all', '/clear'].some((command) => command.startsWith(value))
 })
 const contextLabel = computed(() => {
   const tables = store.agentTableBindings.length
@@ -509,6 +526,16 @@ async function retryRun() {
   }
 }
 
+/**
+ * 判断某条助手消息对应的 Run 是否失败/取消：这类 Run 即便已产出部分回复，也应显示可见的
+ * 重试入口，而不是只在“完全没有回复”时才可重试。
+ */
+function messageRunFailed(message: AiAgentMessage): boolean {
+  const run = activeRun.value
+  if (!run || message.role !== 'assistant') return false
+  return run.assistantMessageId === message.id && ['failed', 'canceled'].includes(run.status)
+}
+
 /** 从指定助手答复处分叉，后端负责 superseded 标记和历史摘要重建。 */
 async function regenerateMessage(message: AiAgentMessage) {
   const conversation = activeConversation.value
@@ -613,7 +640,7 @@ async function previewSql(message: AiAgentMessage) {
 }
 
 /** 将候选 SQL 交给父工作台应用，编辑器和正式结果区仍保持单一状态来源。 */
-function applySql(sql: string) {
+function applySql(sql: string, chart?: AgentChartSpec) {
   if (!canUseAgentSql.value) {
     ElMessage.warning(
       contextChanged.value
@@ -622,11 +649,11 @@ function applySql(sql: string) {
     )
     return
   }
-  emit('applySql', sql)
+  emit('applySql', { sql, chart })
 }
 
 /** 将候选 SQL 应用并运行，Agent 的小样本工具结果不会替代正式查询结果。 */
-function runSql(sql: string, messageId?: string) {
+function runSql(sql: string, chart: AgentChartSpec | undefined, messageId: string) {
   if (!canUseAgentSql.value) {
     ElMessage.warning(
       contextChanged.value
@@ -635,11 +662,11 @@ function runSql(sql: string, messageId?: string) {
     )
     return
   }
-  applyingRunId.value = messageId ?? 'running'
-  emit('runSql', sql)
+  applyingRunId.value = messageId
+  emit('runSql', { sql, chart })
   // 父组件异步跑完后会跳转；若仍留在本页，短延迟后清 loading，避免按钮卡死。
   window.setTimeout(() => {
-    if (applyingRunId.value === (messageId ?? 'running')) applyingRunId.value = null
+    if (applyingRunId.value === messageId) applyingRunId.value = null
   }, 120_000)
 }
 
@@ -662,6 +689,16 @@ async function applyAllTablesCommand(sendRemaining = false) {
   if (sendRemaining && draft.value.trim()) await sendMessage()
 }
 
+/** `/clear` 命令：清空表格选择回到纯对话模式，命令文本本身不会发送给 AI。 */
+function applyClearCommand() {
+  store.clearAgentTableBindings()
+  const normalized = draft.value.trim()
+  draft.value = /^\/clear(?:\s+|$)/i.test(normalized)
+    ? normalized.replace(/^\/clear(?:\s+|$)/i, '').trimStart()
+    : ''
+  ElMessage.success('已清空表格选择，回到纯对话模式')
+}
+
 /**
  * Enter 优先识别精确 `/all` 命令，其余内容正常发送；Shift+Enter 与输入法组合仍用于换行。
  * 严格命令边界可避免 `/alligator` 一类普通文本被误当成全选操作。
@@ -672,6 +709,10 @@ function handleComposerKeydown(event: Event | KeyboardEvent) {
   event.preventDefault()
   if (/^\/all(?:\s+|$)/i.test(draft.value.trim())) {
     void applyAllTablesCommand(true)
+    return
+  }
+  if (/^\/clear(?:\s+|$)/i.test(draft.value.trim())) {
+    applyClearCommand()
     return
   }
   void sendMessage()
@@ -975,12 +1016,13 @@ async function scrollToBottom(force = true) {
                 </div>
               </header>
               <pre><code>{{ message.sql }}</code></pre>
-              <div class="ai-proposal-actions">
+              <el-tooltip :disabled="!sqlDisabledReason" :content="sqlDisabledReason" placement="top">
+                <div class="ai-proposal-actions">
                 <el-button
                   size="small"
                   aria-label="应用候选 SQL"
                   :disabled="!canUseAgentSql"
-                  @click="applySql(message.sql)"
+                  @click="applySql(message.sql, message.chart)"
                 >
                   <Check :size="14" />应用
                 </el-button>
@@ -999,7 +1041,7 @@ async function scrollToBottom(force = true) {
                   aria-label="应用候选 SQL 并运行"
                   :loading="applyingRunId === message.id"
                   :disabled="!canUseAgentSql || applyingRunId !== null"
-                  @click="runSql(message.sql, message.id)"
+                  @click="runSql(message.sql, message.chart, message.id)"
                 >
                   <Play :size="14" />应用并运行
                 </el-button>
@@ -1010,13 +1052,26 @@ async function scrollToBottom(force = true) {
                       : '需先选择表格并确认上下文后才能应用 SQL'
                   }}
                 </p>
-              </div>
+                </div>
+              </el-tooltip>
 
               <AiResultPreview v-if="messagePreview(message)" :result="messagePreview(message)!" />
+              <AiChartPreview
+                v-if="message.chart && messagePreview(message)"
+                :spec="message.chart"
+                :result="messagePreview(message)!"
+              />
               <div v-else-if="previewErrors[message.id]" class="ai-preview-error">
                 {{ previewErrors[message.id] }}
               </div>
             </section>
+
+            <div v-if="messageRunFailed(message)" class="ai-message-failed">
+              <span>
+                该回复未完成（{{ activeRun?.status === 'canceled' ? '已停止' : '运行失败' }}）
+              </span>
+              <el-button size="small" :disabled="sending" @click="retryRun">重试</el-button>
+            </div>
 
             <div class="ai-message-footer">
               <span>{{ formatMessageTime(message.createdAt) }}</span>
@@ -1065,11 +1120,31 @@ async function scrollToBottom(force = true) {
       <div class="ai-composer-shell">
         <footer class="ai-composer">
           <div v-if="slashCommandVisible" class="ai-slash-menu" role="listbox" aria-label="Slash 命令">
-            <button type="button" role="option" aria-selected="true" @click="applyAllTablesCommand()">
+            <button
+              v-if="!draft.trim().toLowerCase().startsWith('/clear')"
+              type="button"
+              role="option"
+              :aria-selected="!draft.trim().toLowerCase().startsWith('/clear')"
+              @click="applyAllTablesCommand()"
+            >
               <code>/all</code>
               <span>
                 <strong>使用全部表格</strong>
                 <small>选择当前工作区全部可用逻辑表，命令本身不会发送给 AI</small>
+              </span>
+              <kbd>Enter</kbd>
+            </button>
+            <button
+              v-if="draft.trim() === '/' || '/clear'.startsWith(draft.trim().toLowerCase())"
+              type="button"
+              role="option"
+              :aria-selected="draft.trim().toLowerCase().startsWith('/clear')"
+              @click="applyClearCommand()"
+            >
+              <code>/clear</code>
+              <span>
+                <strong>清空表格选择</strong>
+                <small>回到纯对话模式，不向 AI 提供任何表结构</small>
               </span>
               <kbd>Enter</kbd>
             </button>
@@ -1081,7 +1156,6 @@ async function scrollToBottom(force = true) {
               resize="none"
               :autosize="{ minRows: 2, maxRows: 6 }"
               maxlength="4000"
-              :disabled="contextChanged"
               placeholder="输入问题，或输入 / 查看命令；默认不携带表格"
               @keydown="handleComposerKeydown"
             />
@@ -1095,7 +1169,7 @@ async function scrollToBottom(force = true) {
                 <Square v-if="!stoppingRun" :size="14" />
               </el-button>
             </el-tooltip>
-            <el-tooltip v-else content="发送" placement="top">
+            <el-tooltip v-else :content="sendDisabledReason || '发送'" placement="top">
               <el-button
                 class="ai-send-button"
                 type="primary"

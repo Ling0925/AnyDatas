@@ -22,7 +22,6 @@ pub struct AppState {
     pub metrics_token: Option<String>,
     pub allow_private_ai_endpoints: bool,
     pub secret_key: [u8; 32],
-    pub http_client: reqwest::Client,
     pub query_control: Mutex<QueryControl>,
     pub cache_build_locks: CacheBuildLocks,
     pub query_semaphore: Arc<Semaphore>,

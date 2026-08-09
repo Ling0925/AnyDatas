@@ -128,6 +128,18 @@ impl Config {
         if !(20_000..=500_000).contains(&agent_context_chars) {
             anyhow::bail!("ANYDATAS_AGENT_CONTEXT_CHARS must be between 20000 and 500000");
         }
+        let max_upload_bytes = parse_usize("ANYDATAS_MAX_UPLOAD_BYTES", 100 * 1024 * 1024)?;
+        // 下界拒绝会让上传永远失败的过小值；上界放到 1 TiB，只用于挡住明显笔误/溢出，
+        // 不限制真实部署（例如面向大文件分析时配置的 10 GiB 上传上限）。
+        if !(1_048_576..=1_099_511_627_776).contains(&max_upload_bytes) {
+            anyhow::bail!(
+                "ANYDATAS_MAX_UPLOAD_BYTES must be between 1048576 and 1099511627776 (1 TiB)"
+            );
+        }
+        let session_ttl_days = parse_usize("ANYDATAS_SESSION_TTL_DAYS", 7)?;
+        if !(1..=3_650).contains(&session_ttl_days) {
+            anyhow::bail!("ANYDATAS_SESSION_TTL_DAYS must be between 1 and 3650");
+        }
 
         let js_http_enabled = parse_bool("ANYDATAS_JS_HTTP", true)?;
         let js_allow_private_network = parse_bool("ANYDATAS_JS_ALLOW_PRIVATE_NETWORK", false)?;
@@ -205,8 +217,8 @@ impl Config {
             web_dir: PathBuf::from(
                 env::var("ANYDATAS_WEB_DIR").unwrap_or_else(|_| "frontend/dist".to_owned()),
             ),
-            max_upload_bytes: parse_usize("ANYDATAS_MAX_UPLOAD_BYTES", 100 * 1024 * 1024)?,
-            session_ttl_days: parse_usize("ANYDATAS_SESSION_TTL_DAYS", 7)? as i64,
+            max_upload_bytes,
+            session_ttl_days: session_ttl_days as i64,
             cookie_secure: parse_bool("ANYDATAS_COOKIE_SECURE", false)?,
             metrics_token: read_optional_secret(
                 "ANYDATAS_METRICS_TOKEN",

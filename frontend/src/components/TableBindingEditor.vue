@@ -98,6 +98,7 @@ function uniqueAlias(base: string) {
         <el-input
           :model-value="binding.alias"
           aria-label="SQL 别名"
+          maxlength="63"
           @update:model-value="(value: string) => renameBinding(index, value)"
         />
         <el-tooltip content="移除" placement="top">

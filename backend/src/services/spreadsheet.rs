@@ -447,6 +447,13 @@ where
     Ok(row_count)
 }
 
+/// 单张逻辑表在一次缓存构建中允许物化的单元格上限。用于把异常巨大的读取范围（可能来自
+/// 高度压缩的 xlsx / 类 zip-bomb 表）挡在 DuckDB 缓存构建之前，避免拖垮共享进程。
+///
+/// 注意：这是范围级别的防御，calamine 的 worksheet_range 仍会一次性把整张工作表读入内存；
+/// 更彻底的常量内存方案需要改用流式 xlsx 读取，属后续工作。
+const MAX_MATERIALIZED_CELLS: u64 = 50_000_000;
+
 fn stream_excel_rows<F>(
     path: &Path,
     sheet: &str,
@@ -482,6 +489,13 @@ where
         .start_col
         .checked_add(width - 1)
         .context("读取范围列数过大")?;
+    let effective_rows = (end_row as u64 - data_start as u64) + 1;
+    let cells = effective_rows.saturating_mul(width as u64);
+    if cells > MAX_MATERIALIZED_CELLS {
+        bail!(
+            "工作表 {sheet} 的读取范围约 {cells} 个单元格，超过单表 {MAX_MATERIALIZED_CELLS} 上限；请缩小起止行列范围后重试"
+        );
+    }
     let mut row_count = 0usize;
 
     for row_index in data_start..=end_row as usize {

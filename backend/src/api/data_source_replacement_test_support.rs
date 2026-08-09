@@ -73,7 +73,6 @@ impl ReplacementFixture {
             metrics_token: None,
             allow_private_ai_endpoints: false,
             secret_key: [0; 32],
-            http_client: reqwest::Client::new(),
             query_control: Default::default(),
             cache_build_locks: Default::default(),
             query_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),

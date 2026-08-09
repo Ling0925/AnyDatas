@@ -16,6 +16,7 @@ import {
   Sparkles,
   Table2,
   Trash2,
+  Upload,
   X,
 } from '@lucide/vue'
 
@@ -76,6 +77,8 @@ onUnmounted(() => completionDisposable?.dispose())
 async function runQuery() {
   try {
     await store.runQuery()
+    // AI 建议了图表时，结果默认以该图表呈现（用户仍可切回表格或手调）。
+    if (store.appliedChart && store.queryResult) resultMode.value = 'chart'
   } catch (error) {
     ElMessage.error(errorMessage(error))
   }
@@ -134,7 +137,12 @@ async function deleteSavedQuery() {
     await ElMessageBox.confirm(
       `删除保存的查询“${store.selectedSavedQuery.name}”？`,
       '删除查询',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger',
+      },
     )
     await store.deleteCurrentSavedQuery()
     ElMessage.success('查询已删除')
@@ -146,7 +154,6 @@ async function deleteSavedQuery() {
 async function refreshPreview() {
   try {
     await store.refreshPreview()
-    ElMessage.success('预览已刷新')
   } catch (error) {
     ElMessage.error(errorMessage(error))
   }
@@ -172,6 +179,7 @@ async function createTask() {
     })
     taskDialogVisible.value = false
     ElMessage.success('任务已加入后台队列')
+    await router.push('/tasks')
   } catch (error) {
     ElMessage.error(errorMessage(error))
   } finally {
@@ -292,20 +300,14 @@ function configureSqlCompletion(monaco: any) {
                     <Trash2 :size="15" />
                   </el-button>
                 </el-tooltip>
-                <el-tooltip content="转为后台任务" placement="bottom">
-                  <el-button class="icon-button plain" aria-label="转为后台任务" @click="openTaskDialog">
-                    <ListPlus :size="16" />
-                  </el-button>
-                </el-tooltip>
-                <el-tooltip content="打开 AI 分析" placement="bottom">
-                  <el-button
-                    class="icon-button ai-action"
-                    aria-label="打开 AI 分析"
-                    @click="openAiWorkspace"
-                  >
-                    <Sparkles :size="16" />
-                  </el-button>
-                </el-tooltip>
+                <el-button class="labeled-action" @click="openTaskDialog">
+                  <ListPlus :size="15" />
+                  后台任务
+                </el-button>
+                <el-button class="labeled-action ai-action" @click="openAiWorkspace">
+                  <Sparkles :size="15" />
+                  AI 分析
+                </el-button>
                 <el-button
                   type="primary"
                   aria-label="运行查询"
@@ -405,7 +407,9 @@ function configureSqlCompletion(monaco: any) {
                 >
                   已后处理 · {{ store.queryResult.postProcessMs ?? 0 }}ms
                 </span>
-                <span v-if="store.queryResult?.truncated" class="result-warning">结果已截断</span>
+                <span v-if="store.queryResult?.truncated" class="result-warning">
+                  仅显示前 {{ store.queryResult.rowCount.toLocaleString() }} 行（已截断）
+                </span>
                 <div class="result-view-switch" role="group" aria-label="结果视图">
                   <button type="button" :aria-pressed="resultMode === 'table'" @click="resultMode = 'table'">
                     <Table2 :size="13" /> 表格
@@ -442,6 +446,7 @@ function configureSqlCompletion(monaco: any) {
               v-else-if="store.queryResult"
               :columns="store.queryResult.columns"
               :rows="store.queryResult.rows"
+              :applied-config="store.appliedChart"
             />
           </section>
         </div>
@@ -456,7 +461,13 @@ function configureSqlCompletion(monaco: any) {
               </span>
             </div>
             <el-tooltip content="刷新预览" placement="bottom">
-              <el-button class="icon-button plain" aria-label="刷新预览" @click="refreshPreview">
+              <el-button
+                class="icon-button plain"
+                aria-label="刷新预览"
+                :loading="store.previewLoading"
+                :disabled="store.previewLoading"
+                @click="refreshPreview"
+              >
                 <RefreshCw :size="15" />
               </el-button>
             </el-tooltip>
@@ -472,8 +483,18 @@ function configureSqlCompletion(monaco: any) {
 
       <div v-else class="workspace-empty">
         <span class="empty-icon"><Table2 :size="30" /></span>
-        <h2>选择或上传一个数据文件</h2>
-        <p>展开文件后选择工作表，并加入查询上下文</p>
+        <template v-if="!store.sources.length">
+          <h2>上传第一个数据文件开始分析</h2>
+          <p>支持 Excel 与 CSV，导入前可选择工作表与字段类型</p>
+          <el-button type="primary" :loading="store.uploadLoading" @click="store.requestUpload()">
+            <Upload :size="16" />
+            上传文件
+          </el-button>
+        </template>
+        <template v-else>
+          <h2>选择一个工作表</h2>
+          <p>展开左侧文件，选择工作表并加入查询上下文</p>
+        </template>
       </div>
     </section>
 

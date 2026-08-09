@@ -201,8 +201,10 @@ async fn cancel(
         level: "warning".into(),
         message: "用户停止了任务".into(),
     });
-    sqlx::query(
-        "UPDATE jobs SET status = 'canceled', finished_at = ?, updated_at = ?, logs_json = ? WHERE id = ?",
+    // 状态守卫：worker 可能在读取与更新之间已把任务写成 succeeded/failed。若守卫落空，
+    // 说明任务已到达终态，直接返回当前状态，绝不用 canceled 覆盖已完成结果或制品字段。
+    let canceled = sqlx::query(
+        "UPDATE jobs SET status = 'canceled', finished_at = ?, updated_at = ?, logs_json = ? WHERE id = ? AND status IN ('queued', 'running')",
     )
     .bind(&now)
     .bind(&now)
@@ -210,6 +212,15 @@ async fn cancel(
     .bind(&id)
     .execute(&state.pool)
     .await?;
+    if canceled.rows_affected() == 0 {
+        return Ok(Json(
+            hydrate_job(
+                &state,
+                required_job(&state, &id, Some(&auth.workspace_id)).await?,
+            )
+            .await?,
+        ));
+    }
     let interrupt_handle = {
         let mut queries = state
             .query_control

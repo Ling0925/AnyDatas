@@ -28,6 +28,9 @@ export const useTasksStore = defineStore('tasks', () => {
   const search = ref('')
   const loading = ref(false)
   const summary = ref<JobSummary>(emptySummary())
+  // 轮询与手动刷新可能并发触发 loadJobs；用单调递增的代际号丢弃迟到的陈旧响应，
+  // 避免旧请求的结果覆盖较新一次的列表、汇总与选中项。
+  let jobsRequestId = 0
 
   const selectedJob = computed(
     () => jobs.value.find((job) => job.id === selectedJobId.value) ?? null,
@@ -35,12 +38,15 @@ export const useTasksStore = defineStore('tasks', () => {
   const activeCount = computed(() => summary.value.queued + summary.value.running)
 
   async function loadJobs() {
+    const generation = ++jobsRequestId
     loading.value = true
     try {
       const [jobItems, jobSummary] = await Promise.all([
         api.listJobs({ status: statusFilter.value, query: search.value.trim() }),
         api.getJobSummary(),
       ])
+      // 更新的一次 loadJobs 已经发出，丢弃本次陈旧结果，防止乱序覆盖。
+      if (generation !== jobsRequestId) return
       const previous = selectedJob.value
       jobs.value = jobItems.map((job) => (
         previous?.id === job.id
@@ -53,7 +59,8 @@ export const useTasksStore = defineStore('tasks', () => {
       }
       await refreshSelectedJob()
     } finally {
-      loading.value = false
+      // 仅由最新一次请求负责结束 loading，避免陈旧请求提前清除加载态。
+      if (generation === jobsRequestId) loading.value = false
     }
   }
 
