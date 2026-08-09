@@ -9,8 +9,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:renderer": "pnpm --dir ../frontend build && pnpm build && electron scripts/check-production-renderer.mjs && electron scripts/check-auth-validation.mjs",
-    "test:renderer:ci": "pnpm --dir ../frontend build && pnpm build && electron --no-sandbox scripts/check-production-renderer.mjs && electron --no-sandbox scripts/check-auth-validation.mjs",
+    "test:renderer": "pnpm --dir ../frontend build && pnpm build && electron scripts/check-production-renderer.mjs && electron scripts/check-backend-restore.mjs && electron scripts/check-auth-validation.mjs",
+    "test:renderer:ci": "pnpm --dir ../frontend build && pnpm build && electron --no-sandbox scripts/check-production-renderer.mjs && electron --no-sandbox scripts/check-backend-restore.mjs && electron --no-sandbox scripts/check-auth-validation.mjs",
     "build": "node scripts/build.mjs",
     "package:win": "node scripts/package.mjs win",
     "package:win:dir": "node scripts/package.mjs win-dir",

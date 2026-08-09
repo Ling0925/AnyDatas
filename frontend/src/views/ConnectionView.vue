@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowRight,
   DownloadCloud,
@@ -16,6 +16,7 @@ import PixelOcean from '../components/PixelOcean.vue'
 import ThemeToggle from '../components/ThemeToggle.vue'
 import { useAuthStore } from '../stores/auth'
 
+const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const selectedMode = ref<'standalone' | 'remote'>('standalone')
@@ -30,6 +31,7 @@ const status = ref<DesktopBackendStatus>({
   progress: null,
 })
 let unsubscribe: (() => void) | undefined
+let readyNavigationStarted = false
 
 const busy = computed(() => status.value.phase === 'starting' || status.value.phase === 'downloading')
 const progressPercentage = computed(() => {
@@ -38,19 +40,36 @@ const progressPercentage = computed(() => {
 })
 
 /**
- * 读取主进程状态并订阅下载、启动和崩溃事件。
+ * 应用主进程状态，并在已保存的服务恢复完成后继续进入登录页。
  *
- * 为什么这么做：服务端运行时完全位于 Electron 主进程；好处是页面重载后仍能恢复真实进度，而不是重新发起下载。
+ * 为什么这么做：窗口会早于本地服务恢复完成，此时路由只能先落到模式页；好处是首次选择仍由用户确认，后续启动则自动沿用已保存模式。
+ */
+function applyBackendStatus(next: DesktopBackendStatus) {
+  status.value = next
+  if (next.mode !== null) selectedMode.value = next.mode
+  if (next.mode === 'remote' && next.serverUrl) serverUrl.value = next.serverUrl
+  if (
+    next.phase !== 'ready'
+    || route.query.change === '1'
+    || readyNavigationStarted
+  ) return
+
+  readyNavigationStarted = true
+  auth.resetForBackendChange()
+  void router.replace('/login').catch(() => {
+    // 路由异常时允许下一次 ready 通知重试，避免一次偶发导航失败永久卡在模式页。
+    readyNavigationStarted = false
+  })
+}
+
+/**
+ * 先订阅再读取主进程快照，覆盖订阅建立期间恰好完成启动的竞态窗口。
+ *
+ * 为什么这么做：服务端运行时完全位于 Electron 主进程；好处是页面重载后能恢复真实进度，也不会漏掉关键的 ready 通知。
  */
 onMounted(async () => {
-  status.value = await window.desktop.getBackendStatus()
-  if (status.value.mode !== null) selectedMode.value = status.value.mode
-  if (status.value.mode === 'remote' && status.value.serverUrl) {
-    serverUrl.value = status.value.serverUrl
-  }
-  unsubscribe = window.desktop.onBackendStatus((next) => {
-    status.value = next
-  })
+  unsubscribe = window.desktop.onBackendStatus(applyBackendStatus)
+  applyBackendStatus(await window.desktop.getBackendStatus())
 })
 
 /**
