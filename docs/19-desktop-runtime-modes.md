@@ -58,9 +58,9 @@ flowchart TD
 ```json
 {
   "schemaVersion": 1,
-  "serverVersion": "0.1.0",
+  "serverVersion": "0.1.1",
   "protocolVersion": 1,
-  "tag": "server-v0.1.0",
+  "tag": "server-v0.1.1",
   "assets": {
     "linux-x64": {
       "name": "anydatas-server-linux-x64",
@@ -71,7 +71,7 @@ flowchart TD
 }
 ```
 
-桌面端不请求 `latest`，默认固定 `server-v0.1.0`。后续桌面发布必须先验证新服务端，再显式更新锁定 Tag。
+桌面端不请求 `latest`，默认固定 `server-v0.1.1`。Windows x64 服务端静态链接 MSVC Runtime，用户无需另装 VC++ Redistributable。后续桌面发布必须先验证新服务端，再显式更新锁定 Tag。
 
 ## 5. 单机进程安全与数据目录
 
@@ -99,7 +99,7 @@ flowchart TD
 当前默认 Release 地址仍是 `Ling0925/AnyDatas`，但下载地址可通过环境覆盖：
 
 - `ANYDATAS_SERVER_REPOSITORY=owner/AnyDatas-Server`
-- `ANYDATAS_SERVER_RELEASE_TAG=server-v0.1.0`
+- `ANYDATAS_SERVER_RELEASE_TAG=server-v0.1.1`
 - `ANYDATAS_SERVER_RELEASE_METADATA_URL=https://...`（完整覆盖）
 
 因此可以先完成同仓库验证，再把 `backend/`、迁移与 Release 工作流迁到独立服务端仓库。桌面模块和清单协议不需要重写。
