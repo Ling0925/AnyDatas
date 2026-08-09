@@ -71,6 +71,42 @@ jobs:
       - name: Build production frontend
         run: pnpm --dir frontend build
 
+  desktop:
+    name: Electron desktop
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.10.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            desktop/pnpm-lock.yaml
+            frontend/pnpm-lock.yaml
+
+      - name: Install desktop and renderer dependencies
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir desktop install --frozen-lockfile
+
+      - name: Run desktop tests and typecheck
+        run: |
+          pnpm --dir desktop test
+          pnpm --dir desktop typecheck
+
+      - name: Verify production Electron renderer
+        run: xvfb-run -a pnpm --dir desktop test:renderer
+
   operations:
     name: Operations and configuration
     runs-on: ubuntu-latest
@@ -114,7 +150,7 @@ jobs:
 
   container:
     name: Production container
-    needs: [backend, frontend, operations]
+    needs: [backend, frontend, desktop, operations]
     runs-on: ubuntu-latest
     timeout-minutes: 45
 

@@ -25,9 +25,10 @@
 17. [16 导入、图表与 AI SQL 实现](16-import-charts-ai.md): 导入预检、字段类型、多指标图表、AI 上下文、安全和运维。
 18. [17 AI Agent Runtime](17-ai-agent-runtime.md): 持久会话、原生工具、流式状态与上下文预算。
 19. [18 Electron 本地采集 Agent](18-electron-local-collector.md): 桌面文件源、覆盖更新、下游调度、隔离验收与运行约束。
-20. [sources](sources.md): 调研和技术引用来源。
+20. [19 桌面双模式与服务端运行时](19-desktop-runtime-modes.md): 单机下载、远端连接、版本协议、GitHub Release 与进程生命周期。
+21. [sources](sources.md): 调研和技术引用来源。
 
-`00` 到 `10`、`12` 保留产品和平台化演进规划；`11` 已更新为当前单机运维方案。当前可运行代码及完成状态以 `13` 到 `18` 和根目录 `README.md` 为准。
+`00` 到 `10`、`12` 保留产品和平台化演进规划；`11` 已更新为当前单机运维方案。当前可运行代码及完成状态以 `13` 到 `19` 和根目录 `README.md` 为准。
 
 ## 核心结论
 

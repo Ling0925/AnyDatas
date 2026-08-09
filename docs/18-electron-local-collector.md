@@ -127,7 +127,7 @@ desktop/
 ```
 
 - **窗口**: 生产通过 `loadFile` 加载 `frontend/dist/index.html`，Vite 使用相对资源基址，Vue Router 在 `file:` 下使用 hash history；HTTP(S) 网页部署仍使用 HTML5 history。开发模式加载 `http://127.0.0.1:5173`。
-- **API 代理**: 主进程固定监听 `127.0.0.1:28090`，把 `/api/*` 转发到 `ANYDATAS_API_TARGET`（缺省为本机安全值 `http://127.0.0.1:8080`）。只接受生产 `file://`/`null` origin 或开发态 `127.0.0.1:5173`/`localhost:5173`，并在本地补齐 CORS 响应。**会话 Cookie 由主进程内存 jar 持有**（登录响应 `Set-Cookie` 不暴露给渲染进程，后续上游请求自动带回）；Electron 重启后需重新登录。
+- **API 代理**: 主进程固定监听 `127.0.0.1:28090`，把 `/api/*` 转发到用户选择的单机子进程或远端服务器。未选择模式时返回受控 503；切换服务器会清空 Cookie。只接受生产 `file://`/`null` origin 或开发态 `127.0.0.1:5173`/`localhost:5173`，并在本地补齐 CORS 响应。**会话 Cookie 由主进程内存 jar 持有**（登录响应 `Set-Cookie` 不暴露给渲染进程，后续上游请求自动带回）；Electron 重启后需重新登录。双模式与发行协议见 [19 桌面双模式与服务端运行时](19-desktop-runtime-modes.md)。
 - **cron**: 不引第三方依赖，移植 5 字段 cron 解析（分钟/时/日/月/周）；主进程每 30 秒检查一次，并按文件源记录已执行的 UTC 分钟，保证同一分钟至多触发一次。
 - **IPC**（`window.desktop`）:
   - `listFileSources()` / `createFileSource(config)` / `updateFileSource(id, config)` / `deleteFileSource(id)` / `toggleFileSource(id, enabled)`
