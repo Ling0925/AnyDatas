@@ -27,4 +27,13 @@ export class CookieJar {
     }
     return [...this.#cookies].map(([name, value]) => `${name}=${value}`).join("; ")
   }
+
+  /**
+   * 切换后端地址时丢弃旧会话，避免相同 Cookie 名被发送到另一台服务器。
+   *
+   * 清理集中在主进程 CookieJar 内，渲染进程既无法读取会话值也不需要参与服务器隔离。
+   */
+  clear(): void {
+    this.#cookies.clear()
+  }
 }

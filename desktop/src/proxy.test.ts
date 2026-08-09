@@ -44,6 +44,10 @@ describe("ApiProxy", () => {
         response.end(request.headers.cookie ?? "")
         return
       }
+      if (request.url === "/api/desktop-token") {
+        response.end(request.headers["x-anydatas-desktop-token"] ?? "")
+        return
+      }
 
       const hash = createHash("sha256")
       let size = 0
@@ -113,6 +117,25 @@ describe("ApiProxy", () => {
     await expect(response.text()).resolves.toBe("session=secret; workspace=alpha")
   })
 
+  it("injects the main-process token and ignores a renderer-supplied value", async () => {
+    proxy.setTarget(new URL(`http://127.0.0.1:${upstreamPort}`), "trusted-desktop-token")
+
+    const response = await fetch(`${proxy.url}/api/desktop-token`, {
+      headers: { "x-anydatas-desktop-token": "renderer-controlled" },
+    })
+
+    await expect(response.text()).resolves.toBe("trusted-desktop-token")
+  })
+
+  it("clears captured cookies when switching targets", async () => {
+    await fetch(`${proxy.url}/api/login`)
+
+    proxy.setTarget(new URL(`http://127.0.0.1:${upstreamPort}`))
+    const response = await fetch(`${proxy.url}/api/whoami`)
+
+    await expect(response.text()).resolves.toBe("")
+  })
+
   it("answers approved credentialed CORS preflights", async () => {
     // Given
     const origin = "http://127.0.0.1:5173"
@@ -158,6 +181,15 @@ describe("ApiProxy", () => {
     // Then
     expect(response.status).toBe(502)
     await expect(response.json()).resolves.toEqual({ error: "upstream unavailable" })
+  })
+
+  it("returns a bounded unavailable response before a runtime is selected", async () => {
+    proxy.setTarget(undefined)
+
+    const response = await fetch(`${proxy.url}/api/data-sources`)
+
+    expect(response.status).toBe(503)
+    await expect(response.json()).resolves.toEqual({ error: "backend runtime is not configured" })
   })
 })
 

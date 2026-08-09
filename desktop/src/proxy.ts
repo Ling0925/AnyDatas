@@ -23,7 +23,7 @@ const FILTERED_RESPONSE_HEADERS = new Set([
 ])
 
 export type ApiProxyOptions = {
-  readonly target: URL
+  readonly target?: URL
   readonly port?: number
   readonly dev: boolean
   readonly timeoutMs?: number
@@ -77,8 +77,11 @@ export class ApiProxy {
   readonly #server: Server
   readonly #jar = new CookieJar()
   #port: number | undefined
+  #target: URL | undefined
+  #desktopToken: string | undefined
 
   constructor(private readonly options: ApiProxyOptions) {
+    this.#target = options.target
     this.#server = createServer((request, response) => this.#handle(request, response))
   }
 
@@ -123,20 +126,24 @@ export class ApiProxy {
     response.end()
   }
 
-  #upstreamRequest(request: IncomingMessage): ClientRequest {
+  #upstreamRequest(request: IncomingMessage, target: URL): ClientRequest {
     const cookie = this.#jar.header()
     const headers: OutgoingHttpHeaders = {
       ...request.headers,
-      host: this.options.target.host,
+      host: target.host,
     }
+    delete headers["x-anydatas-desktop-token"]
     if (cookie !== undefined) {
       headers.cookie = cookie
     }
-    const send = this.options.target.protocol === "https:" ? httpsRequest : httpRequest
+    if (this.#desktopToken !== undefined) {
+      headers["x-anydatas-desktop-token"] = this.#desktopToken
+    }
+    const send = target.protocol === "https:" ? httpsRequest : httpRequest
     return send({
-      protocol: this.options.target.protocol,
-      hostname: this.options.target.hostname,
-      port: this.options.target.port,
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port,
       path: request.url ?? "/",
       method: request.method,
       headers,
@@ -149,7 +156,15 @@ export class ApiProxy {
       return
     }
 
-    const upstream = this.#upstreamRequest(request)
+    const target = this.#target
+    if (target === undefined) {
+      this.#applyCors(request, response)
+      response.writeHead(503, { "content-type": "application/json; charset=utf-8" })
+      response.end(JSON.stringify({ error: "backend runtime is not configured" }))
+      return
+    }
+
+    const upstream = this.#upstreamRequest(request, target)
     upstream.setTimeout(this.options.timeoutMs ?? 300_000, () => upstream.destroy())
     upstream.once("response", (upstreamResponse) => {
       this.#jar.capture(upstreamResponse.headers["set-cookie"] ?? [])
@@ -186,6 +201,26 @@ export class ApiProxy {
     }
     this.#port = address.port
     return address.port
+  }
+
+  /**
+   * 原子切换代理上游和可选桌面令牌，并始终清空上一服务器的 Cookie。
+   *
+   * 单机与远端 Adapter 共用该 seam，渲染层的固定 API 地址无需随模式变化而重建。
+   */
+  setTarget(target: URL | undefined, desktopToken?: string): void {
+    this.#target = target
+    this.#desktopToken = desktopToken
+    this.#jar.clear()
+  }
+
+  /**
+   * 返回当前规范化上游地址，仅用于诊断界面，不包含桌面令牌或 Cookie。
+   *
+   * 通过只读字符串暴露目标可以保留原有文件采集诊断能力，而不会泄露主进程凭据。
+   */
+  targetUrl(): string | null {
+    return this.#target?.href ?? null
   }
 
   async close(): Promise<void> {

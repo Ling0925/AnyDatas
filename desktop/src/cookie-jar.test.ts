@@ -39,4 +39,13 @@ describe("CookieJar", () => {
     // Then
     expect(jar.header()).toBeUndefined()
   })
+
+  it("clears every cookie when the backend target changes", () => {
+    const jar = new CookieJar()
+    jar.capture(["session=active; HttpOnly", "workspace=alpha"])
+
+    jar.clear()
+
+    expect(jar.header()).toBeUndefined()
+  })
 })
