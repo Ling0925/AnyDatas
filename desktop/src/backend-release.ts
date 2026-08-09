@@ -9,13 +9,14 @@ const MAX_MANIFEST_BYTES = 1024 * 1024
 const MAX_SERVER_BINARY_BYTES = 1024 * 1024 * 1024
 const MANIFEST_NAME = "anydatas-server-manifest.json"
 
-const githubAssetSchema = z.strictObject({
+// GitHub 的公开 API 会持续增加元数据字段；这里只提取安装链需要的字段，避免上游新增字段阻断启动。
+const githubAssetSchema = z.object({
   name: z.string().min(1),
   browser_download_url: z.url(),
   size: z.number().int().nonnegative(),
   digest: z.string().nullable().optional(),
 })
-const githubReleaseSchema = z.strictObject({
+const githubReleaseSchema = z.object({
   tag_name: z.string().min(1),
   assets: z.array(githubAssetSchema),
 })

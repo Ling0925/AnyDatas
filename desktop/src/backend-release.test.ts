@@ -15,7 +15,11 @@ const ASSET_NAME = "anydatas-server-linux-x64"
  *
  * 真实 HTTP 流可以验证重定向无关的流式写入与摘要行为，同时不依赖外部 GitHub 状态。
  */
-async function releaseServer(binary: Buffer, servedBinary: Buffer = binary): Promise<{
+async function releaseServer(
+  binary: Buffer,
+  servedBinary: Buffer = binary,
+  includeAdditionalReleaseFields = false,
+): Promise<{
   readonly server: Server
   readonly metadataUrl: URL
   readonly requests: () => number
@@ -38,15 +42,24 @@ async function releaseServer(binary: Buffer, servedBinary: Buffer = binary): Pro
     if (request.url === "/release") {
       response.setHeader("content-type", "application/json")
       response.end(JSON.stringify({
+        ...(includeAdditionalReleaseFields
+          ? { id: 1, html_url: `${origin}/releases/${TAG}`, name: TAG }
+          : {}),
         tag_name: TAG,
         assets: [
           {
+            ...(includeAdditionalReleaseFields
+              ? { id: 2, content_type: "application/json", state: "uploaded" }
+              : {}),
             name: "anydatas-server-manifest.json",
             browser_download_url: `${origin}/manifest`,
             size: manifest.byteLength,
             digest: `sha256:${manifestSha256}`,
           },
           {
+            ...(includeAdditionalReleaseFields
+              ? { id: 3, content_type: "application/octet-stream", state: "uploaded" }
+              : {}),
             name: ASSET_NAME,
             browser_download_url: `${origin}/binary`,
             size: binary.byteLength,
@@ -140,6 +153,26 @@ describe("ServerReleaseInstaller", () => {
     const cached = await installer.install(() => undefined)
     expect(cached).toEqual(installed)
     expect(release.requests()).toBe(3)
+  })
+
+  it("accepts additional fields returned by the GitHub Release API", async () => {
+    const root = await mkdtemp(join(tmpdir(), "anydatas-runtime-"))
+    roots.push(root)
+    const binary = Buffer.from("github-release-with-extra-fields")
+    const release = await releaseServer(binary, binary, true)
+    servers.push(release.server)
+    const installer = new ServerReleaseInstaller({
+      userData: root,
+      metadataUrl: release.metadataUrl,
+      tag: TAG,
+      platform: "linux",
+      arch: "x64",
+    })
+
+    await expect(installer.install(() => undefined)).resolves.toMatchObject({
+      serverVersion: "0.1.0",
+      protocolVersion: 1,
+    })
   })
 
   it("does not install bytes that fail the manifest digest", async () => {
