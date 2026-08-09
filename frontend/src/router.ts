@@ -4,6 +4,7 @@ import { useAuthStore } from './stores/auth'
 
 // 页面级动态导入让登录、工作台、Agent 和任务管理形成独立加载边界。
 const AppShell = () => import('./components/AppShell.vue')
+const ConnectionView = () => import('./views/ConnectionView.vue')
 const AgentView = () => import('./views/AgentView.vue')
 const FileSourcesView = () => import('./views/FileSourcesView.vue')
 const LoginView = () => import('./views/LoginView.vue')
@@ -19,6 +20,11 @@ const history = window.location.protocol === 'file:'
 const router = createRouter({
   history,
   routes: [
+    {
+      path: '/connection',
+      component: ConnectionView,
+      meta: { desktopRuntime: true },
+    },
     {
       path: '/login',
       component: LoginView,
@@ -40,6 +46,19 @@ const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
+  if (window.desktop) {
+    const backend = await window.desktop.getBackendStatus()
+    if (to.meta.desktopRuntime) {
+      if (backend.phase === 'ready' && to.query.change !== '1') {
+        return { path: '/login' }
+      }
+      return true
+    }
+    if (backend.phase !== 'ready') {
+      return { path: '/connection' }
+    }
+  }
+
   const auth = useAuthStore()
   if (!auth.initialized) {
     try {

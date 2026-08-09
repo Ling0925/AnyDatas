@@ -7,10 +7,19 @@
 import { createServer } from "node:http"
 import { access } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
-import { app, BrowserWindow } from "electron"
+import { app, BrowserWindow, ipcMain } from "electron"
 
 const PROXY_PORT = 28_090
 const AUTH_STATUS = { setupRequired: true, authenticated: false, user: null }
+const BACKEND_STATUS = {
+  mode: null,
+  phase: "unconfigured",
+  serverUrl: null,
+  serverVersion: null,
+  protocolVersion: null,
+  message: "请选择单机模式或连接服务器",
+  progress: null,
+}
 // 无 DOM 变更的静默窗口：Vue 挂载后若再无变化即视为终态（红色用例快速失败）。
 const SETTLE_MS = 5_000
 // 绝对兜底：仅作为失败保护，正常路径在首次渲染后即通过 MutationObserver 返回。
@@ -99,7 +108,7 @@ new Promise((resolve) => {
     }
   }
   const isReady = (state) =>
-    state.hash.startsWith("#/login") && state.appElementCount > 0
+    state.hash.startsWith("#/connection") && state.appElementCount > 0
   const startedAt = Date.now()
   let lastMutationAt = startedAt
   let settleTimer = undefined
@@ -150,6 +159,8 @@ new Promise((resolve) => {
 
 async function main() {
   await app.whenReady()
+  // 生产 smoke 不启动真实服务端；固定返回首次未配置状态，验证用户能看到模式选择界面。
+  ipcMain.handle("desktop:backend:status", () => BACKEND_STATUS)
 
   let stub
   try {
@@ -174,6 +185,7 @@ async function main() {
   if (missing.length > 0) {
     note(`missing build artifacts (run pnpm --dir desktop test:renderer): ${missing.join(", ")}`)
     await closeStub(stub)
+    ipcMain.removeHandler("desktop:backend:status")
     app.exit(1)
     return
   }
@@ -222,6 +234,7 @@ async function main() {
       win.destroy()
     }
     await closeStub(stub)
+    ipcMain.removeHandler("desktop:backend:status")
   }
 
   const lines = []
@@ -235,7 +248,7 @@ async function main() {
     lines.push(`appElementCount: ${outcome.appElementCount}`)
   } else {
     lines.push("RESULT: FAIL")
-    lines.push("renderer did not render a login/setup surface at a hash route")
+    lines.push("renderer did not render the desktop connection surface at a hash route")
     lines.push(`url: ${outcome.url}`)
     lines.push(`hash: ${outcome.hash}`)
     lines.push(`appElementCount: ${outcome.appElementCount}`)
@@ -245,6 +258,7 @@ async function main() {
     lines.push(`diagnostics: ${entry}`)
   }
   process.stdout.write(`${lines.join("\n")}\n`, () => {
+    ipcMain.removeHandler("desktop:backend:status")
     app.exit(outcome !== undefined && outcome.ok ? 0 : 1)
   })
 }

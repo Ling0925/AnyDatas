@@ -1,7 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron"
 import type { IpcRendererEvent } from "electron"
 import * as z from "zod"
+import { BACKEND_CHANNELS } from "./backend-ipc.js"
 import { FILE_SOURCE_CHANNELS } from "./ipc.js"
+import type { BackendSelection, BackendStatus } from "./backend-types.js"
 import type {
   DesktopFileSource,
   DesktopFileSourceConfig,
@@ -45,9 +47,28 @@ const eventSchema = z.strictObject({
   lastRun: lastRunSchema.nullable(),
   runs: z.array(runSchema),
 })
+const backendModeSchema = z.union([z.literal("standalone"), z.literal("remote")])
+const backendStatusSchema = z.strictObject({
+  mode: backendModeSchema.nullable(),
+  phase: z.union([
+    z.literal("unconfigured"),
+    z.literal("starting"),
+    z.literal("downloading"),
+    z.literal("ready"),
+    z.literal("failed"),
+  ]),
+  serverUrl: z.string().nullable(),
+  serverVersion: z.string().nullable(),
+  protocolVersion: z.number().nullable(),
+  message: z.string(),
+  progress: z.number().nullable(),
+})
 
 type DesktopBridge = {
   readonly apiBase: string
+  readonly getBackendStatus: () => Promise<BackendStatus>
+  readonly configureBackend: (selection: BackendSelection) => Promise<BackendStatus>
+  readonly resetBackend: () => Promise<BackendStatus>
   readonly listFileSources: () => Promise<DesktopFileSource[]>
   readonly createFileSource: (config: DesktopFileSourceConfig) => Promise<DesktopFileSource>
   readonly updateFileSource: (
@@ -58,7 +79,8 @@ type DesktopBridge = {
   readonly toggleFileSource: (id: string, enabled: boolean) => Promise<DesktopFileSource>
   readonly runFileSourceNow: (id: string) => Promise<DesktopFileSource>
   readonly pickDirectory: () => Promise<string | null>
-  readonly apiTarget: () => Promise<string>
+  readonly apiTarget: () => Promise<string | null>
+  readonly onBackendStatus: (callback: (status: BackendStatus) => void) => () => void
   readonly onFileSourceEvent: (
     callback: (payload: {
       readonly id: string
@@ -70,6 +92,12 @@ type DesktopBridge = {
 
 const bridge: DesktopBridge = {
   apiBase: API_BASE,
+  getBackendStatus: async () =>
+    backendStatusSchema.parse(await ipcRenderer.invoke(BACKEND_CHANNELS.status)),
+  configureBackend: async (selection) =>
+    backendStatusSchema.parse(await ipcRenderer.invoke(BACKEND_CHANNELS.configure, selection)),
+  resetBackend: async () =>
+    backendStatusSchema.parse(await ipcRenderer.invoke(BACKEND_CHANNELS.reset)),
   listFileSources: async () => sourceSchema.array().parse(await ipcRenderer.invoke(FILE_SOURCE_CHANNELS.list)),
   createFileSource: async (config) =>
     sourceSchema.parse(await ipcRenderer.invoke(FILE_SOURCE_CHANNELS.create, config)),
@@ -84,7 +112,17 @@ const bridge: DesktopBridge = {
     sourceSchema.parse(await ipcRenderer.invoke(FILE_SOURCE_CHANNELS.runNow, id)),
   pickDirectory: async () =>
     z.string().nullable().parse(await ipcRenderer.invoke(FILE_SOURCE_CHANNELS.pickDirectory)),
-  apiTarget: async () => z.string().parse(await ipcRenderer.invoke(FILE_SOURCE_CHANNELS.apiTarget)),
+  apiTarget: async () =>
+    z.string().nullable().parse(await ipcRenderer.invoke(FILE_SOURCE_CHANNELS.apiTarget)),
+  onBackendStatus: (callback) => {
+    const listener = (_event: IpcRendererEvent, payload: unknown): void => {
+      callback(backendStatusSchema.parse(payload))
+    }
+    ipcRenderer.on(BACKEND_CHANNELS.event, listener)
+    return () => {
+      ipcRenderer.removeListener(BACKEND_CHANNELS.event, listener)
+    }
+  },
   onFileSourceEvent: (callback) => {
     const listener = (_event: IpcRendererEvent, payload: unknown): void => {
       callback(eventSchema.parse(payload))

@@ -10,6 +10,7 @@ import {
   FolderSync,
   ListChecks,
   LogOut,
+  ServerCog,
   Settings2,
   Sparkles,
 } from '@lucide/vue'
@@ -42,6 +43,10 @@ const roleLabels: Record<WorkspaceRole, string> = {
 }
 
 async function handleUserCommand(command: string) {
+  if (command === 'backend' && hasDesktop) {
+    await router.push({ path: '/connection', query: { change: '1' } })
+    return
+  }
   if (command !== 'logout' || loggingOut.value) return
   loggingOut.value = true
   try {
@@ -135,7 +140,11 @@ async function handleUserCommand(command: string) {
                 <strong>{{ auth.user?.name }}</strong>
                 <span>{{ auth.user?.email }}</span>
               </li>
-              <el-dropdown-item command="logout" divided :disabled="loggingOut">
+              <el-dropdown-item v-if="hasDesktop" command="backend" divided>
+                <ServerCog :size="15" />
+                运行模式
+              </el-dropdown-item>
+              <el-dropdown-item command="logout" :divided="!hasDesktop" :disabled="loggingOut">
                 <LogOut :size="15" />
                 退出登录
               </el-dropdown-item>

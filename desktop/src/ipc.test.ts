@@ -84,7 +84,7 @@ describe("registerFileSourceIpc", () => {
           return { canceled: false, filePaths: ["/tmp/chosen"] }
         },
       },
-      apiTarget: "http://127.0.0.1:8080/",
+      apiTarget: () => "http://127.0.0.1:8080/",
     })
   })
 

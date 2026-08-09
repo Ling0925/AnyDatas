@@ -69,6 +69,19 @@ export const useAuthStore = defineStore('auth', () => {
     user.value = null
   }
 
+  /**
+   * 切换单机或远端服务器后清空认证引导状态，下一次路由必须向新目标重新读取账户状态。
+   *
+   * 这样做可以避免旧服务器的用户对象让登录页误判为已认证，并阻止跨服务器复用工作区身份。
+   */
+  function resetForBackendChange() {
+    user.value = null
+    setupRequired.value = false
+    initialized.value = false
+    loading.value = false
+    bootstrapError.value = ''
+  }
+
   return {
     user,
     setupRequired,
@@ -81,5 +94,6 @@ export const useAuthStore = defineStore('auth', () => {
     login,
     logout,
     clearSession,
+    resetForBackendChange,
   }
 })

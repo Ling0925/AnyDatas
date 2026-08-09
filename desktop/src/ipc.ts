@@ -34,7 +34,7 @@ type RegisterIpcOptions = {
   readonly store: FileSourceStore
   readonly runner: FileSourceRunner
   readonly dialog: DirectoryDialog
-  readonly apiTarget: string
+  readonly apiTarget: () => string | null
 }
 
 type FileSourceEventSender = {
@@ -123,7 +123,7 @@ export function registerFileSourceIpc(options: RegisterIpcOptions): () => void {
   })
   handle(FILE_SOURCE_CHANNELS.apiTarget, async (...args) => {
     emptyArgsSchema.parse(args)
-    return options.apiTarget
+    return options.apiTarget()
   })
 
   return () => {

@@ -47,9 +47,26 @@ interface DesktopFileSourceConfig {
   readonly triggerScheduleIds: string[]
 }
 
+type DesktopBackendSelection =
+  | { readonly mode: 'standalone' }
+  | { readonly mode: 'remote'; readonly serverUrl: string }
+
+interface DesktopBackendStatus {
+  readonly mode: 'standalone' | 'remote' | null
+  readonly phase: 'unconfigured' | 'starting' | 'downloading' | 'ready' | 'failed'
+  readonly serverUrl: string | null
+  readonly serverVersion: string | null
+  readonly protocolVersion: number | null
+  readonly message: string
+  readonly progress: number | null
+}
+
 interface Window {
   desktop: {
     readonly apiBase: string
+    readonly getBackendStatus: () => Promise<DesktopBackendStatus>
+    readonly configureBackend: (selection: DesktopBackendSelection) => Promise<DesktopBackendStatus>
+    readonly resetBackend: () => Promise<DesktopBackendStatus>
     readonly listFileSources: () => Promise<DesktopFileSource[]>
     readonly createFileSource: (config: DesktopFileSourceConfig) => Promise<DesktopFileSource>
     readonly updateFileSource: (id: string, config: Partial<DesktopFileSource>) => Promise<DesktopFileSource>
@@ -57,7 +74,8 @@ interface Window {
     readonly toggleFileSource: (id: string, enabled: boolean) => Promise<DesktopFileSource>
     readonly runFileSourceNow: (id: string) => Promise<DesktopFileSource>
     readonly pickDirectory: () => Promise<string | null>
-    readonly apiTarget: () => Promise<string>
+    readonly apiTarget: () => Promise<string | null>
+    readonly onBackendStatus: (callback: (status: DesktopBackendStatus) => void) => () => void
     readonly onFileSourceEvent: (
       callback: (payload: {
         readonly id: string
