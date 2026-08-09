@@ -85,7 +85,7 @@
 
 ### 安全加固
 
-- **M1. SSRF：DNS-rebinding TOCTOU 绕过内网守卫**（`agent_provider.rs:718`）。`validate_base_url_network` 解析并校验 IP 后，返回的 URL 仍带**主机名**；`call_chat` 交给 reqwest 时会**第二次解析 DNS**。工作区管理员用低 TTL 域名，在校验时给公网 IP、在实际请求时切到 `169.254.169.254` 或内网，即可让服务器带着已配置的 Bearer token 访问内网——正是 `ANYDATAS_AI_ALLOW_PRIVATE_NETWORK=false` 想阻止的提权。重定向 SSRF 已被 `Policy::none()` 拦住，但 rebinding 没有。**修复**：解析一次并把出站连接**钉到已校验的 IP**（reqwest `resolve()`/DNS override，或连到已校验 `SocketAddr` 同时保留原 Host 头），校验必须作用于实际连接的对端。
+- **M1（已处置）：AI DNS 解析与连接目标不一致**。旧实现校验后由 reqwest 二次解析主机名，可能连接到不同地址。当前实现把请求固定到本次 DNS 解析结果并禁止重定向；产品策略允许工作区管理员配置本机和局域网模型，因此不再设置 AI 专属私网开关。QuickJS `http.request` 继续由独立白名单与私网策略约束。
 - **M2. CSV 公式注入：结果列名未转义**（`query_engine.rs:297`）。`write_artifact_csv` 只对数据单元格值做了防注入前缀（`duck_value_to_csv`），但表头 `writer.write_record(&names)` 原样写出；而列名来自上传文件表头，`build_column_names` 不做公式字符消毒。攻击者上传表头为 `=HYPERLINK(...)` / `=cmd|'/C calc'!A1` 的文件，同工作区他人 `SELECT *` 导出 CSV 后在 Excel 打开即触发。**修复**：对表头套用同样的前缀消毒；并把触发集扩展到前导 `TAB(0x09)`、`CR(0x0D)`。
 - **M3. 登录锁定基于连接对端 IP，在 NAT/Docker 桥后造成全局登录 DoS**（`auth.rs:251`）。限流用 `ConnectInfo<SocketAddr>` 的 IP，不看转发头。compose 部署下容器经 Docker 桥 NAT，所有外部客户端呈现同一网关源 IP；攻击者用任意邮箱失败 25 次即可触发 `ip:` 桶锁定，随后 15 分钟内**同网关所有用户都无法登录**；且该拓扑下 per-IP 限流对真实客户端形同虚设。（per-email 暴力仍受 email+ip 键约束，故主要是可用性问题。）**修复**：在代理/NAT 后从**受信配置的转发头**取客户端 IP（且只信任已知代理源）；否则收窄全局锁的作用域，用 email 维度做锁定、IP 维度只做软延迟。
 - **M-低边界：会话 cookie `Secure` 默认关**（`config.rs:121`，见 L 类）：栈内无 TLS 时默认 `ANYDATAS_COOKIE_SECURE=false`，README 已提示 HTTPS 部署要开启，属可接受的默认但需在反代/公网场景强制开启。

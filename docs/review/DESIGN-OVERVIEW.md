@@ -107,7 +107,7 @@ flowchart LR
 
 - **鉴权**：Argon2 加盐；会话 token = 双 UUID（256bit），库存 SHA-256 摘要；HttpOnly/SameSite=Lax cookie，`Secure` 可配；登录用 dummy hash 做恒定时间比较防枚举、`spawn_blocking` 防阻塞、email+ip 与 ip 双阈值限流。
 - **RBAC**：`AuthContext.require_admin/require_analyst`，工作区 AI 配置仅 Owner/Admin；数据接口在 SQL 层用 `(? IS NULL OR workspace_id=?)` 强制租户隔离。（当前实际只会创建 owner，见评审 H3。）
-- **SSRF**：reqwest 禁重定向；`validate_base_url_network` 解析 DNS 后逐 IP 拒绝 loopback/私网/link-local/CGNAT/保留段（v4+v6+IPv4-mapped），公网强制 HTTPS，拒绝 URL 内嵌凭据；私网需部署者显式开 `ANYDATAS_AI_ALLOW_PRIVATE_NETWORK`。（DNS-rebinding TOCTOU 见评审 M1。）
+- **AI 出站**：reqwest 禁重定向，`validate_base_url_network` 固定本次 DNS 解析结果，公网强制 HTTPS 并拒绝 URL 内嵌凭据；本机和局域网模型由工作区管理员直接配置。QuickJS `http.request` 另行使用部署级白名单和私网开关，两套策略不共享状态。
 - **浏览器边界**：强 CSP、`X-Frame-Options: DENY`、nosniff、referrer-policy、permissions-policy；AI Markdown 经 DOMPurify 清洗；CSV 导出防公式注入（值已防、表头未防，见评审 M2）。
 - **可观测**：`/api/metrics` 需 Bearer；只暴露低基数聚合（不含 user/workspace/path/SQL）。
 

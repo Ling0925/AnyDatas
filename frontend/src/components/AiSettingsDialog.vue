@@ -198,8 +198,8 @@ function applySettings(settings: AiSettings) {
       </div>
 
       <p class="ai-settings-hint">
-        启用后地址会做网络校验：默认拒绝本机/私网；本地模型请部署时设置
-        <code>ANYDATAS_AI_ALLOW_PRIVATE_NETWORK=1</code>。
+        公网 AI 接口必须使用 HTTPS；本机和局域网地址可直接使用。查询后处理 JS 的
+        <code>http.request</code> 使用独立的部署级网络策略。
       </p>
     </div>
     <template #footer>

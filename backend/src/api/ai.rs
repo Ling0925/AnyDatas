@@ -74,7 +74,7 @@ async fn get_settings(
 
 /**
  * 保存工作区 OpenAI-compatible Chat 配置，空白 API Key 表示保留已有密钥。
- * 地址在落库前执行网络边界校验，可避免管理员误把 Agent 配置成内部敏感服务。
+ * 地址在落库前解析并校验协议；AI Provider 允许本机和局域网地址，不复用 QuickJS 沙盒网络策略。
  */
 async fn update_settings(
     State(state): State<SharedState>,
@@ -86,7 +86,7 @@ async fn update_settings(
         tracing::warn!(?error, "AI settings base_url rejected");
         error
     })?;
-    agent_provider::validate_base_url_network(&state, &base_url)
+    agent_provider::validate_base_url_network(&base_url)
         .await
         .map_err(|error| {
             tracing::warn!(%base_url, ?error, "AI settings network validation failed");
@@ -239,7 +239,88 @@ fn normalize_model(value: &str, required: bool) -> AppResult<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crate::{
+        db,
+        models::{AppState, JsRuntimeLimits, QueryRuntimeLimits, RuntimeMetrics},
+    };
+
     use super::*;
+
+    /**
+     * 构造默认禁止 QuickJS 私网请求的 AI 设置测试状态。
+     *
+     * 为什么这么做：AI 配置与 JS 沙盒必须使用彼此独立的网络策略；好处是回归测试能直接锁定真实保存入口，而不是只测试 URL 工具函数。
+     */
+    async fn private_ai_settings_state() -> (tempfile::TempDir, SharedState, AuthContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path().to_path_buf();
+        let pool = db::connect(&format!("sqlite://{}", data_dir.join("test.db").display()))
+            .await
+            .unwrap();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO users (id, email, name, password_hash, created_at, updated_at) VALUES ('ai-user', 'ai@example.com', 'AI 管理员', 'hash', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO workspaces (id, name, created_at, updated_at) VALUES ('ai-workspace', 'AI 工作区', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO workspace_memberships (user_id, workspace_id, role, created_at) VALUES ('ai-user', 'ai-workspace', 'owner', ?)")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let state = Arc::new(AppState {
+            pool,
+            data_dir,
+            max_upload_bytes: 1_048_576,
+            session_ttl_days: 7,
+            cookie_secure: false,
+            metrics_token: None,
+            secret_key: [7; 32],
+            query_control: Default::default(),
+            cache_build_locks: Default::default(),
+            query_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            file_parse_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            query_max_concurrency: 1,
+            file_parse_max_concurrency: 1,
+            resource_queue_timeout_seconds: 5,
+            query_timeout_seconds: 30,
+            background_query_timeout_seconds: 60,
+            file_parse_timeout_seconds: 60,
+            query_runtime: QueryRuntimeLimits {
+                memory_limit_mb: 256,
+                threads: 1,
+                temp_limit_mb: 256,
+                min_free_space_bytes: 0,
+                max_artifact_bytes: 1_048_576,
+            },
+            js_runtime: JsRuntimeLimits::test_default(),
+            job_result_retention_days: 30,
+            metrics: RuntimeMetrics::new(),
+            agent_control: Default::default(),
+            agent_events: Default::default(),
+            agent_max_steps: 4,
+            agent_timeout_seconds: 30,
+            agent_context_chars: 80_000,
+        });
+        let auth = AuthContext {
+            user_id: "ai-user".to_owned(),
+            email: "ai@example.com".to_owned(),
+            name: "AI 管理员".to_owned(),
+            workspace_id: "ai-workspace".to_owned(),
+            workspace_name: "AI 工作区".to_owned(),
+            role: "owner".to_owned(),
+        };
+        (directory, state, auth)
+    }
 
     #[test]
     fn normalizes_saved_provider_values() {
@@ -255,5 +336,33 @@ mod tests {
         assert!(normalize_base_url("https://user:secret@example.com/v1").is_err());
         assert!(normalize_model("", true).is_err());
         assert!(normalize_model("", false).is_ok());
+    }
+
+    /**
+     * AI 本机地址不受 QuickJS 私网开关影响。
+     *
+     * 为什么这么做：本地 OpenAI-compatible 服务是桌面端的正常目标；好处是收紧脚本沙盒时不会意外阻断 AI 设置和 Agent 调用。
+     */
+    #[tokio::test]
+    async fn saves_private_ai_endpoint_when_js_private_network_is_disabled() {
+        let (_directory, state, auth) = private_ai_settings_state().await;
+        assert!(!state.js_runtime.allow_private_network);
+
+        let response = update_settings(
+            State(state),
+            auth,
+            Json(UpdateAiSettingsRequest {
+                enabled: true,
+                base_url: "http://127.0.0.1:11434/v1".to_owned(),
+                model: "local-model".to_owned(),
+                api_key: None,
+                clear_api_key: false,
+            }),
+        )
+        .await
+        .expect("AI private endpoint must not depend on the QuickJS sandbox policy");
+
+        assert_eq!(response.0.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(response.0.model, "local-model");
     }
 }

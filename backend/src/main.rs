@@ -46,7 +46,6 @@ async fn main() -> anyhow::Result<()> {
         session_ttl_days: config.session_ttl_days,
         cookie_secure: config.cookie_secure,
         metrics_token: config.metrics_token.clone(),
-        allow_private_ai_endpoints: config.allow_private_ai_endpoints,
         secret_key,
         query_control: Default::default(),
         cache_build_locks: Default::default(),
