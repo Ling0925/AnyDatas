@@ -1,9 +1,11 @@
 import { mkdir, readdir, rm } from "node:fs/promises"
 import { basename, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { build } from "esbuild"
 
-const sourceDirectory = new URL("../src/", import.meta.url)
-const outputDirectory = new URL("../dist/", import.meta.url)
+// fileURLToPath 会按当前平台去掉 Windows file URL 的前导斜杠，避免 esbuild 收到 `\\D:\\...` 非法路径。
+const sourceDirectory = fileURLToPath(new URL("../src/", import.meta.url))
+const outputDirectory = fileURLToPath(new URL("../dist/", import.meta.url))
 const runtimeNames = new Set(["main.ts", "preload.ts"])
 
 let sourceNames = []
@@ -25,8 +27,8 @@ await mkdir(outputDirectory, { recursive: true })
 
 if (runtimeEntries.includes("main.ts")) {
   await build({
-    entryPoints: { main: join(sourceDirectory.pathname, "main.ts") },
-    outdir: outputDirectory.pathname,
+    entryPoints: { main: join(sourceDirectory, "main.ts") },
+    outdir: outputDirectory,
     bundle: true,
     format: "esm",
     platform: "node",
@@ -38,8 +40,8 @@ if (runtimeEntries.includes("main.ts")) {
 
 if (runtimeEntries.includes("preload.ts")) {
   await build({
-    entryPoints: [{ in: join(sourceDirectory.pathname, "preload.ts"), out: "preload" }],
-    outdir: outputDirectory.pathname,
+    entryPoints: [{ in: join(sourceDirectory, "preload.ts"), out: "preload" }],
+    outdir: outputDirectory,
     outExtension: { ".js": ".cjs" },
     bundle: true,
     format: "cjs",
@@ -53,9 +55,9 @@ if (runtimeEntries.includes("preload.ts")) {
 if (runtimeEntries.length === 0 && coreEntries.length > 0) {
   await build({
     entryPoints: Object.fromEntries(
-      coreEntries.map((name) => [basename(name, ".ts"), join(sourceDirectory.pathname, name)]),
+      coreEntries.map((name) => [basename(name, ".ts"), join(sourceDirectory, name)]),
     ),
-    outdir: outputDirectory.pathname,
+    outdir: outputDirectory,
     bundle: true,
     format: "esm",
     platform: "node",
