@@ -59,6 +59,18 @@ if (cssBytes > 180 * 1024) {
   throw new Error(`Initial CSS exceeds 180 KiB: ${Math.ceil(cssBytes / 1024)} KiB`)
 }
 
+/** Electron 以 file:// 加载 dist/index.html，根绝对路径会解析成 file:///... 而找不到资源。 */
+const html = await readFile(resolve(root, 'dist/index.html'), 'utf8')
+const rootAbsoluteUrls = [...html.matchAll(/(?:src|href)=(["'])(.+?)\1/g)]
+  .map((match) => match[2])
+  .filter((url) => /^\/[^/]/.test(url))
+
+if (rootAbsoluteUrls.length) {
+  throw new Error(
+    `Root-absolute local URLs break Electron loadFile: ${rootAbsoluteUrls.join(', ')}`,
+  )
+}
+
 console.log(
   `Initial bundle: ${Math.ceil(jsBytes / 1024)} KiB JS, `
   + `${Math.ceil(cssBytes / 1024)} KiB CSS; Monaco and ECharts remain lazy.`,

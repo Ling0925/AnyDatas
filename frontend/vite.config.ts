@@ -5,6 +5,8 @@ import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 
 // https://vite.dev/config/
 export default defineConfig({
+  // 相对 base：Electron 通过 loadFile 以 file:// 打开 dist/index.html，根绝对路径会变成 file:///... 而失效。
+  base: './',
   plugins: [
     vue(),
     // 模板级按需解析避免把整套 Element Plus 注入入口包，各路由只加载实际组件。

@@ -7,6 +7,7 @@ import {
   ChevronDown,
   Database,
   FileSpreadsheet,
+  FolderSync,
   ListChecks,
   LogOut,
   Settings2,
@@ -27,8 +28,10 @@ const aiSettingsVisible = ref(false)
 const activePath = computed(() => {
   if (route.path.startsWith('/tasks')) return '/tasks'
   if (route.path.startsWith('/agent')) return '/agent'
+  if (route.path.startsWith('/file-sources')) return '/file-sources'
   return '/workbench'
 })
+const hasDesktop = Boolean((window as { desktop?: unknown }).desktop)
 const initials = computed(() => auth.user?.name.trim().slice(0, 2).toUpperCase() || 'U')
 const canManageAi = computed(() => auth.user?.role === 'owner' || auth.user?.role === 'admin')
 const roleLabels: Record<WorkspaceRole, string> = {
@@ -85,6 +88,15 @@ async function handleUserCommand(command: string) {
         >
           <ListChecks :size="16" />
           后台任务
+        </button>
+        <button
+          v-if="hasDesktop"
+          type="button"
+          :class="{ active: activePath === '/file-sources' }"
+          @click="router.push('/file-sources')"
+        >
+          <FolderSync :size="16" />
+          文件采集
         </button>
       </nav>
 

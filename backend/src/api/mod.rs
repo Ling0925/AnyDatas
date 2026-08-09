@@ -1,6 +1,7 @@
 mod agent;
 mod ai;
 pub(crate) mod auth;
+mod data_source_replacement;
 mod data_sources;
 pub(crate) mod jobs;
 mod metrics;

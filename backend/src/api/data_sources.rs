@@ -30,6 +30,10 @@ pub fn router(max_upload_bytes: usize) -> Router<SharedState> {
     let upload_routes = Router::new()
         .route("/data-sources", get(list).post(upload))
         .route("/data-sources/inspect", axum::routing::post(inspect_upload))
+        .route(
+            "/data-sources/{id}/replace",
+            axum::routing::post(super::data_source_replacement::replace),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(max_upload_bytes));
     Router::new()
         .merge(upload_routes)
@@ -58,12 +62,18 @@ struct StagedImportRow {
     expires_at: String,
 }
 
-struct StoredUpload {
-    original_filename: String,
-    file_kind: &'static str,
-    media_type: &'static str,
-    path: PathBuf,
-    size_bytes: usize,
+pub(super) struct StoredUpload {
+    pub(super) original_filename: String,
+    pub(super) file_kind: &'static str,
+    pub(super) media_type: &'static str,
+    pub(super) path: PathBuf,
+    pub(super) size_bytes: usize,
+}
+
+pub(super) struct StoreMultipartOptions<'a> {
+    pub(super) directory: &'a Path,
+    pub(super) file_id: &'a str,
+    pub(super) reject_tables: bool,
 }
 
 struct PreparedImportTable {
@@ -115,7 +125,16 @@ async fn inspect_upload(
     cleanup_expired_imports(&state).await?;
     let token = Uuid::new_v4().to_string();
     let staged_dir = state.data_dir.join("staging");
-    let stored = store_multipart_file(&state, multipart, &staged_dir, &token).await?;
+    let stored = store_multipart_file(
+        &state,
+        multipart,
+        StoreMultipartOptions {
+            directory: &staged_dir,
+            file_id: &token,
+            reject_tables: false,
+        },
+    )
+    .await?;
     let inspect_path = stored.path.clone();
     let file_kind = stored.file_kind.to_owned();
     let sheets = match resource_control::run_file_task(
@@ -754,17 +773,26 @@ async fn delete_one(
 }
 
 /// 流式保存 Multipart 文件并在超过上限时立即清理，避免将大文件完整缓存在内存中。
-async fn store_multipart_file(
+pub(super) async fn store_multipart_file(
     state: &SharedState,
     mut multipart: Multipart,
-    directory: &Path,
-    file_id: &str,
+    options: StoreMultipartOptions<'_>,
 ) -> AppResult<StoredUpload> {
     let field = multipart
         .next_field()
         .await
         .map_err(|error| AppError::BadRequest(format!("无法读取上传内容: {error}")))?
         .ok_or_else(|| AppError::BadRequest("请选择 Excel 或 CSV 文件".to_owned()))?;
+    if options.reject_tables && field.name() == Some("tables") {
+        return Err(AppError::BadRequest(
+            "当前版本不支持显式 tables 配置".to_owned(),
+        ));
+    }
+    if field.name() != Some("file") {
+        return Err(AppError::BadRequest(
+            "Multipart 请求必须包含 file 字段".to_owned(),
+        ));
+    }
     let original_filename = field
         .file_name()
         .map(str::to_owned)
@@ -775,10 +803,16 @@ async fn store_multipart_file(
         .map(str::to_ascii_lowercase)
         .ok_or_else(|| AppError::BadRequest("无法识别文件扩展名".to_owned()))?;
     let (file_kind, media_type) = file_metadata(&extension)?;
-    tokio::fs::create_dir_all(directory).await?;
-    maintenance::ensure_free_space(directory, state.query_runtime.min_free_space_bytes, 0)
-        .map_err(|error| AppError::BadRequest(error.to_string()))?;
-    let path = directory.join(format!("{file_id}.{extension}"));
+    tokio::fs::create_dir_all(options.directory).await?;
+    maintenance::ensure_free_space(
+        options.directory,
+        state.query_runtime.min_free_space_bytes,
+        0,
+    )
+    .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let path = options
+        .directory
+        .join(format!("{}.{extension}", options.file_id));
     let mut output = tokio::fs::File::create(&path).await?;
     let mut size_bytes = 0usize;
     let mut next_space_check = 64 * 1024 * 1024usize;
@@ -796,7 +830,7 @@ async fn store_multipart_file(
         }
         if size_bytes >= next_space_check {
             if let Err(error) = maintenance::ensure_free_space(
-                directory,
+                options.directory,
                 state.query_runtime.min_free_space_bytes,
                 0,
             ) {
@@ -810,6 +844,19 @@ async fn store_multipart_file(
     }
     output.flush().await?;
     drop(output);
+    drop(field);
+    while let Some(extra) = multipart
+        .next_field()
+        .await
+        .map_err(|error| AppError::BadRequest(format!("无法读取额外上传字段: {error}")))?
+    {
+        if options.reject_tables && extra.name() == Some("tables") {
+            let _ = tokio::fs::remove_file(&path).await;
+            return Err(AppError::BadRequest(
+                "当前版本不支持显式 tables 配置".to_owned(),
+            ));
+        }
+    }
     Ok(StoredUpload {
         original_filename,
         file_kind,
@@ -958,7 +1005,7 @@ async fn discard_staged_file(state: &SharedState, token: &str, stored_path: &str
     Ok(())
 }
 
-async fn required_source(
+pub(super) async fn required_source(
     state: &SharedState,
     id: &str,
     workspace_id: &str,
@@ -986,6 +1033,14 @@ fn file_metadata(extension: &str) -> AppResult<(&'static str, &'static str)> {
         )),
     }
 }
+
+#[cfg(test)]
+#[path = "data_source_replacement_test_support.rs"]
+mod replacement_test_support;
+
+#[cfg(test)]
+#[path = "data_source_replacement_tests.rs"]
+mod replacement_tests;
 
 #[cfg(test)]
 mod tests {

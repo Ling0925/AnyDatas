@@ -30,8 +30,12 @@ import type {
   QueryTableBinding,
 } from './types'
 
+// Electron preload 会把本地 API 代理地址注入 __ANYDATAS_API_BASE__（如 http://127.0.0.1:28090）；
+// 网页端保持默认 /api 行为不变。globalThis 类型断言是本文件唯一允许的 as 用法。
+const API_BASE: string = (globalThis as { __ANYDATAS_API_BASE__?: string }).__ANYDATAS_API_BASE__ ?? ''
+
 const client = axios.create({
-  baseURL: '/api',
+  baseURL: API_BASE ? `${API_BASE}/api` : '/api',
   timeout: 120_000,
   withCredentials: true,
 })
@@ -155,6 +159,12 @@ export const api = {
     const form = new FormData()
     form.append('file', file)
     return (await client.post<DataSource>('/data-sources', form)).data
+  },
+  /** 本地文件采集用它把新文件覆盖到既有数据源，服务器复用原逻辑表配置解析。 */
+  async replaceSource(id: string, file: File) {
+    const form = new FormData()
+    form.append('file', file)
+    return (await client.post<DataSource>(`/data-sources/${encodeURIComponent(id)}/replace`, form)).data
   },
   async inspectSource(file: File) {
     const form = new FormData()

@@ -184,7 +184,6 @@ body,
 }
 
 body {
-  min-width: 1180px;
   overflow: hidden;
   background: var(--app-bg);
 }
@@ -434,8 +433,8 @@ input:focus-visible {
 }
 
 .user-menu-copy small {
-  color: var(--subtle);
-  font-size: 9px;
+  color: var(--text-secondary);
+  font-size: 10px;
 }
 
 .user-dropdown-menu {
@@ -465,6 +464,37 @@ input:focus-visible {
 .user-dropdown-context span {
   color: var(--subtle);
   font-size: 10px;
+}
+
+/* 紧凑顶栏：1024px 桌面窗口下让品牌 / 导航 / 工作区 / 账户控件全部收进视口，
+   不隐藏任何必需导航，只压缩间距与最小轨道宽度。 */
+@media (max-width: 1180px) {
+  .topbar {
+    grid-template-columns: minmax(150px, 1fr) auto minmax(230px, 1fr);
+    padding: 0 12px;
+  }
+
+  .workspace-switch {
+    gap: 2px;
+  }
+
+  .workspace-switch button {
+    min-width: 96px;
+    padding: 0 10px;
+    gap: 5px;
+  }
+
+  .topbar-meta {
+    gap: 6px;
+  }
+
+  .workspace-identity {
+    max-width: 130px;
+  }
+
+  .user-menu-copy {
+    max-width: 84px;
+  }
 }
 
 .shell-content {
@@ -4220,6 +4250,16 @@ input:focus-visible {
 }
 
 .status-badge.canceled {
+  color: var(--muted);
+  background: var(--gray-soft);
+}
+
+.status-badge.skipped {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.status-badge.empty {
   color: var(--muted);
   background: var(--gray-soft);
 }
