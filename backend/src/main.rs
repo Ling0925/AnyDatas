@@ -6,7 +6,11 @@ mod models;
 mod services;
 mod workers;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    io::{self, Write},
+    net::SocketAddr,
+    sync::Arc,
+};
 
 use anyhow::Context;
 use config::Config;
@@ -90,7 +94,19 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(&config.bind)
         .await
         .with_context(|| format!("failed to bind {}", config.bind))?;
-    info!(address = %config.bind, "AnyDatas API started");
+    let address = listener.local_addr()?;
+    info!(address = %address, "AnyDatas API started");
+    // Electron 使用端口 0 避免固定端口冲突，因此必须输出实际监听地址再进入服务循环。
+    // 机器可读的单行消息让主进程无需解析 tracing 文本，也便于发行二进制在 108 上独立验收。
+    println!(
+        "ANYDATAS_READY {}",
+        serde_json::json!({
+            "address": address.to_string(),
+            "serverVersion": env!("CARGO_PKG_VERSION"),
+            "protocolVersion": 1,
+        })
+    );
+    io::stdout().flush()?;
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

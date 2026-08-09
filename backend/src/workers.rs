@@ -161,8 +161,8 @@ async fn run_claimed_job(state: &SharedState, id: &str) -> Result<(), AppError> 
         Ok(result) => {
             if result.sample.post_processed {
                 append_log(
-                    &state,
-                    &id,
+                    state,
+                    id,
                     "info",
                     &format!(
                         "后处理 JS 完成，{} ms",
@@ -171,12 +171,12 @@ async fn run_claimed_job(state: &SharedState, id: &str) -> Result<(), AppError> 
                 )
                 .await?;
                 for line in &result.console {
-                    append_log(&state, &id, "info", &format!("后处理 console: {line}")).await?;
+                    append_log(state, id, "info", &format!("后处理 console: {line}")).await?;
                 }
             }
             append_log(
-                &state,
-                &id,
+                state,
+                id,
                 "success",
                 &format!(
                     "查询完成，共生成 {} 行完整结果，大小 {:.2} MB",

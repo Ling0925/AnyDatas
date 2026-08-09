@@ -16,13 +16,14 @@ use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Request, State},
     http::{
-        HeaderValue,
+        HeaderValue, StatusCode,
         header::{HeaderName, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS},
     },
     middleware::{self, Next},
     response::Response,
     routing::get,
 };
+use subtle::ConstantTimeEq;
 use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     services::{ServeDir, ServeFile},
@@ -36,11 +37,24 @@ use crate::{
     services::maintenance,
 };
 
+const DESKTOP_PROTOCOL_VERSION: u32 = 1;
+const DESKTOP_TOKEN_HEADER: &str = "x-anydatas-desktop-token";
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopHandshake {
+    service: &'static str,
+    server_version: &'static str,
+    protocol_version: u32,
+    capabilities: &'static [&'static str],
+}
+
 pub fn router(state: Arc<AppState>, config: &Config) -> Router {
     let api = Router::new()
         .route("/health", get(readiness))
         .route("/livez", get(liveness))
         .route("/readyz", get(readiness))
+        .route("/desktop-handshake", get(desktop_handshake))
         .merge(auth::router())
         .merge(ai::router())
         .merge(agent::router())
@@ -60,13 +74,54 @@ pub fn router(state: Arc<AppState>, config: &Config) -> Router {
     let static_files =
         ServeDir::new(&config.web_dir).fallback(ServeFile::new(config.web_dir.join("index.html")));
 
-    Router::new()
+    let router = Router::new()
         .nest("/api", api)
         .fallback_service(static_files)
         .layer(middleware::from_fn(security_headers))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http());
+
+    // 单机模式由 Electron 代理注入高熵令牌；远端部署不配置令牌时保持原有网络接口。
+    // 把校验放在最外层的好处是静态页面和 API 都无法绕过同一条本机进程访问规则。
+    match config.desktop_token.as_deref() {
+        Some(token) => router.layer(middleware::from_fn_with_state(
+            Arc::<str>::from(token),
+            require_desktop_token,
+        )),
+        None => router,
+    }
+}
+
+/// 返回桌面端与服务端之间稳定的兼容协议和能力集合。
+///
+/// 独立于产品版本的协议号让远端连接可以在登录前快速拒绝不兼容服务端，避免登录后才出现零散接口错误。
+async fn desktop_handshake() -> Json<DesktopHandshake> {
+    Json(DesktopHandshake {
+        service: "anydatas-server",
+        server_version: env!("CARGO_PKG_VERSION"),
+        protocol_version: DESKTOP_PROTOCOL_VERSION,
+        capabilities: &["file-sources", "agent", "post-js"],
+    })
+}
+
+/// 比较代理传入的桌面令牌，并使用固定时间比较降低令牌前缀侧信道风险。
+///
+/// 令牌只存在于主进程与子进程之间，统一校验可以阻止同一台电脑上的普通网页直接访问随机回环端口。
+async fn require_desktop_token(
+    State(expected): State<Arc<str>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let actual = request
+        .headers()
+        .get(DESKTOP_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !bool::from(expected.as_bytes().ct_eq(actual.as_bytes())) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(request).await)
 }
 
 /// 记录低基数 HTTP 计数；请求详情继续交给 TraceLayer，指标不会暴露路径或租户信息。
@@ -148,4 +203,21 @@ async fn readiness(State(state): State<Arc<AppState>>) -> AppResult<Json<HealthR
         status: "ok",
         service: "anydatas-api",
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 握手必须使用独立协议版本，不把 Cargo 的产品版本误当作接口兼容依据。
+    ///
+    /// 该断言的好处是后续服务端补丁发布不会无意中破坏桌面端选择逻辑。
+    #[tokio::test]
+    async fn desktop_handshake_exposes_protocol_and_version() {
+        let payload = desktop_handshake().await.0;
+        assert_eq!(payload.service, "anydatas-server");
+        assert_eq!(payload.server_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(payload.protocol_version, 1);
+        assert!(payload.capabilities.contains(&"file-sources"));
+    }
 }

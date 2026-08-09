@@ -10,6 +10,7 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub database_url: String,
     pub web_dir: PathBuf,
+    pub desktop_token: Option<String>,
     pub max_upload_bytes: usize,
     pub session_ttl_days: i64,
     pub cookie_secure: bool,
@@ -159,6 +160,11 @@ impl Config {
         let js_http_max_request_body_bytes =
             parse_usize("ANYDATAS_JS_HTTP_MAX_REQUEST_BODY_BYTES", 1_048_576)?;
         let js_http_allowlist = load_js_http_allowlist()?;
+        let desktop_token =
+            read_optional_secret("ANYDATAS_DESKTOP_TOKEN", "ANYDATAS_DESKTOP_TOKEN_FILE")?;
+        if desktop_token.as_ref().is_some_and(|token| token.len() < 32) {
+            anyhow::bail!("ANYDATAS_DESKTOP_TOKEN must contain at least 32 bytes");
+        }
 
         if !(1_024..=1_048_576).contains(&js_max_script_bytes) {
             anyhow::bail!("ANYDATAS_JS_MAX_SCRIPT_BYTES must be between 1024 and 1048576");
@@ -217,6 +223,7 @@ impl Config {
             web_dir: PathBuf::from(
                 env::var("ANYDATAS_WEB_DIR").unwrap_or_else(|_| "frontend/dist".to_owned()),
             ),
+            desktop_token,
             max_upload_bytes,
             session_ttl_days: session_ttl_days as i64,
             cookie_secure: parse_bool("ANYDATAS_COOKIE_SECURE", false)?,
@@ -367,6 +374,8 @@ mod tests {
             "ANYDATAS_JS_HTTP_MAX_TIMEOUT_MS",
             "ANYDATAS_JS_HTTP_MAX_BODY_BYTES",
             "ANYDATAS_JS_HTTP_MAX_REQUEST_BODY_BYTES",
+            "ANYDATAS_DESKTOP_TOKEN",
+            "ANYDATAS_DESKTOP_TOKEN_FILE",
         ];
         for key in KEYS {
             unsafe { env::remove_var(key) };
@@ -443,6 +452,24 @@ mod tests {
         }
         let err = Config::from_env().unwrap_err().to_string();
         assert!(err.contains("ANYDATAS_JS_TIMEOUT_MS"), "unexpected: {err}");
+        clear_js_env();
+    }
+
+    /// 桌面令牌会保护仅监听回环地址的内置进程，过短令牌必须在绑定端口前失败。
+    ///
+    /// 提前拒绝弱令牌的好处是代理与后端不会在错误安全配置下短暂进入可用状态。
+    #[test]
+    fn desktop_token_requires_32_bytes() {
+        let _guard = env_lock();
+        clear_js_env();
+        unsafe {
+            env::set_var("ANYDATAS_DESKTOP_TOKEN", "too-short");
+        }
+        let error = Config::from_env().unwrap_err().to_string();
+        assert!(
+            error.contains("ANYDATAS_DESKTOP_TOKEN"),
+            "unexpected: {error}"
+        );
         clear_js_env();
     }
 }
