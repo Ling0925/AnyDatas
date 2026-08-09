@@ -11,7 +11,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: anydatas-ci-${{ github.ref }}
+  # PR 与其目标分支共享并发组；合并后只保留最终 main 验证，避免同一提交重复消耗 Actions。
+  group: anydatas-ci-${{ github.event.pull_request.base.ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:

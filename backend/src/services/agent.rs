@@ -3357,7 +3357,6 @@ mod tests {
             session_ttl_days: 7,
             cookie_secure: false,
             metrics_token: None,
-            allow_private_ai_endpoints: true,
             secret_key: [7u8; 32],
             query_control: Default::default(),
             cache_build_locks: Default::default(),

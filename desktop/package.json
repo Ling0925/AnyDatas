@@ -1,6 +1,6 @@
 {
   "name": "anydatas-desktop",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "AnyDatas desktop client",
   "author": "AnyDatas",
   "private": true,
@@ -9,8 +9,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:renderer": "pnpm --dir ../frontend build && pnpm build && electron scripts/check-production-renderer.mjs",
-    "test:renderer:ci": "pnpm --dir ../frontend build && pnpm build && electron --no-sandbox scripts/check-production-renderer.mjs",
+    "test:renderer": "pnpm --dir ../frontend build && pnpm build && electron scripts/check-production-renderer.mjs && electron scripts/check-backend-restore.mjs && electron scripts/check-auth-validation.mjs && electron scripts/check-query-error.mjs",
+    "test:renderer:ci": "pnpm --dir ../frontend build && pnpm build && electron --no-sandbox scripts/check-production-renderer.mjs && electron --no-sandbox scripts/check-backend-restore.mjs && electron --no-sandbox scripts/check-auth-validation.mjs && electron --no-sandbox scripts/check-query-error.mjs",
     "build": "node scripts/build.mjs",
     "package:win": "node scripts/package.mjs win",
     "package:win:dir": "node scripts/package.mjs win-dir",

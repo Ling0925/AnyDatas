@@ -403,7 +403,7 @@ pub async fn call_chat(
     reasoning_effort: &str,
     stream_sink: Option<mpsc::UnboundedSender<AssistantStreamUpdate>>,
 ) -> AppResult<AssistantTurn> {
-    let resolved = validate_base_url_network(state, &settings.base_url).await?;
+    let resolved = validate_base_url_network(&settings.base_url).await?;
     let request_timeout = std::time::Duration::from_secs(state.agent_timeout_seconds);
     let client = resolved.pinned_client(request_timeout)?;
     let request_chars = messages
@@ -671,8 +671,8 @@ fn chat_endpoint(base_url: &str) -> AppResult<Url> {
     Url::parse(&endpoint).map_err(|_| AppError::BadRequest("Chat 接口地址无效".to_owned()))
 }
 
-/// 经私网校验后的出站目标：保留原始 URL（HTTPS 的 SNI 与证书校验仍用主机名），同时携带
-/// 已核验的具体地址，供请求阶段把 DNS 固定到这些 IP。
+/// 经解析后的 AI 出站目标：保留原始 URL（HTTPS 的 SNI 与证书校验仍用主机名），同时携带
+/// 本次解析得到的具体地址，供请求阶段把 DNS 固定到这些 IP。
 pub struct ResolvedEndpoint {
     pub url: Url,
     host: String,
@@ -680,27 +680,23 @@ pub struct ResolvedEndpoint {
 }
 
 impl ResolvedEndpoint {
-    /// 构建一次性 HTTP 客户端，把目标主机名固定解析到校验时得到的 IP，从而堵住
-    /// “校验用一次 DNS、请求时再解析到 169.254.169.254/内网” 的 rebinding TOCTOU；
-    /// 同时保留禁止重定向。主机名本身是 IP 字面量时该固定是等价 no-op。
+    /// 构建一次性 HTTP 客户端，把目标主机名固定到本次解析结果并禁止重定向。
+    /// 这样协议判断与实际连接使用同一目标；主机名本身是 IP 字面量时该固定是等价 no-op。
     fn pinned_client(&self, request_timeout: Duration) -> AppResult<reqwest::Client> {
         reqwest::Client::builder()
             .timeout(request_timeout)
             .redirect(reqwest::redirect::Policy::none())
             .resolve_to_addrs(&self.host, &self.socket_addrs)
             .build()
-            .map_err(|error| AppError::Internal(format!("无法初始化受限 HTTP 客户端: {error}")))
+            .map_err(|error| AppError::Internal(format!("无法初始化 AI HTTP 客户端: {error}")))
     }
 }
 
-/// 解析 OpenAI-compatible 地址并拒绝默认不可访问的本机、私网和保留网段。
+/// 解析 OpenAI-compatible 地址并固定本次请求使用的 DNS 结果。
 ///
-/// DNS 校验、禁止重定向与“请求阶段固定到已核验 IP”共同缩小 SSRF 面；确需连接局域网模型时
-/// 必须由部署者显式开启环境变量，工作区管理员不能自行扩大服务器网络权限。
-pub async fn validate_base_url_network(
-    state: &SharedState,
-    base_url: &str,
-) -> AppResult<ResolvedEndpoint> {
+/// 为什么这么做：AI Provider 本身允许管理员配置本机和局域网服务，不复用 QuickJS 沙盒的出网策略；
+/// 好处是 Ollama 等本地模型可直接使用，同时仍禁止重定向并让校验与实际连接使用同一地址。
+pub async fn validate_base_url_network(base_url: &str) -> AppResult<ResolvedEndpoint> {
     let endpoint = chat_endpoint(base_url)?;
     let host = endpoint
         .host_str()
@@ -720,20 +716,7 @@ pub async fn validate_base_url_network(
     if addresses.is_empty() {
         return Err(AppError::BadRequest("AI 接口主机名没有可用地址".to_owned()));
     }
-    let hostname_is_local = host.eq_ignore_ascii_case("localhost")
-        || host.to_ascii_lowercase().ends_with(".localhost")
-        || host.to_ascii_lowercase().ends_with(".local");
-    let contains_restricted = hostname_is_local
-        || addresses
-            .iter()
-            .copied()
-            .any(crate::services::net_guard::is_restricted_address);
-    if contains_restricted && !state.allow_private_ai_endpoints {
-        return Err(AppError::BadRequest(
-            "AI 接口解析到本机或私有网络；部署者需显式开启 ANYDATAS_AI_ALLOW_PRIVATE_NETWORK"
-                .to_owned(),
-        ));
-    }
+    // 公网明文 HTTP 仍可能泄漏 API Key；本机和私网 HTTP 则是本地模型的正常部署方式。
     if endpoint.scheme() == "http"
         && addresses
             .iter()

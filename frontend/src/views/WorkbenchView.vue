@@ -6,6 +6,7 @@ import {
   BarChart3,
   ChevronDown,
   ChevronRight,
+  CircleAlert,
   Clock3,
   Download,
   Link2,
@@ -34,6 +35,8 @@ const router = useRouter()
 const store = useWorkspaceStore()
 const activeTab = ref<'query' | 'preview'>('query')
 const resultMode = ref<'table' | 'chart'>('table')
+// 查询失败属于结果状态而不是瞬时通知；保留文本可让用户对照 SQL 修改，成功重跑时再清空。
+const queryError = ref('')
 const postJsOpen = ref(false)
 const taskDialogVisible = ref(false)
 const taskForm = reactive({ name: '' })
@@ -75,12 +78,15 @@ onMounted(async () => {
 onUnmounted(() => completionDisposable?.dispose())
 
 async function runQuery() {
+  queryError.value = ''
   try {
     await store.runQuery()
     // AI 建议了图表时，结果默认以该图表呈现（用户仍可切回表格或手调）。
     if (store.appliedChart && store.queryResult) resultMode.value = 'chart'
   } catch (error) {
-    ElMessage.error(errorMessage(error))
+    queryError.value = errorMessage(error)
+    resultMode.value = 'table'
+    ElMessage.error(queryError.value)
   }
 }
 
@@ -396,18 +402,18 @@ function configureSqlCompletion(monaco: any) {
             <div class="pane-toolbar result-toolbar">
               <div class="pane-title">
                 <strong>查询结果</strong>
-                <span v-if="store.queryResult">
+                <span v-if="store.queryResult && !queryError">
                   {{ store.queryResult.rowCount.toLocaleString() }} 行 · {{ store.queryResult.elapsedMs }} ms
                 </span>
               </div>
               <div class="result-toolbar-actions">
                 <span
-                  v-if="store.queryResult?.postProcessed"
+                  v-if="store.queryResult?.postProcessed && !queryError"
                   class="result-post-processed"
                 >
                   已后处理 · {{ store.queryResult.postProcessMs ?? 0 }}ms
                 </span>
-                <span v-if="store.queryResult?.truncated" class="result-warning">
+                <span v-if="store.queryResult?.truncated && !queryError" class="result-warning">
                   仅显示前 {{ store.queryResult.rowCount.toLocaleString() }} 行（已截断）
                 </span>
                 <div class="result-view-switch" role="group" aria-label="结果视图">
@@ -417,7 +423,7 @@ function configureSqlCompletion(monaco: any) {
                   <button
                     type="button"
                     :aria-pressed="resultMode === 'chart'"
-                    :disabled="!store.queryResult"
+                    :disabled="!store.queryResult || Boolean(queryError)"
                     @click="resultMode = 'chart'"
                   >
                     <BarChart3 :size="13" /> 图表
@@ -427,7 +433,7 @@ function configureSqlCompletion(monaco: any) {
                   <el-button
                     class="icon-button plain"
                     aria-label="导出 CSV"
-                    :disabled="!store.queryResult"
+                    :disabled="!store.queryResult || Boolean(queryError)"
                     @click="exportResult"
                   >
                     <Download :size="15" />
@@ -435,8 +441,24 @@ function configureSqlCompletion(monaco: any) {
                 </el-tooltip>
               </div>
             </div>
+            <div
+              v-if="queryError"
+              class="query-error-panel"
+              role="alert"
+              aria-live="assertive"
+            >
+              <span class="query-error-icon"><CircleAlert :size="20" /></span>
+              <div class="query-error-copy">
+                <strong>查询执行失败</strong>
+                <p>{{ queryError }}</p>
+                <small v-if="store.queryResult">关闭提示后可继续查看上一次成功结果</small>
+              </div>
+              <button type="button" aria-label="关闭查询错误" @click="queryError = ''">
+                <X :size="16" />
+              </button>
+            </div>
             <DataGrid
-              v-if="resultMode === 'table'"
+              v-else-if="resultMode === 'table'"
               :columns="store.queryResult?.columns ?? []"
               :rows="store.queryResult?.rows ?? []"
               :loading="store.queryLoading"

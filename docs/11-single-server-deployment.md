@@ -164,15 +164,9 @@ Prometheus 和 Grafana 默认仅绑定 `127.0.0.1`。远程运维使用 SSH Tunn
 
 ## 10. AI 网络边界
 
-工作区管理员可以配置 OpenAI Chat Completions-compatible 地址，但不能自行扩大服务器网络权限。默认拒绝 localhost、`.local`、私网、链路本地、云元数据、保留网段和重定向；公网地址必须使用 HTTPS。
+工作区管理员可以配置公网、本机或局域网 OpenAI Chat Completions-compatible 地址。本机与私网模型可以使用 HTTP，公网地址必须使用 HTTPS；客户端禁止重定向，并把请求固定到本次 DNS 解析结果。
 
-只有部署者明确需要连接同机 Ollama 或局域网模型服务时才设置:
-
-```dotenv
-ANYDATAS_AI_ALLOW_PRIVATE_NETWORK=1
-```
-
-开启后应通过主机防火墙限制 AnyDatas 可访问的私网地址，不要把该开关当成通用出网许可。
+AI Provider 不读取 QuickJS 的网络开关。`ANYDATAS_JS_HTTP_ALLOWLIST` 与 `ANYDATAS_JS_ALLOW_PRIVATE_NETWORK` 只约束查询后处理脚本中的 `http.request`，不会影响 AI 设置或 Agent 请求。
 
 ## 11. 升级与回退
 

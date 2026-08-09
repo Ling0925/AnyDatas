@@ -20,7 +20,6 @@ pub struct AppState {
     pub session_ttl_days: i64,
     pub cookie_secure: bool,
     pub metrics_token: Option<String>,
-    pub allow_private_ai_endpoints: bool,
     pub secret_key: [u8; 32],
     pub query_control: Mutex<QueryControl>,
     pub cache_build_locks: CacheBuildLocks,

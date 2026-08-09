@@ -243,7 +243,7 @@ http://192.168.1.10:8080/hooks/
    - URL 前缀：规范化后请求 URL 以该前缀开头
 3. 白名单命中后信任管理员目标 IP；仍不跟随重定向。
 4. 白名单为空时：DNS 后每个 IP 做受限地址检查；存在受限且未放行则失败。
-5. 可选兼容项 `ANYDATAS_JS_ALLOW_PRIVATE_NETWORK=1`：在白名单为空时放宽私网（与 AI 的 private 开关同角色）。白名单非空时不必依赖该开关。
+5. 可选兼容项 `ANYDATAS_JS_ALLOW_PRIVATE_NETWORK=1`：仅在 QuickJS 白名单为空时放宽私网；白名单非空时不必依赖该开关，也不影响 AI Provider。
 
 P1：工作区 Owner/Admin 设置页维护名单；与部署名单同时存在时取 **交集**（工作区不能放大机器权限）。
 

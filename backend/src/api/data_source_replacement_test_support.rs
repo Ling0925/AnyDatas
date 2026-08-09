@@ -71,7 +71,6 @@ impl ReplacementFixture {
             session_ttl_days: 7,
             cookie_secure: false,
             metrics_token: None,
-            allow_private_ai_endpoints: false,
             secret_key: [0; 32],
             query_control: Default::default(),
             cache_build_locks: Default::default(),

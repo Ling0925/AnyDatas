@@ -129,7 +129,7 @@ async function startRuntime(): Promise<void> {
   await proxy.listen()
 
   const userData = app.getPath("userData")
-  const releaseTag = process.env["ANYDATAS_SERVER_RELEASE_TAG"] ?? "server-v0.1.1"
+  const releaseTag = process.env["ANYDATAS_SERVER_RELEASE_TAG"] ?? "server-v0.1.2"
   const installer = new ServerReleaseInstaller({
     userData,
     metadataUrl: serverReleaseMetadataUrl(releaseTag),
