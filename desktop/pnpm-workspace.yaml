@@ -3,4 +3,6 @@ packages:
 
 allowBuilds:
   electron: true
+  # NSIS 发行不使用 Squirrel 的 electron-winstaller；显式禁用其安装脚本可让 CI 保持非交互且可复现。
+  electron-winstaller: false
   esbuild: true
