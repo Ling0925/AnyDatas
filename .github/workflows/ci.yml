@@ -105,7 +105,9 @@ jobs:
           pnpm --dir desktop typecheck
 
       - name: Verify production Electron renderer
-        run: xvfb-run -a pnpm --dir desktop test:renderer
+        # GitHub 托管 Runner 无法把 Electron 下载的 chrome-sandbox 设为 root:4755；
+        # 仅 smoke 子进程禁用 OS sandbox，产品 BrowserWindow 仍保持 sandbox: true。
+        run: xvfb-run -a pnpm --dir desktop test:renderer:ci
 
   operations:
     name: Operations and configuration

@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:renderer": "pnpm --dir ../frontend build && pnpm build && electron scripts/check-production-renderer.mjs",
+    "test:renderer:ci": "pnpm --dir ../frontend build && pnpm build && electron --no-sandbox scripts/check-production-renderer.mjs",
     "build": "node scripts/build.mjs",
     "dev": "pnpm build && concurrently --kill-others --success first -n vite,electron \"pnpm --dir ../frontend dev\" \"wait-on tcp:127.0.0.1:5173 && cross-env ANYDATAS_ELECTRON_DEV=1 electron .\""
   },
