@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   backend:
-    name: Rust backend
+    name: Rust backend tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
     defaults:
@@ -28,22 +28,48 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.0
-          components: rustfmt, clippy
+          components: rustfmt
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend -> target
+          shared-key: backend-tests
 
       - name: Check formatting
         run: cargo fmt --all --check
 
       - name: Run backend tests
-        # 冷缓存时先链接测试依赖，后续 Clippy 可复用同一 dev profile，避免 DuckDB 被重复完整编译。
         # 45 分钟上限覆盖 GitHub 托管机首次源码构建，同时仍能识别真正卡死的任务。
         run: cargo test --locked
 
+  backend_clippy:
+    name: Rust backend Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+          shared-key: backend-clippy
+
       - name: Run strict Clippy
+        # DuckDB 的测试与 Clippy 静态归档不能同时留在 GitHub Runner 的小磁盘上。
+        # 独立 Runner 既隔离磁盘占用又并行执行，冷缓存耗时不再累加到同一个作业。
         run: cargo clippy --all-targets --locked -- -D warnings
 
   frontend:
@@ -154,7 +180,7 @@ jobs:
 
   container:
     name: Production container
-    needs: [backend, frontend, desktop, operations]
+    needs: [backend, backend_clippy, frontend, desktop, operations]
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
