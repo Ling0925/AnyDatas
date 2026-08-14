@@ -151,8 +151,8 @@ flowchart LR
 自动测试:
 
 ```bash
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
+python3 scripts/with-duckdb-prebuilt.py -- cargo test --manifest-path backend/Cargo.toml --locked
+python3 scripts/with-duckdb-prebuilt.py -- cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings
 pnpm --dir frontend run build
 ```
 

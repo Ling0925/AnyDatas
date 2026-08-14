@@ -43,13 +43,25 @@ jobs:
         with:
           toolchain: 1.97.0
 
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Cache verified DuckDB package
+        uses: actions/cache@v4
+        with:
+          path: .cache/duckdb-prebuilt
+          key: duckdb-prebuilt-${{ matrix.asset }}-v1.5.4-r1-74530fcce3336bf9
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend -> target
+          shared-key: server-${{ matrix.asset }}-duckdb-prebuilt-v1
 
       - name: Build release binary
-        run: cargo build --release --locked
+        run: python ../scripts/with-duckdb-prebuilt.py -- cargo build --release --locked
 
       - name: Verify portable Windows imports
         if: runner.os == 'Windows'

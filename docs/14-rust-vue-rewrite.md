@@ -148,7 +148,7 @@ AI API Key 使用 AES-256-GCM 加密，主密钥默认保存在数据卷 `/data/
 
 ## 7. 当前验证
 
-- `cargo fmt --check`、`cargo test --locked` 和 `cargo clippy --locked --all-targets -- -D warnings` 通过。
+- 通过预编译 DuckDB 包装器执行的 `cargo test --locked`、严格 Clippy，以及 `cargo fmt --check` 均通过。
 - 23 个 Rust 单元测试通过，新增覆盖字段类型覆盖、日期推断、前导零文本、AI Chat 地址、对话追问与 SQL 提案拆分、历史裁剪、结果样本压缩、合法 JSON 上下文裁剪和认证加密防篡改。
 - Vue TypeScript 与生产构建通过。
 - 真实 HTTP 验证通过两份各 50 万行 CSV 上传、跨文件聚合查询、保存查询、多表后台任务、取消和计划绑定。
@@ -163,7 +163,7 @@ AI API Key 使用 AES-256-GCM 加密，主密钥默认保存在数据卷 `/data/
 - AI 设置、密钥不回显、密文落库、连接测试、完整表上下文、多轮追问、SQL 独立预览、写回、执行与刷新恢复通过模拟 OpenAI-compatible HTTP 服务和 Chromium 验证。
 - 后处理 JS：空脚本路径回归、`process` 过滤/派生列、缺失 `process`/throw/非法返回/脚本超限、`http.request` 白名单拦截与允许、无重定向；同步查询与后台 artifact 全量行后处理单测通过。
 
-ARM64 Docker Desktop 首次 bundled DuckDB release 构建实测约 24 分钟、约 4 GB Docker 虚拟机内存；启用 BuildKit 缓存后，Rust 业务代码重建约 22 秒。
+DuckDB 1.5.4 已由固定 Release 预编译并经过 non-bundled 链接验证；AnyDatas 构建只下载、校验并静态链接对应平台资产。当前 Docker 镜像固定 Linux x64，Apple Silicon Docker Desktop 使用 x64 模拟。
 
 ## 8. 后续阶段
 

@@ -51,8 +51,8 @@ AnyDatas 当前可验收范围是“桌面优先、单机部署的 Excel/CSV 在
 
 ```bash
 cargo fmt --manifest-path backend/Cargo.toml --all -- --check
-cargo test --manifest-path backend/Cargo.toml --locked
-cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings
+python3 scripts/with-duckdb-prebuilt.py -- cargo test --manifest-path backend/Cargo.toml --locked
+python3 scripts/with-duckdb-prebuilt.py -- cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings
 pnpm --dir frontend run build
 docker compose config --quiet
 ```

@@ -109,7 +109,8 @@ flowchart TD
 ## 8. 验证命令
 
 ```bash
-cargo test --manifest-path backend/Cargo.toml --locked
+python3 scripts/with-duckdb-prebuilt.py -- \
+  cargo test --manifest-path backend/Cargo.toml --locked
 pnpm --dir desktop test
 pnpm --dir desktop typecheck
 pnpm --dir desktop test:renderer
@@ -126,7 +127,8 @@ Windows x64 桌面安装包使用 `desktop-v<version>` Tag 触发 `.github/workf
 可选真实进程集成：
 
 ```bash
-cargo build --manifest-path backend/Cargo.toml --locked
+python3 scripts/with-duckdb-prebuilt.py -- \
+  cargo build --manifest-path backend/Cargo.toml --locked
 ANYDATAS_TEST_SERVER_BINARY="$PWD/backend/target/debug/anydatas-api" \
   pnpm --dir desktop test src/backend-adapters.test.ts
 ```
