@@ -2,6 +2,26 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+
+# 本地编辑器、AI 助手和代码索引状态只服务当前开发机。
+# 明确列举而不忽略所有隐藏目录，可以继续提交 .github 与 backend/.cargo 等项目配置。
+.agents/
+.claude/
+.codex/
+.cursor/
+.idea/
+.omo/
+.superpowers/
+.vscode/
+.zcode/
+.codegraph
+
+# 构建包装器与质量工具的可再生缓存不应进入版本库。
+.cache/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
 var/
 backups/
 .test-var/
