@@ -64,8 +64,14 @@ The service defaults to `127.0.0.1`. For HTTPS deployments, set `ANYDATAS_COOKIE
 Backend:
 
 ```bash
-cargo run --manifest-path backend/Cargo.toml
+python3 scripts/with-duckdb-prebuilt.py -- \
+  cargo run --manifest-path backend/Cargo.toml
 ```
+
+The wrapper pins `Ling0925/duckdb-prebuilt` at `duckdb-v1.5.4-anydatas.1`, verifies the pinned
+release manifest, archive, package metadata, and static-library SHA-256 values, then caches the
+validated package below `.cache/duckdb-prebuilt/`. Unsupported targets fail explicitly instead of
+falling back to an unverified system DuckDB.
 
 Frontend in a second terminal:
 
@@ -100,7 +106,8 @@ To test the production bundle through Rust:
 ```bash
 cd frontend && pnpm build
 cd ..
-ANYDATAS_WEB_DIR=frontend/dist cargo run --manifest-path backend/Cargo.toml
+ANYDATAS_WEB_DIR=frontend/dist python3 scripts/with-duckdb-prebuilt.py -- \
+  cargo run --manifest-path backend/Cargo.toml
 ```
 
 Open `http://127.0.0.1:8080`.
@@ -119,7 +126,10 @@ The default bind is `127.0.0.1:28080`. Set `ANYDATAS_HOST_BIND` in `.env` to the
 
 Uploaded and staged files, per-table DuckDB caches, SQLite metadata, users, sessions, saved queries, task results, schedules, and the local AI encryption key are stored in the `anydatas-data` volume. Use the bundled consistency-aware backup command below; restoring only the database without `/data/.secret-key` makes saved AI credentials unreadable.
 
-The bundled DuckDB engine is compiled from source. On ARM64 Docker Desktop, the first release build can take roughly 20-30 minutes. The Dockerfile limits Cargo to one build job to keep peak memory predictable, and BuildKit caches the compiled dependency layers for later rebuilds.
+DuckDB 1.5.4 is statically linked from the verified `duckdb-prebuilt` Release instead of being
+compiled repeatedly in AnyDatas. The current Docker package targets Linux x64; Apple Silicon Docker
+Desktop runs that image through x64 emulation. BuildKit caches the verified archive and Cargo can use
+the available build cores because the expensive DuckDB C++ compilation has moved out of this repo.
 
 ## Backup And Restore
 
@@ -158,7 +168,8 @@ Prometheus reads the authenticated `/api/metrics` endpoint over the internal Com
 ## Verification
 
 ```bash
-cargo test --manifest-path backend/Cargo.toml
+python3 scripts/with-duckdb-prebuilt.py -- \
+  cargo test --manifest-path backend/Cargo.toml --locked
 python3 -m unittest discover -s ops_tests -v
 pnpm --dir frontend build
 docker compose config --quiet

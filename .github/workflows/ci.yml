@@ -17,9 +17,9 @@ concurrency:
 
 jobs:
   backend:
-    name: Rust backend tests
+    name: Rust backend
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: backend
@@ -32,49 +32,34 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.0
-          components: rustfmt
+          components: rustfmt, clippy
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Cache verified DuckDB package
+        uses: actions/cache@v4
+        with:
+          path: .cache/duckdb-prebuilt
+          key: duckdb-prebuilt-linux-x64-v1.5.4-r1-74530fcce3336bf9
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend -> target
-          shared-key: backend-tests
+          shared-key: backend-duckdb-prebuilt-v1
 
       - name: Check formatting
         run: cargo fmt --all --check
 
       - name: Run backend tests
-        # 45 分钟上限覆盖 GitHub 托管机首次源码构建，同时仍能识别真正卡死的任务。
-        run: cargo test --locked
-
-  backend_clippy:
-    name: Rust backend Clippy
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    defaults:
-      run:
-        working-directory: backend
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.97.0
-          components: clippy
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: backend -> target
-          shared-key: backend-clippy
+        run: python ../scripts/with-duckdb-prebuilt.py -- cargo test --locked
 
       - name: Run strict Clippy
-        # DuckDB 的测试与 Clippy 静态归档不能同时留在 GitHub Runner 的小磁盘上。
-        # 独立 Runner 既隔离磁盘占用又并行执行，冷缓存耗时不再累加到同一个作业。
-        run: cargo clippy --all-targets --locked -- -D warnings
+        # 预编译 DuckDB 后测试与 Clippy 可复用同一 target，减少一个 Runner 和重复编译。
+        run: python ../scripts/with-duckdb-prebuilt.py -- cargo clippy --all-targets --locked -- -D warnings
 
   frontend:
     name: Vue frontend
@@ -156,9 +141,14 @@ jobs:
           python-version: "3.13"
 
       - name: Compile operations scripts
-        run: python -m py_compile scripts/backup.py scripts/restore.py scripts/retention.py
+        run: >-
+          python -m py_compile
+          scripts/backup.py
+          scripts/restore.py
+          scripts/retention.py
+          scripts/with-duckdb-prebuilt.py
 
-      - name: Run backup and restore tests
+      - name: Run operations and prebuilt tests
         run: python -m unittest discover -s ops_tests -v
 
       - name: Validate Grafana dashboard JSON
@@ -184,7 +174,7 @@ jobs:
 
   container:
     name: Production container
-    needs: [backend, backend_clippy, frontend, desktop, operations]
+    needs: [backend, frontend, desktop, operations]
     runs-on: ubuntu-latest
     timeout-minutes: 45
 

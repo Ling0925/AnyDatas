@@ -19,7 +19,7 @@ AnyDatas 是一个**桌面优先、单服务器**的数据分析工作台：上�
 | Web API / 静态托管 / worker / 调度 | Rust 1.97 + Axum 0.8（单进程全包） |
 | 元数据 | SQLite（WAL）+ SQLx 0.8（内嵌迁移） |
 | 表格读取 | Calamine 0.36（xlsx/xls/xlsb/ods）+ csv |
-| 查询引擎 | DuckDB 1.105（`bundled` 源码编译，进程内） |
+| 查询引擎 | DuckDB 1.5.4（固定 Release 预编译静态库，进程内） |
 | 前端 | Vue 3 + TS + Vite + Pinia + Element Plus + Monaco + ECharts 6 |
 | 密钥 | AES-256-GCM，主密钥落 `/data/.secret-key` |
 | 部署 | 单容器 + 单持久卷；**无** Redis / K8s / Temporal / Docker socket / 外部 worker |

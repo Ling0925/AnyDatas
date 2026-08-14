@@ -11,23 +11,29 @@ RUN pnpm build
 FROM rust:1.97-bookworm AS backend-builder
 
 WORKDIR /build/backend
-ENV CARGO_BUILD_JOBS=1
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential pkg-config \
+    && apt-get install -y --no-install-recommends build-essential pkg-config python3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY backend/Cargo.toml backend/Cargo.lock ./
+COPY scripts/with-duckdb-prebuilt.py /build/scripts/with-duckdb-prebuilt.py
+COPY backend/Cargo.toml backend/Cargo.lock backend/build.rs ./
 COPY backend/migrations ./migrations
 COPY backend/src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/backend/target \
-    cargo build --release --locked \
-    && cp target/release/anydatas-api /build/anydatas-api
+    --mount=type=cache,target=/build/.cache/duckdb-prebuilt,sharing=locked,id=anydatas-duckdb-prebuilt-linux-x64-v1 \
+    python3 /build/scripts/with-duckdb-prebuilt.py -- cargo build --release --locked \
+    && cp target/release/anydatas-api /build/anydatas-api \
+    && ldd /build/anydatas-api > /tmp/anydatas-api.ldd \
+    && if grep -i duckdb /tmp/anydatas-api.ldd; then \
+         echo "anydatas-api must not depend on a dynamic DuckDB library" >&2; \
+         exit 1; \
+       fi
 
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin anydatas
 

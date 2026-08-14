@@ -1,5 +1,7 @@
 services:
   anydatas:
+    # duckdb-prebuilt 当前提供 Linux x64；Apple Silicon Docker Desktop 会透明使用 x64 模拟。
+    platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile

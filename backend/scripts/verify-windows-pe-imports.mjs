@@ -105,7 +105,7 @@ export function importedDlls(bytes) {
 /**
  * 验证发行 EXE 不依赖需要用户另行安装的 MSVC C/C++ Runtime。
  *
- * Rust 与 bundled DuckDB 静态链接运行库后，程序可在干净 Windows 系统直接启动，避免 0xC0000135。
+ * Rust 与预编译 DuckDB 都使用 static CRT 后，程序可在干净 Windows 系统直接启动，避免 0xC0000135。
  */
 async function main() {
   const binaryPath = process.argv[2]

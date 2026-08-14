@@ -1,4 +1,4 @@
 [target.x86_64-pc-windows-msvc]
 # 服务端是单文件发行物，静态链接 MSVC Runtime 可避免用户机器缺少 VCRUNTIME140_1.dll。
-# 目标级配置同时传递给 Rust 和 cc-rs 编译的 bundled DuckDB，确保整条链接链一致使用静态 CRT。
+# duckdb-prebuilt 的 Windows 资产同样使用 static CRT；目标级配置让最终 Rust 二进制保持一致。
 rustflags = ["-C", "target-feature=+crt-static"]
