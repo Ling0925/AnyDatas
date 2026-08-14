@@ -2,6 +2,7 @@
 name = "anydatas-api"
 version = "0.1.2"
 edition = "2024"
+build = "build.rs"
 
 [dependencies]
 anyhow = "1.0"
@@ -15,7 +16,7 @@ chrono-tz = "0.10"
 cron = "0.17"
 csv = "1.4"
 dotenvy = "0.15"
-duckdb = { version = "1.10504.0", features = ["bundled", "chrono", "serde_json"] }
+duckdb = { version = "=1.10504.0", features = ["chrono", "serde_json"] }
 futures-util = "0.3"
 fs2 = "0.4"
 hex = "0.4"
