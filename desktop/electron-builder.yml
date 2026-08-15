@@ -21,6 +21,9 @@ extraResources:
       - "**/*"
 
 win:
+  # 显式复用前端品牌资源，避免新版安装包继续显示 Electron 默认图标。
+  # 使用同一个源文件也能让 README、浏览器和 Windows 客户端保持一致。
+  icon: ../frontend/public/anydatas-logo.png
   executableName: AnyDatas
   target:
     - target: nsis
