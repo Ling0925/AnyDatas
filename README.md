@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="frontend/public/favicon.svg" width="76" height="76" alt="AnyDatas Logo">
+  <img src="frontend/public/anydatas-logo.png" width="96" height="96" alt="AnyDatas Logo">
 </p>
 
 <h1 align="center">AnyDatas</h1>
