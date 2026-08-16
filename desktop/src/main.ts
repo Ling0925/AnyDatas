@@ -1,6 +1,6 @@
 import { join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
-import { app, BrowserWindow, dialog, ipcMain } from "electron"
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } from "electron"
 import { LocalApiClient } from "./api-client.js"
 import { RemoteBackendAdapter, StandaloneBackendAdapter } from "./backend-adapters.js"
 import { emitBackendStatus, registerBackendIpc } from "./backend-ipc.js"
@@ -16,6 +16,7 @@ import { ApiProxy, resolveApiTarget } from "./proxy.js"
 import { productionFrontendDirectory } from "./production-paths.js"
 import { FileSourceScheduler, NativeSchedulerTimer } from "./scheduler.js"
 import { FileSourceStore } from "./store.js"
+import { createTrayMenuTemplate, TrayWindowLifecycle } from "./tray-lifecycle.js"
 
 const DEV_RENDERER_URL = "http://127.0.0.1:5173"
 const isDev = process.env["ANYDATAS_ELECTRON_DEV"] === "1"
@@ -26,18 +27,25 @@ let scheduler: FileSourceScheduler | undefined
 let removeIpcHandlers: (() => void) | undefined
 let removeBackendIpcHandlers: (() => void) | undefined
 let runtime: BackendRuntimeManager | undefined
+let tray: Tray | undefined
 let shutdownStarted = false
+
+const windowLifecycle = new TrayWindowLifecycle({
+  getWindow: () => mainWindow,
+  createWindow: () => {
+    if (proxy !== undefined && (mainWindow === null || mainWindow.isDestroyed())) {
+      createWindow()
+    }
+  },
+  quit: () => app.quit(),
+})
 
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 }
 
 app.on("second-instance", () => {
-  const window = mainWindow
-  if (window !== null && !window.isDestroyed()) {
-    if (window.isMinimized()) window.restore()
-    window.focus()
-  }
+  windowLifecycle.showMainWindow()
 })
 
 /**
@@ -65,6 +73,54 @@ function frontendDirectory(): string {
     resourcesPath: process.resourcesPath,
     moduleUrl: import.meta.url,
   })
+}
+
+/**
+ * 返回开发态与安装包中都存在的托盘品牌图标路径。
+ *
+ * 为什么这么做：开发态的 Vite 不保证提前生成 frontend/dist，安装包又不能依赖源码目录；
+ * 好处：本地调试直接复用 public 资源，正式安装则只读取随包发布的只读前端资源。
+ */
+function trayIconPath(): string {
+  if (app.isPackaged) {
+    return join(frontendDirectory(), "anydatas-logo.png")
+  }
+  return fileURLToPath(new URL("../../frontend/public/anydatas-logo.png", import.meta.url))
+}
+
+/**
+ * 创建系统托盘以及统一的打开、退出入口。
+ *
+ * 为什么这么做：窗口隐藏后必须始终留有可发现的恢复和退出入口；
+ * 好处：Windows、macOS 与 Linux 共用一套行为，第二实例和托盘也复用同一窗口恢复逻辑。
+ */
+function createTray(): void {
+  if (tray !== undefined && !tray.isDestroyed()) return
+
+  const sourceImage = nativeImage.createFromPath(trayIconPath())
+  if (sourceImage.isEmpty()) {
+    throw new Error("AnyDatas tray icon could not be loaded")
+  }
+  const iconSize = process.platform === "darwin" ? 20 : 16
+  tray = new Tray(sourceImage.resize({ width: iconSize, height: iconSize, quality: "best" }))
+  tray.setToolTip("AnyDatas")
+  tray.setContextMenu(Menu.buildFromTemplate(createTrayMenuTemplate({
+    open: () => windowLifecycle.showMainWindow(),
+    quit: () => windowLifecycle.quitApplication(),
+  })))
+  tray.on("click", () => windowLifecycle.showMainWindow())
+  tray.on("double-click", () => windowLifecycle.showMainWindow())
+}
+
+/**
+ * 销毁托盘资源并清空引用。
+ *
+ * 为什么这么做：真正退出时系统状态栏不应短暂保留失效图标；
+ * 好处：异步停止后端期间用户不会误点已经进入退出流程的菜单。
+ */
+function destroyTray(): void {
+  tray?.destroy()
+  tray = undefined
 }
 
 function createWindow(): BrowserWindow {
@@ -101,6 +157,7 @@ function createWindow(): BrowserWindow {
     callback(false)
   })
   window.webContents.session.setPermissionCheckHandler(() => false)
+  window.on("close", (event) => windowLifecycle.handleWindowClose(event, window))
   window.once("closed", () => {
     if (mainWindow === window) {
       mainWindow = null
@@ -195,7 +252,8 @@ async function startRuntime(): Promise<void> {
     onError: (error) => console.error("desktop.scheduler.tick_failed", error),
   })
   scheduler.start()
-  createWindow()
+  createTray()
+  windowLifecycle.showMainWindow()
   const configuredTarget = process.env["ANYDATAS_API_TARGET"]
   const initialize = configuredTarget === undefined
     ? runtime.initialize()
@@ -212,12 +270,11 @@ app.whenReady().then(startRuntime).catch((error: unknown) => {
 })
 
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0 && proxy !== undefined) {
-    createWindow()
-  }
+  windowLifecycle.showMainWindow()
 })
 
 app.on("before-quit", (event) => {
+  windowLifecycle.beginQuit()
   if (shutdownStarted) {
     return
   }
@@ -226,16 +283,11 @@ app.on("before-quit", (event) => {
   scheduler?.stop()
   removeIpcHandlers?.()
   removeBackendIpcHandlers?.()
+  destroyTray()
   // 等待 Rust 处理 SIGTERM 和 SQLite 收尾后再退出 Electron，防止子进程成为孤儿。
   // allSettled 保证某个清理动作失败时其他资源仍会释放，随后由操作系统结束当前应用。
   void Promise.allSettled([
     runtime?.stop() ?? Promise.resolve(),
     proxy?.close() ?? Promise.resolve(),
   ]).finally(() => app.quit())
-})
-
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit()
-  }
 })
