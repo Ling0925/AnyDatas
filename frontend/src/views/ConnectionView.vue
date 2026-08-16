@@ -207,8 +207,11 @@ async function connect() {
 
 <style scoped>
 .connection-page {
-  --panel: rgb(252 254 253 / 92%);
-  --line: rgb(20 125 100 / 20%);
+  /* 局部表面从全局主题令牌派生，避免首次暗色启动时用亮色变量覆盖整个模式页。 */
+  --connection-panel: color-mix(in srgb, var(--panel) 94%, transparent);
+  --connection-card: color-mix(in srgb, var(--panel-elevated) 94%, transparent);
+  --connection-line: color-mix(in srgb, var(--primary) 24%, var(--line));
+  --connection-accent-soft: color-mix(in srgb, var(--primary) 12%, var(--panel-elevated));
   position: relative;
   min-height: 100vh;
   overflow: hidden;
@@ -296,10 +299,10 @@ async function connect() {
 
 .connection-panel {
   padding: 30px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--connection-line);
   border-radius: 22px;
-  background: var(--panel);
-  box-shadow: 0 28px 80px rgb(9 60 47 / 12%);
+  background: var(--connection-panel);
+  box-shadow: var(--shadow-lg);
   backdrop-filter: blur(20px);
 }
 
@@ -326,21 +329,21 @@ async function connect() {
   padding: 17px;
   color: inherit;
   text-align: left;
-  border: 1px solid var(--line);
+  border: 1px solid var(--connection-line);
   border-radius: 14px;
-  background: var(--panel-elevated);
+  background: var(--connection-card);
   cursor: pointer;
   transition: border-color .2s ease, transform .2s ease, background .2s ease;
 }
 
 .mode-card:hover:not(:disabled) {
   transform: translateY(-1px);
-  border-color: var(--primary-solid);
+  border-color: var(--primary);
 }
 
 .mode-card.active {
-  border-color: var(--primary-solid);
-  background: rgb(20 125 100 / 8%);
+  border-color: var(--primary);
+  background: var(--connection-accent-soft);
 }
 
 .mode-icon {
@@ -350,7 +353,7 @@ async function connect() {
   color: var(--primary-text);
   place-items: center;
   border-radius: 12px;
-  background: rgb(20 125 100 / 10%);
+  background: var(--connection-accent-soft);
 }
 
 .mode-copy {
@@ -373,7 +376,7 @@ async function connect() {
 }
 
 .mode-card.active .mode-radio {
-  border: 5px solid var(--primary-solid);
+  border: 5px solid var(--primary);
 }
 
 .server-field {
@@ -392,12 +395,12 @@ async function connect() {
   padding: 12px 14px;
   color: var(--primary-text);
   border-radius: 10px;
-  background: rgb(20 125 100 / 8%);
+  background: var(--connection-accent-soft);
 }
 
 .runtime-status.is-failed {
-  color: var(--el-color-danger);
-  background: rgb(220 38 38 / 8%);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, var(--panel-elevated));
 }
 
 .runtime-status > span {
@@ -428,11 +431,6 @@ async function connect() {
 .connection-submit:disabled {
   cursor: wait;
   opacity: .65;
-}
-
-:global(html[data-theme="dark"]) .connection-page {
-  --panel: rgb(15 25 21 / 92%);
-  --line: rgb(76 190 159 / 22%);
 }
 
 @media (max-width: 900px) {
