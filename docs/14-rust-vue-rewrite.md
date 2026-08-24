@@ -1,6 +1,6 @@
 # Rust + Vue 重构设计与实施状态
 
-更新日期: 2026-08-07
+更新日期: 2026-08-24
 
 ## 1. 重构目标
 
@@ -71,6 +71,7 @@
 | `backend/src/services/post_process.rs` | QuickJS（rquickjs）`process(rows, meta)` 引擎、限额、`http.request` host |
 | `backend/src/services/net_guard.rs` | 受限 IP 分类、HTTP 白名单解析/匹配；AI 与后处理 JS 共用 |
 | `backend/src/services/secrets.rs` | 单机主密钥和工作区 API Key 的 AES-256-GCM 加解密 |
+| `backend/src/services/source_refresh.rs` | 不可变源版本、完整预检、幂等刷新回执与保存查询任务原子发布 |
 | `backend/src/workers.rs` | SQLite 队列消费和到期计划入队；任务日志含后处理完成阶段 |
 | `backend/migrations/0001_init.sql` | 文件、查询、任务和计划元数据模型 |
 | `backend/migrations/0002_auth_workspaces.sql` | 用户、工作区、成员关系、会话和登录限流 |
@@ -78,9 +79,11 @@
 | `backend/migrations/0004_staged_imports.sql` | 24 小时导入暂存记录和文件归属校验 |
 | `backend/migrations/0005_workspace_ai.sql` | 工作区 AI 设置和加密 API Key |
 | `backend/migrations/0006_ai_agent_runtime.sql` | Agent 会话、消息、Run 和 Step |
-| `backend/migrations/0007_query_governance.sql` | 查询治理和运行元数据 |
+| `backend/migrations/0007_agent_reasoning_effort.sql` | Agent 运行推理强度快照 |
 | `backend/migrations/0008_job_result_artifacts.sql` | 后台任务完整结果制品 |
-| `backend/migrations/0009_query_post_js.sql` | 保存查询、任务和计划的可空 `post_js` |
+| `backend/migrations/0009_ai_message_chart.sql` | AI 助手图表建议快照 |
+| `backend/migrations/0010_query_post_js.sql` | 保存查询、任务和计划的可空 `post_js` |
+| `backend/migrations/0011_trusted_source_refresh.sql` | 不可变源版本、幂等刷新回执和任务输入版本快照 |
 
 DuckDB 连接在服务端完成缓存挂载后关闭外部访问和扩展自动加载，并只接受单条 `SELECT` 或 `WITH` 查询。源数据不设置行数硬上限；CSV 逐行导入持久化单表缓存，配置版本变化后生成新缓存键。一次查询最多绑定 16 张逻辑表，同表多别名复用一个挂载。查询通过子查询包装限制返回前端的结果行数。后台任务注册 DuckDB 中断句柄，并在缓存导入期间轮询取消状态；停止运行中任务会中断查询并释放 worker，而不是只修改数据库状态。
 
@@ -105,6 +108,8 @@ AI API Key 使用 AES-256-GCM 加密，主密钥默认保存在数据卷 `/data/
 | `POST /api/data-sources/import` | 完成 |
 | `DELETE /api/data-sources/imports/{token}` | 完成 |
 | `GET/DELETE /api/data-sources/{id}` | 完成 |
+| `POST /api/data-sources/{id}/replace` | 完成；兼容覆盖接口，内部发布不可变版本 |
+| `POST /api/data-sources/{id}/refresh` | 完成；幂等发布版本并原子创建保存查询任务 |
 | `PATCH /api/data-sources/{id}/config` | 完成 |
 | `GET /api/data-sources/{id}/preview` | 完成 |
 | `GET /api/source-tables` | 完成 |
@@ -149,7 +154,7 @@ AI API Key 使用 AES-256-GCM 加密，主密钥默认保存在数据卷 `/data/
 ## 7. 当前验证
 
 - 通过预编译 DuckDB 包装器执行的 `cargo test --locked`、严格 Clippy，以及 `cargo fmt --check` 均通过。
-- 23 个 Rust 单元测试通过，新增覆盖字段类型覆盖、日期推断、前导零文本、AI Chat 地址、对话追问与 SQL 提案拆分、历史裁剪、结果样本压缩、合法 JSON 上下文裁剪和认证加密防篡改。
+- 119 个 Rust 测试通过，覆盖字段类型、日期与前导零保真、跨表查询、Agent Runtime、QuickJS、不可变源版本、完整刷新预检、幂等回执、固定任务输入、缓存保护和备份边界。
 - Vue TypeScript 与生产构建通过。
 - 真实 HTTP 验证通过两份各 50 万行 CSV 上传、跨文件聚合查询、保存查询、多表后台任务、取消和计划绑定。
 - 真实 HTTP 验证通过首次初始化、会话恢复、退出、5 次失败登录限流、匿名 401、Viewer 写入 403 和跨工作区资源 404。

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import sqlite3
@@ -149,6 +150,41 @@ class BackupRestoreTests(unittest.TestCase):
                 "SELECT cache_key, cache_status, cache_error FROM source_tables"
             ).fetchone()
         self.assertEqual(cache, (None, "pending", None))
+
+    def test_backup_preserves_nested_immutable_revisions_and_database_hashes(self) -> None:
+        revision = self.data_dir / "uploads" / "source-one" / "revision-one.csv"
+        revision.parent.mkdir(parents=True)
+        revision.write_bytes(b"id,value\n1,10\n")
+        digest = hashlib.sha256(revision.read_bytes()).hexdigest()
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "CREATE TABLE source_revisions (stored_path TEXT NOT NULL, content_sha256 TEXT)"
+            )
+            connection.execute(
+                "INSERT INTO source_revisions (stored_path, content_sha256) VALUES (?, ?)",
+                (str(revision), digest),
+            )
+
+        archive = create_backup(
+            self.data_dir,
+            self.backup_dir,
+            now=datetime(2026, 7, 27, tzinfo=timezone.utc),
+        )
+        extracted = self.root / "revision-extracted"
+        with tarfile.open(archive, "r:gz") as bundle:
+            bundle.extractall(extracted)
+        self.assertEqual(
+            (extracted / "uploads" / "source-one" / "revision-one.csv").read_bytes(),
+            revision.read_bytes(),
+        )
+
+        revision.write_bytes(b"tampered")
+        with self.assertRaisesRegex(ValueError, "hash does not match"):
+            create_backup(
+                self.data_dir,
+                self.backup_dir,
+                now=datetime(2026, 7, 28, tzinfo=timezone.utc),
+            )
 
     def test_restore_round_trip_supports_atomic_and_in_place_modes(self) -> None:
         """普通目录和 Docker 卷模式都应恢复同一快照，且卷模式保留挂载点 inode。"""

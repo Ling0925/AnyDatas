@@ -20,6 +20,7 @@ export type BackendStatus = {
   readonly serverUrl: string | null
   readonly serverVersion: string | null
   readonly protocolVersion: number | null
+  readonly capabilities: string[]
   readonly message: string
   readonly progress: number | null
 }

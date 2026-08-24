@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { Clock3 } from '@lucide/vue'
+import { useRouter } from 'vue-router'
+
+const router = useRouter()
 
 defineProps<{
   runs: DesktopFileSourceRun[]
@@ -24,6 +27,9 @@ function lastRunMeta(status: DesktopFileSourceRun['status']): {
   if (status === 'skipped') return { label: '跳过', className: 'skipped' }
   return { label: '失败', className: 'failed' }
 }
+function openJob(jobId: string) {
+  void router.push({ path: '/tasks', query: { job: jobId } })
+}
 </script>
 
 <template>
@@ -44,11 +50,15 @@ function lastRunMeta(status: DesktopFileSourceRun['status']): {
           </span>
         </span>
         <code :title="run.file ?? undefined">{{ run.file ?? '—' }}</code>
-        <span :class="{ 'run-error': Boolean(run.error) }" :title="run.error ?? undefined">
+        <span :class="{ 'run-error': Boolean(run.error) }" :title="run.error ?? run.contentSha256 ?? undefined">
           <template v-if="run.error">{{ run.error }}</template>
+          <button v-else-if="run.jobId" class="run-job-link" type="button" @click="openJob(run.jobId)">
+            版本 {{ run.revisionId?.slice(0, 8) ?? '—' }} · 任务 {{ run.jobId.slice(0, 8) }}
+          </button>
           <template v-else-if="run.status === 'success' && run.rowsImported !== null">
             {{ run.rowsImported.toLocaleString() }} 行
           </template>
+          <template v-else-if="run.contentSha256">摘要 {{ run.contentSha256.slice(0, 10) }}</template>
           <template v-else>—</template>
         </span>
       </div>
@@ -126,6 +136,15 @@ function lastRunMeta(status: DesktopFileSourceRun['status']): {
   color: var(--text-secondary);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 11px;
+}
+
+.run-job-link {
+  padding: 0;
+  border: 0;
+  color: var(--info);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
 }
 
 .file-source-runs-empty {

@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -56,6 +56,35 @@ describe("FileSourceStore", () => {
     await expect(readdir(userData)).resolves.toEqual(["file-sources.json"])
   })
 
+  it("migrates the legacy array store to the versioned envelope on mutation", async () => {
+    const legacy = [{
+      id: "legacy-1",
+      name: "Legacy",
+      directory: "/tmp/exports",
+      pattern: "*.csv",
+      targetSourceId: "source-1",
+      cron: "0 8 * * *",
+      timezone: "UTC",
+      enabled: true,
+      triggerScheduleIds: ["schedule-1"],
+      createdAt: CREATED_AT,
+      updatedAt: CREATED_AT,
+      lastRun: null,
+      runs: [],
+    }]
+    await writeFile(join(userData, "file-sources.json"), JSON.stringify(legacy))
+
+    const [loaded] = await store.list()
+    expect(loaded).toMatchObject({ mode: "legacy_schedule", lastAppliedHash: null })
+    await store.toggle("legacy-1", false)
+
+    const persisted = JSON.parse(await readFile(join(userData, "file-sources.json"), "utf8"))
+    expect(persisted).toMatchObject({
+      schemaVersion: 2,
+      sources: [{ id: "legacy-1", enabled: false, mode: "legacy_schedule" }],
+    })
+  })
+
   it("updates config while preserving createdAt and changing updatedAt", async () => {
     // Given
     const created = await store.create(validConfig())
@@ -108,6 +137,10 @@ describe("FileSourceStore", () => {
         file: `daily-${index}.csv`,
         error: null,
         rowsImported: index,
+        contentSha256: `hash-${index}`,
+        revisionId: null,
+        jobId: null,
+        failureStage: null,
       }
       latest = await store.appendRun(created.id, { run, fileHash: `hash-${index}` })
     }
@@ -122,6 +155,9 @@ describe("FileSourceStore", () => {
       fileHash: "hash-24",
       rowsImported: 24,
       error: null,
+      revisionId: null,
+      jobId: null,
+      failureStage: null,
     })
   })
 

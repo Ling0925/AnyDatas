@@ -67,6 +67,31 @@ pub fn spawn_maintenance_worker(state: Arc<AppState>) {
                 .metrics
                 .maintenance_worker_heartbeat
                 .store(Utc::now().timestamp(), Ordering::Relaxed);
+            match crate::services::maintenance::cleanup_orphaned_cache_files(
+                &state,
+                Duration::from_secs(60 * 60),
+            )
+            .await
+            {
+                Ok(removed) if removed > 0 => {
+                    tracing::info!(removed, "orphaned table caches cleaned");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(?error, "table cache cleanup failed");
+                }
+            }
+            let upload_root = state.data_dir.join("uploads");
+            match crate::services::maintenance::cleanup_source_revisions(&state, &upload_root).await
+            {
+                Ok((orphaned, expired)) if orphaned > 0 || expired > 0 => {
+                    tracing::info!(orphaned, expired, "source revisions cleaned");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(?error, "source revision cleanup failed");
+                }
+            }
             match crate::services::maintenance::cleanup_expired_job_results(&state).await {
                 Ok(removed) if removed > 0 => {
                     tracing::info!(removed, "expired background results cleaned");
@@ -78,6 +103,34 @@ pub fn spawn_maintenance_worker(state: Arc<AppState>) {
             }
         }
     });
+}
+
+struct WorkerJobGuard {
+    state: SharedState,
+    job_id: String,
+}
+
+impl WorkerJobGuard {
+    fn register(state: SharedState, job_id: &str) -> Result<Self, AppError> {
+        state
+            .query_control
+            .lock()
+            .map_err(|_| AppError::Internal("任务控制器不可用".to_owned()))?
+            .worker_jobs
+            .insert(job_id.to_owned());
+        Ok(Self {
+            state,
+            job_id: job_id.to_owned(),
+        })
+    }
+}
+
+impl Drop for WorkerJobGuard {
+    fn drop(&mut self) {
+        if let Ok(mut control) = self.state.query_control.lock() {
+            control.worker_jobs.remove(&self.job_id);
+        }
+    }
 }
 
 async fn claim_and_run_job(state: SharedState) -> Result<(), AppError> {
@@ -101,6 +154,7 @@ async fn claim_and_run_job(state: SharedState) -> Result<(), AppError> {
     if claimed.rows_affected() == 0 {
         return Ok(());
     }
+    let _worker_guard = WorkerJobGuard::register(state.clone(), &id)?;
 
     // 认领后任何一步出错都必须落到终态，否则任务会永久卡在 running，直到下次进程重启才被
     // recover_interrupted_jobs 收敛。业务型的查询失败在 run_claimed_job 内部已写 failed；
@@ -344,9 +398,10 @@ async fn enqueue_due_schedules(state: SharedState) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use chrono::{Duration as ChronoDuration, Utc};
+    use sha2::{Digest, Sha256};
 
     use crate::{
         api::jobs::enqueue_job,
@@ -357,7 +412,7 @@ mod tests {
         },
     };
 
-    use super::{claim_and_run_job, enqueue_due_schedules};
+    use super::{WorkerJobGuard, claim_and_run_job, enqueue_due_schedules};
 
     /// 搭建带一个 CSV 数据源与默认逻辑表的最小运行时，用于驱动真实后台执行路径。
     async fn seeded_state() -> (tempfile::TempDir, SharedState) {
@@ -382,6 +437,16 @@ mod tests {
             r#"INSERT INTO data_sources (id, name, original_filename, stored_path, media_type, file_kind, size_bytes, selected_sheet, start_cell, first_row_as_header, sheet_names_json, row_count, column_count, created_at, updated_at, workspace_id, created_by_user_id) VALUES ('source-1', '数据', 'data.csv', ?, 'text/csv', 'csv', 16, 'CSV', 'A1', 1, '["CSV"]', 3, 1, ?, ?, 'ws-1', 'user-1')"#,
         )
         .bind(csv_path.to_string_lossy().to_string()).bind(&now).bind(&now).execute(&pool).await.unwrap();
+        let content_hash = hex::encode(Sha256::digest(b"value\n1\n2\n3\n"));
+        sqlx::query("INSERT INTO source_revisions (id, source_id, content_sha256, size_bytes, stored_path, original_filename, media_type, file_kind, created_at) VALUES ('revision-1', 'source-1', ?, 16, ?, 'data.csv', 'text/csv', 'csv', ?)")
+            .bind(content_hash).bind(csv_path.to_string_lossy().to_string()).bind(&now)
+            .execute(&pool).await.unwrap();
+        sqlx::query(
+            "UPDATE data_sources SET current_revision_id = 'revision-1' WHERE id = 'source-1'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         let schema = serde_json::to_string(&vec![FieldDefinition {
             name: "value".to_owned(),
             data_type: "整数".to_owned(),
@@ -402,6 +467,8 @@ mod tests {
             secret_key: [7u8; 32],
             query_control: Default::default(),
             cache_build_locks: Default::default(),
+            storage_maintenance_lock: Default::default(),
+            active_refresh_preparations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             query_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             file_parse_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             query_max_concurrency: 2,
@@ -461,6 +528,129 @@ mod tests {
         assert_eq!(status, "succeeded");
         assert_eq!(artifact.as_deref(), Some(id.as_str()));
         assert_eq!(rows, Some(1));
+    }
+
+    #[tokio::test]
+    async fn active_worker_ownership_pauses_periodic_cache_reclamation() {
+        let (_directory, state) = seeded_state().await;
+        let cache_key = "d".repeat(64);
+        let cache_path = state
+            .data_dir
+            .join("table-cache")
+            .join(format!("{cache_key}.duckdb"));
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(&cache_path, b"orphan").unwrap();
+        let guard = WorkerJobGuard::register(state.clone(), "worker-owned").unwrap();
+
+        let while_active =
+            crate::services::maintenance::cleanup_orphaned_cache_files(&state, Duration::ZERO)
+                .await
+                .unwrap();
+        assert_eq!(while_active, 0);
+        assert!(cache_path.exists());
+
+        drop(guard);
+        let after_exit =
+            crate::services::maintenance::cleanup_orphaned_cache_files(&state, Duration::ZERO)
+                .await
+                .unwrap();
+        assert_eq!(after_exit, 1);
+        assert!(!cache_path.exists());
+    }
+
+    #[tokio::test]
+    async fn queued_job_keeps_its_captured_cache_alive_during_refresh_cleanup() {
+        let (_directory, state) = seeded_state().await;
+        let cache_key = "c".repeat(64);
+        let cache_path = state
+            .data_dir
+            .join("table-cache")
+            .join(format!("{cache_key}.duckdb"));
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(&cache_path, b"cache").unwrap();
+        sqlx::query(
+            "UPDATE source_tables SET cache_key = ?, cache_status = 'ready' WHERE id = 'table-1'",
+        )
+        .bind(&cache_key)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        enqueue_job(
+            &state,
+            "source-1",
+            &[QueryTableBinding {
+                table_id: "table-1".to_owned(),
+                alias: "data".to_owned(),
+            }],
+            "缓存保护",
+            "SELECT 1 FROM data",
+            None,
+            None,
+            "manual",
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE source_tables SET cache_key = NULL, cache_status = 'pending' WHERE id = 'table-1'")
+            .execute(&state.pool).await.unwrap();
+
+        let removed =
+            crate::services::maintenance::remove_cache_keys_if_unreferenced(&state, [cache_key])
+                .await
+                .unwrap();
+
+        assert_eq!(removed, 0);
+        assert!(cache_path.exists());
+    }
+
+    #[tokio::test]
+    async fn queued_job_reads_the_revision_captured_at_enqueue() {
+        let (_directory, state) = seeded_state().await;
+        let tables = vec![QueryTableBinding {
+            table_id: "table-1".to_owned(),
+            alias: "data".to_owned(),
+        }];
+        let id = enqueue_job(
+            &state,
+            "source-1",
+            &tables,
+            "固定输入",
+            "SELECT SUM(value) AS total FROM data",
+            None,
+            None,
+            "manual",
+        )
+        .await
+        .unwrap();
+
+        let replacement = state.data_dir.join("replacement.csv");
+        std::fs::write(&replacement, "value\n100\n").unwrap();
+        let now = Utc::now().to_rfc3339();
+        let replacement_hash = hex::encode(Sha256::digest(b"value\n100\n"));
+        sqlx::query("INSERT INTO source_revisions (id, source_id, content_sha256, size_bytes, stored_path, original_filename, media_type, file_kind, created_at) VALUES ('revision-2', 'source-1', ?, 10, ?, 'replacement.csv', 'text/csv', 'csv', ?)")
+            .bind(replacement_hash).bind(replacement.to_string_lossy().to_string()).bind(&now)
+            .execute(&state.pool).await.unwrap();
+        sqlx::query("UPDATE data_sources SET current_revision_id = 'revision-2', stored_path = ? WHERE id = 'source-1'")
+            .bind(replacement.to_string_lossy().to_string()).execute(&state.pool).await.unwrap();
+        sqlx::query("UPDATE source_tables SET config_version = config_version + 1, cache_key = NULL, cache_status = 'pending' WHERE id = 'table-1'")
+            .execute(&state.pool).await.unwrap();
+
+        claim_and_run_job(state.clone()).await.unwrap();
+
+        let result_json: String = sqlx::query_scalar("SELECT result_json FROM jobs WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_str(&result_json).unwrap();
+        assert_eq!(result["rows"][0][0], 6);
+        let pinned_revision: String = sqlx::query_scalar(
+            "SELECT source_revision_id FROM job_input_tables WHERE job_id = ? LIMIT 1",
+        )
+        .bind(&id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(pinned_revision, "revision-1");
     }
 
     #[tokio::test]

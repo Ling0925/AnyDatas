@@ -15,6 +15,7 @@ use crate::{
 };
 
 pub(super) const SOURCE_ID: &str = "source-replace";
+pub(super) const SAVED_QUERY_ID: &str = "saved-refresh";
 const WORKSPACE_ID: &str = "workspace-replace";
 const USER_ID: &str = "user-replace";
 pub(super) const SESSION_TOKEN: &str = "replace-test-session";
@@ -74,6 +75,8 @@ impl ReplacementFixture {
             secret_key: [0; 32],
             query_control: Default::default(),
             cache_build_locks: Default::default(),
+            storage_maintenance_lock: Default::default(),
+            active_refresh_preparations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             query_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             file_parse_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             query_max_concurrency: 1,
@@ -124,6 +127,15 @@ impl ReplacementFixture {
         sqlx::query("INSERT INTO data_sources (id, name, original_filename, stored_path, media_type, file_kind, size_bytes, selected_sheet, start_cell, first_row_as_header, sheet_names_json, row_count, column_count, workspace_id, created_by_user_id, created_at, updated_at) VALUES (?, '订单', 'old.csv', ?, 'text/csv', 'csv', 18, '数据', 'A1', 1, '[\"数据\"]', 1, 2, ?, ?, ?, ?)")
             .bind(SOURCE_ID).bind(old_path.to_string_lossy().to_string()).bind(WORKSPACE_ID)
             .bind(USER_ID).bind(&now).bind(&now).execute(&self.state.pool).await.unwrap();
+        let old_hash = hex::encode(Sha256::digest(b"id,amount\n1,10\n"));
+        sqlx::query("INSERT INTO source_revisions (id, source_id, content_sha256, size_bytes, stored_path, original_filename, media_type, file_kind, created_at) VALUES ('revision-old', ?, ?, 18, ?, 'old.csv', 'text/csv', 'csv', ?)")
+            .bind(SOURCE_ID).bind(old_hash).bind(old_path.to_string_lossy().to_string()).bind(&now)
+            .execute(&self.state.pool).await.unwrap();
+        sqlx::query("UPDATE data_sources SET current_revision_id = 'revision-old' WHERE id = ?")
+            .bind(SOURCE_ID)
+            .execute(&self.state.pool)
+            .await
+            .unwrap();
         let schema = r#"[{"name":"id","dataType":"文本","nullable":false},{"name":"amount","dataType":"小数","nullable":false}]"#;
         for (id, name, is_default, cache) in [
             ("table-default", "主表", true, "a".repeat(64)),
@@ -141,6 +153,15 @@ impl ReplacementFixture {
             )
             .unwrap();
         }
+    }
+
+    pub(super) async fn seed_saved_query(&self) {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO saved_queries (id, source_id, name, sql_text, created_at, updated_at) VALUES (?, ?, '自动汇总', 'SELECT SUM(CAST(amount AS DOUBLE)) AS total FROM data', ?, ?)")
+            .bind(SAVED_QUERY_ID).bind(SOURCE_ID).bind(&now).bind(&now)
+            .execute(&self.state.pool).await.unwrap();
+        sqlx::query("INSERT INTO saved_query_tables (saved_query_id, source_table_id, alias, ordinal) VALUES (?, 'table-default', 'data', 0)")
+            .bind(SAVED_QUERY_ID).execute(&self.state.pool).await.unwrap();
     }
 
     pub(super) async fn seed_other_workspace_session(&self) {
@@ -193,6 +214,120 @@ impl ReplacementFixture {
         app.oneshot(request).await.unwrap()
     }
 
+    pub(super) async fn request_source_tables(
+        &self,
+        session_token: &str,
+    ) -> axum::response::Response {
+        let app = Router::new()
+            .nest(
+                "/api",
+                super::router(self.state.max_upload_bytes)
+                    .merge(crate::api::source_tables::router()),
+            )
+            .with_state(self.state.clone());
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/source-tables")
+            .header(header::COOKIE, format!("anydatas_session={session_token}"))
+            .body(Body::empty())
+            .unwrap();
+        app.oneshot(request).await.unwrap()
+    }
+
+    pub(super) async fn request_upload(
+        &self,
+        session_token: &str,
+        body: Vec<u8>,
+    ) -> axum::response::Response {
+        let app = Router::new()
+            .nest("/api", super::router(self.state.max_upload_bytes))
+            .with_state(self.state.clone());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/data-sources")
+            .header(
+                header::CONTENT_TYPE,
+                "multipart/form-data; boundary=replace-boundary",
+            )
+            .header(header::COOKIE, format!("anydatas_session={session_token}"))
+            .body(Body::from(body))
+            .unwrap();
+        app.oneshot(request).await.unwrap()
+    }
+
+    pub(super) async fn request_refresh(
+        &self,
+        source_id: &str,
+        session_token: &str,
+        idempotency_key: &str,
+        body: Vec<u8>,
+    ) -> axum::response::Response {
+        let app = Router::new()
+            .nest("/api", super::router(self.state.max_upload_bytes))
+            .with_state(self.state.clone());
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/data-sources/{source_id}/refresh"))
+            .header(
+                header::CONTENT_TYPE,
+                "multipart/form-data; boundary=replace-boundary",
+            )
+            .header("idempotency-key", idempotency_key)
+            .header(header::COOKIE, format!("anydatas_session={session_token}"))
+            .body(Body::from(body))
+            .unwrap();
+        app.oneshot(request).await.unwrap()
+    }
+
+    pub(super) async fn source_revision(&self, source_id: &str) -> (String, String, String) {
+        sqlx::query_as(
+            r#"
+            SELECT d.current_revision_id, r.content_sha256, r.stored_path
+            FROM data_sources d
+            JOIN source_revisions r ON r.id = d.current_revision_id
+            WHERE d.id = ?
+            "#,
+        )
+        .bind(source_id)
+        .fetch_one(&self.state.pool)
+        .await
+        .unwrap()
+    }
+
+    pub(super) async fn revision_count(&self) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM source_revisions WHERE source_id = ?")
+            .bind(SOURCE_ID)
+            .fetch_one(&self.state.pool)
+            .await
+            .unwrap()
+    }
+
+    pub(super) async fn job_count(&self) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE source_id = ?")
+            .bind(SOURCE_ID)
+            .fetch_one(&self.state.pool)
+            .await
+            .unwrap()
+    }
+
+    pub(super) async fn job_input_revision(&self, job_id: &str) -> String {
+        sqlx::query_scalar(
+            "SELECT source_revision_id FROM job_input_tables WHERE job_id = ? ORDER BY ordinal LIMIT 1",
+        )
+        .bind(job_id)
+        .fetch_one(&self.state.pool)
+        .await
+        .unwrap()
+    }
+
+    pub(super) async fn current_revision_id(&self) -> String {
+        sqlx::query_scalar("SELECT current_revision_id FROM data_sources WHERE id = ?")
+            .bind(SOURCE_ID)
+            .fetch_one(&self.state.pool)
+            .await
+            .unwrap()
+    }
+
     pub(super) async fn table_states(&self) -> Vec<TableState> {
         sqlx::query_as("SELECT id, name, schema_json, config_version, cache_key, cache_status, cache_error, is_default, row_count FROM source_tables WHERE source_id = ? ORDER BY id")
             .bind(SOURCE_ID).fetch_all(&self.state.pool).await.unwrap()
@@ -232,6 +367,13 @@ impl ReplacementFixture {
             .map(|entry| entry.path());
         uploads.chain(staging).collect()
     }
+}
+
+pub(super) fn multipart_refresh(filename: &str, content: &[u8]) -> Vec<u8> {
+    let mut body = format!("--replace-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: text/csv\r\n\r\n").into_bytes();
+    body.extend_from_slice(content);
+    body.extend_from_slice(format!("\r\n--replace-boundary\r\nContent-Disposition: form-data; name=\"savedQueryId\"\r\n\r\n{SAVED_QUERY_ID}\r\n--replace-boundary--\r\n").as_bytes());
+    body
 }
 
 pub(super) fn multipart_file(filename: &str, content: &[u8]) -> Vec<u8> {

@@ -1,3 +1,5 @@
+use std::path::Path as FilePath;
+
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -8,15 +10,16 @@ use axum::{
     response::Response,
     routing::{get, post},
 };
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
+use sqlx::{FromRow, SqliteConnection};
 use uuid::Uuid;
 
 use crate::{
     api::auth::AuthContext,
     error::{AppError, AppResult},
     models::{
-        CreateJobRequest, Job, JobListParams, JobLog, JobResultPage, JobResultParams, JobRow,
-        JobSummary, QueryTableBinding, SharedState,
+        CreateJobRequest, Job, JobInputSnapshot, JobListParams, JobLog, JobResultPage,
+        JobResultParams, JobRow, JobSummary, QueryTableBinding, SharedState,
     },
     services::{
         job_results,
@@ -33,6 +36,17 @@ pub fn router() -> Router<SharedState> {
         .route("/jobs/{id}/result.csv", get(download_result))
         .route("/jobs/{id}/cancel", post(cancel))
         .route("/jobs/{id}/retry", post(retry))
+}
+
+#[derive(Debug, FromRow)]
+struct JobInputRow {
+    table_id: String,
+    source_id: String,
+    alias: String,
+    ordinal: i64,
+    revision_id: Option<String>,
+    content_sha256: Option<String>,
+    config_version: i64,
 }
 
 async fn summary(
@@ -254,8 +268,46 @@ async fn retry(
         return Err(AppError::Conflict("当前任务尚未结束".to_owned()));
     }
     let tables = query_bindings::load_bindings(&state.pool, BindingTarget::Job, &job.id).await?;
-    let new_id = enqueue_job(
-        &state,
+    let mut transaction = state.pool.begin().await?;
+    let original_inputs = sqlx::query_as::<_, (Option<String>, String)>(
+        "SELECT source_revision_id, stored_path FROM job_input_tables WHERE job_id = ? ORDER BY ordinal",
+    )
+    .bind(&job.id)
+    .fetch_all(&mut *transaction)
+    .await?;
+    let retained_until =
+        (Utc::now() + ChronoDuration::days(state.job_result_retention_days)).to_rfc3339();
+    for (revision_id, path) in &original_inputs {
+        if let Some(revision_id) = revision_id {
+            let retained = sqlx::query(
+                r#"
+                UPDATE source_revisions
+                SET retained_until = CASE
+                    WHEN retained_until IS NULL OR retained_until < ? THEN ?
+                    ELSE retained_until
+                END
+                WHERE id = ?
+                "#,
+            )
+            .bind(&retained_until)
+            .bind(&retained_until)
+            .bind(revision_id)
+            .execute(&mut *transaction)
+            .await?;
+            if retained.rows_affected() != 1 {
+                return Err(AppError::Conflict(
+                    "原任务的固定输入版本已过期，无法重试；请从当前数据创建新任务".to_owned(),
+                ));
+            }
+        }
+        if !FilePath::new(path).is_file() {
+            return Err(AppError::Conflict(
+                "原任务的固定输入版本已过期，无法重试；请从当前数据创建新任务".to_owned(),
+            ));
+        }
+    }
+    let new_id = enqueue_job_in_transaction(
+        &mut transaction,
         &job.source_id,
         &tables,
         &job.name,
@@ -265,6 +317,39 @@ async fn retry(
         "retry",
     )
     .await?;
+    let original_inputs: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM job_input_tables WHERE job_id = ?")
+            .bind(&job.id)
+            .fetch_one(&mut *transaction)
+            .await?;
+    if original_inputs > 0 {
+        sqlx::query("DELETE FROM job_input_tables WHERE job_id = ?")
+            .bind(&new_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO job_input_tables (
+                job_id, ordinal, source_table_id, source_id, source_revision_id,
+                content_sha256, stored_path, file_kind, sheet_name, start_cell,
+                end_cell, first_row_as_header, schema_json, row_count,
+                config_version, cache_key, alias
+            )
+            SELECT ?, ordinal, source_table_id, source_id, source_revision_id,
+                   content_sha256, stored_path, file_kind, sheet_name, start_cell,
+                   end_cell, first_row_as_header, schema_json, row_count,
+                   config_version, cache_key, alias
+            FROM job_input_tables
+            WHERE job_id = ?
+            ORDER BY ordinal
+            "#,
+        )
+        .bind(&new_id)
+        .bind(&job.id)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
     Ok((
         StatusCode::CREATED,
         Json(
@@ -308,6 +393,35 @@ pub async fn enqueue_job(
     schedule_id: Option<&str>,
     trigger_type: &str,
 ) -> AppResult<String> {
+    let mut transaction = state.pool.begin().await?;
+    let id = enqueue_job_in_transaction(
+        &mut transaction,
+        source_id,
+        tables,
+        name,
+        sql,
+        post_js,
+        schedule_id,
+        trigger_type,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(id)
+}
+
+/// Insert a job, its compatibility bindings, and immutable execution inputs in one caller-owned
+/// transaction. Refresh publication reuses this seam so a new revision and its job are all-or-none.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn enqueue_job_in_transaction(
+    connection: &mut SqliteConnection,
+    source_id: &str,
+    tables: &[QueryTableBinding],
+    name: &str,
+    sql: &str,
+    post_js: Option<&str>,
+    schedule_id: Option<&str>,
+    trigger_type: &str,
+) -> AppResult<String> {
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let logs = vec![JobLog {
@@ -319,7 +433,6 @@ pub async fn enqueue_job(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
-    let mut transaction = state.pool.begin().await?;
     sqlx::query(
         r#"
         INSERT INTO jobs (
@@ -338,11 +451,50 @@ pub async fn enqueue_job(
     .bind(serde_json::to_string(&logs).map_err(|error| AppError::Internal(error.to_string()))?)
     .bind(&now)
     .bind(&now)
-    .execute(&mut *transaction)
+    .execute(&mut *connection)
     .await?;
-    query_bindings::replace_bindings(&mut transaction, BindingTarget::Job, &id, tables).await?;
-    transaction.commit().await?;
+    query_bindings::replace_bindings(connection, BindingTarget::Job, &id, tables).await?;
+    snapshot_job_inputs(connection, &id, tables).await?;
     Ok(id)
+}
+
+async fn snapshot_job_inputs(
+    connection: &mut SqliteConnection,
+    job_id: &str,
+    tables: &[QueryTableBinding],
+) -> AppResult<()> {
+    for (ordinal, binding) in tables.iter().enumerate() {
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO job_input_tables (
+                job_id, ordinal, source_table_id, source_id, source_revision_id,
+                content_sha256, stored_path, file_kind, sheet_name, start_cell,
+                end_cell, first_row_as_header, schema_json, row_count,
+                config_version, cache_key, alias
+            )
+            SELECT ?, ?, t.id, t.source_id, d.current_revision_id,
+                   r.content_sha256, d.stored_path, d.file_kind, t.sheet_name,
+                   t.start_cell, t.end_cell, t.first_row_as_header, t.schema_json,
+                   t.row_count, t.config_version, t.cache_key, ?
+            FROM source_tables t
+            JOIN data_sources d ON d.id = t.source_id
+            LEFT JOIN source_revisions r ON r.id = d.current_revision_id
+            WHERE t.id = ?
+            "#,
+        )
+        .bind(job_id)
+        .bind(ordinal as i64)
+        .bind(&binding.alias)
+        .bind(&binding.table_id)
+        .execute(&mut *connection)
+        .await?;
+        if inserted.rows_affected() != 1 {
+            return Err(AppError::Conflict(
+                "任务输入在入队期间发生变化，请重新运行".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn validate_job_request(
@@ -370,7 +522,38 @@ pub async fn hydrate_job(state: &SharedState, row: JobRow) -> AppResult<Job> {
     let id = row.id.clone();
     let mut job = Job::from(row);
     job.tables = query_bindings::load_bindings(&state.pool, BindingTarget::Job, &id).await?;
+    job.inputs = load_job_input_snapshots(&state.pool, &id).await?;
     Ok(job)
+}
+
+pub(crate) async fn load_job_input_snapshots(
+    pool: &sqlx::SqlitePool,
+    job_id: &str,
+) -> AppResult<Vec<JobInputSnapshot>> {
+    let rows = sqlx::query_as::<_, JobInputRow>(
+        r#"
+        SELECT source_table_id AS table_id, source_id, alias, ordinal,
+               source_revision_id AS revision_id, content_sha256, config_version
+        FROM job_input_tables
+        WHERE job_id = ?
+        ORDER BY ordinal
+        "#,
+    )
+    .bind(job_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| JobInputSnapshot {
+            table_id: row.table_id,
+            source_id: row.source_id,
+            alias: row.alias,
+            ordinal: row.ordinal,
+            revision_id: row.revision_id,
+            content_sha256: row.content_sha256,
+            config_version: row.config_version,
+        })
+        .collect())
 }
 
 pub async fn required_job(

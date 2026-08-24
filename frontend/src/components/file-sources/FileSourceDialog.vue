@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { FolderOpen } from '@lucide/vue'
 
-import type { DataSource, ScheduleItem } from '../../types'
+import type { DataSource, SavedQuery, ScheduleItem } from '../../types'
 import type { FileSourceForm } from '../../composables/useFileSources'
 
 const TIMEZONES = [
@@ -19,6 +19,7 @@ const props = defineProps<{
   editingId: string | null
   form: FileSourceForm
   dataSources: DataSource[]
+  savedQueries: SavedQuery[]
   schedules: ScheduleItem[]
   targetsLoading: boolean
   saving: boolean
@@ -40,6 +41,11 @@ const targetLabel = computed(() => {
   return source ? `${source.name}（${source.originalFilename}）` : ''
 })
 
+const savedQueryLabel = computed(() => {
+  const query = props.savedQueries.find((item) => item.id === props.form.savedQueryId)
+  return query ? `${query.name}（${query.sourceName}）` : ''
+})
+
 const triggerLabels = computed(() =>
   props.form.triggerScheduleIds
     .map((id) => props.schedules.find((schedule) => schedule.id === id))
@@ -53,6 +59,17 @@ const triggerLabels = computed(() =>
     <el-form label-position="top" v-loading="targetsLoading">
       <el-form-item label="名称">
         <el-input v-model="form.name" maxlength="80" placeholder="如：日报数据" />
+      </el-form-item>
+      <el-form-item label="自动化方式">
+        <el-radio-group v-model="form.mode">
+          <el-radio-button value="saved_query">可信刷新</el-radio-button>
+          <el-radio-button value="legacy_schedule">兼容计划模式</el-radio-button>
+        </el-radio-group>
+        <p class="form-hint">
+          {{ form.mode === 'saved_query'
+            ? '一个本地时钟直接发布不可变数据版本，并创建一条保存查询任务。'
+            : '兼容旧文件源：替换数据后依次触发服务器计划。' }}
+        </p>
       </el-form-item>
       <el-form-item label="目录">
         <div class="file-source-dir-field">
@@ -86,6 +103,22 @@ const triggerLabels = computed(() =>
           </el-select>
         </el-form-item>
       </div>
+      <el-form-item v-if="form.mode === 'saved_query'" label="保存查询">
+        <el-select
+          v-model="form.savedQueryId"
+          placeholder="选择已成功验证的保存查询"
+          :title="savedQueryLabel || undefined"
+          :aria-label="`保存查询：${savedQueryLabel || '未选择'}`"
+        >
+          <el-option
+            v-for="query in savedQueries.filter((item) => item.sourceId === form.targetSourceId)"
+            :key="query.id"
+            :label="`${query.name}（${query.sourceName}）`"
+            :value="query.id"
+          />
+        </el-select>
+        <p class="form-hint">首版只支持绑定当前物理文件内逻辑表的查询；任务会固定本次数据版本。</p>
+      </el-form-item>
       <div class="dialog-form-grid">
         <el-form-item label="定时表达式">
           <el-input v-model="form.cron" placeholder="0 8 * * *" />
@@ -97,7 +130,7 @@ const triggerLabels = computed(() =>
           </el-select>
         </el-form-item>
       </div>
-      <el-form-item label="触发下游调度">
+      <el-form-item v-if="form.mode === 'legacy_schedule'" label="触发下游调度">
         <el-select
           v-model="form.triggerScheduleIds"
           multiple
@@ -114,7 +147,12 @@ const triggerLabels = computed(() =>
         </el-select>
         <p class="form-hint">采集成功并覆盖数据源后，会依次立即运行选中的查询调度。</p>
       </el-form-item>
-      <el-checkbox v-model="form.enabled">{{ editingId ? '启用此文件源' : '创建后立即启用' }}</el-checkbox>
+      <div v-if="form.mode === 'saved_query'" class="dialog-summary trusted-refresh-summary">
+        <span>新文件会先生成稳定快照；服务器完整校验后才切换数据版本，并原子创建一条查询任务。结构或类型不兼容时，上一版本保持可用。</span>
+      </div>
+      <el-checkbox v-model="form.enabled">
+        {{ editingId ? '启用此文件源' : '试运行成功后立即启用' }}
+      </el-checkbox>
     </el-form>
     <template #footer>
       <el-button @click="visible = false">取消</el-button>

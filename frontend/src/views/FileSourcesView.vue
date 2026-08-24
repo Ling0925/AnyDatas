@@ -9,7 +9,9 @@ const {
   hasDesktop,
   sources,
   dataSources,
+  savedQueries,
   schedules,
+  activities,
   loading,
   actionId,
   toggleId,
@@ -68,7 +70,9 @@ const {
       :toggle-id="toggleId"
       :expanded-runs-id="expandedRunsId"
       :data-sources="dataSources"
+      :saved-queries="savedQueries"
       :schedules="schedules"
+      :activities="activities"
       @toggle="toggleSource"
       @run="runNow"
       @edit="openEditDialog"
@@ -81,6 +85,7 @@ const {
       :editing-id="editingId"
       :form="form"
       :data-sources="dataSources"
+      :saved-queries="savedQueries"
       :schedules="schedules"
       :targets-loading="dialogTargetsLoading"
       :saving="saving"

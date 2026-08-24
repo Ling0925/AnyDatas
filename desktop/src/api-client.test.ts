@@ -43,6 +43,23 @@ describe("LocalApiClient", () => {
     paths.length = 0
     server = createServer((request, response) => {
       paths.push(request.url ?? "")
+      if (request.url?.includes("/refresh") === true) {
+        const chunks: Buffer[] = []
+        request.on("data", (chunk: Buffer) => chunks.push(chunk))
+        request.on("end", () => {
+          receivedBody = Buffer.concat(chunks)
+          receivedLength = request.headers["content-length"] ?? ""
+          response.setHeader("content-type", "application/json")
+          response.end(JSON.stringify({
+            refreshId: "refresh-1",
+            revisionId: "revision-1",
+            contentSha256: "a".repeat(64),
+            unchanged: false,
+            jobId: "job-1",
+          }))
+        })
+        return
+      }
       if (request.url?.includes("/replace") === true) {
         const chunks: Buffer[] = []
         request.on("data", (chunk: Buffer) => chunks.push(chunk))
@@ -74,6 +91,16 @@ describe("LocalApiClient", () => {
         response.end(Buffer.alloc(1024 * 1024 + 1, 120))
         return
       }
+      if (request.url === "/api/auth/me") {
+        response.writeHead(200, { "content-type": "application/json" })
+        response.end(JSON.stringify({ workspaceId: "workspace-1" }))
+        return
+      }
+      if (request.url?.startsWith("/api/schedules/") === true) {
+        response.writeHead(201, { "content-type": "application/json" })
+        response.end(JSON.stringify({ id: "job-1" }))
+        return
+      }
       response.writeHead(204)
       response.end()
     })
@@ -100,6 +127,25 @@ describe("LocalApiClient", () => {
     expect(Number(receivedLength)).toBe(receivedBody.length)
     expect(receivedBody.indexOf(fileContent)).toBeGreaterThan(0)
     expect(paths).toEqual(["/api/data-sources/source%2F1/replace"])
+  })
+
+  it("uploads an immutable snapshot with saved query and parses the refresh receipt", async () => {
+    const filePath = join(directory, "daily.csv")
+    await writeFile(filePath, "id,value\n1,10\n")
+
+    const result = await client.refreshSource("source/1", "query-1", filePath, "daily.csv", "attempt-1")
+
+    expect(result).toEqual({
+      refreshId: "refresh-1",
+      revisionId: "revision-1",
+      contentSha256: "a".repeat(64),
+      unchanged: false,
+      jobId: "job-1",
+    })
+    expect(Number(receivedLength)).toBe(receivedBody.length)
+    expect(receivedBody.toString("utf8")).toContain('filename="daily.csv"')
+    expect(receivedBody.toString("utf8")).toContain("query-1")
+    expect(paths).toEqual(["/api/data-sources/source%2F1/refresh"])
   })
 
   it("posts a schedule run-now request", async () => {

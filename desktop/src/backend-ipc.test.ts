@@ -9,6 +9,7 @@ const READY: BackendStatus = {
   serverUrl: "https://example.com/",
   serverVersion: "0.1.0",
   protocolVersion: 1,
+  capabilities: ["refresh-receipts"],
   message: "服务器连接成功",
   progress: 1,
 }

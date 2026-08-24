@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRoute } from 'vue-router'
 import {
   CalendarClock,
   CircleCheck,
@@ -36,6 +37,7 @@ import type {
   SchedulePayload,
 } from '../types'
 
+const route = useRoute()
 const tasks = useTasksStore()
 const workspace = useWorkspaceStore()
 const activeTab = ref<'runs' | 'schedules'>('runs')
@@ -136,6 +138,11 @@ let refreshPaused = false
 onMounted(async () => {
   try {
     await Promise.all([workspace.loadSources(), tasks.loadJobs(), tasks.loadSchedules()])
+    const requestedJob = typeof route.query.job === 'string' ? route.query.job : null
+    if (requestedJob) {
+      activeTab.value = 'runs'
+      await tasks.openJob(requestedJob)
+    }
   } catch (error) {
     ElMessage.error(errorMessage(error))
   }
@@ -216,6 +223,8 @@ function triggerLabel(value: string): string {
   return {
     manual: '手动创建',
     schedule: '计划触发',
+    manual_schedule: '立即运行计划',
+    local_refresh: '本地可信刷新',
     retry: '手动重试',
   }[value] ?? value
 }
@@ -704,6 +713,24 @@ async function deleteSchedule(id: string) {
             <span v-for="binding in tasks.selectedJob.tables" :key="`${binding.tableId}-${binding.alias}`">
               {{ binding.alias }}
             </span>
+          </div>
+        </section>
+
+        <section v-if="tasks.selectedJob.inputs?.length" class="detail-section">
+          <h3>固定输入版本</h3>
+          <div class="input-snapshot-list">
+            <div v-for="input in tasks.selectedJob.inputs ?? []" :key="`${input.ordinal}-${input.alias}`">
+              <strong>{{ input.alias }}</strong>
+              <span>
+                {{ input.revisionId
+                  ? `版本 ${input.revisionId.slice(0, 12)}`
+                  : input.contentSha256 ? '版本已过期' : '历史兼容输入' }}
+              </span>
+              <code v-if="input.contentSha256" :title="input.contentSha256">
+                {{ input.contentSha256.slice(0, 12) }}
+              </code>
+              <small>配置 v{{ input.configVersion }}</small>
+            </div>
           </div>
         </section>
 

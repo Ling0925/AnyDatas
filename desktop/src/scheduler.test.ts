@@ -8,21 +8,31 @@ import type {
 } from "./scheduler.js"
 import type { DesktopFileSource } from "./types.js"
 
-function source(id: string, enabled: boolean): DesktopFileSource {
+function source(
+  id: string,
+  enabled: boolean,
+  overrides: Partial<DesktopFileSource> = {},
+): DesktopFileSource {
   return {
     id,
     name: id,
+    mode: "legacy_schedule",
     directory: "/tmp",
     pattern: "*.csv",
     targetSourceId: "target",
+    savedQueryId: null,
+    workspaceId: null,
     cron: "* * * * *",
     timezone: "UTC",
     enabled,
     triggerScheduleIds: [],
     createdAt: "2026-08-09T00:00:00.000Z",
     updatedAt: "2026-08-09T00:00:00.000Z",
+    lastAppliedHash: null,
+    activeAttempt: null,
     lastRun: null,
     runs: [],
+    ...overrides,
   }
 }
 
@@ -36,10 +46,19 @@ class FakeReader implements FileSourceReader {
 
 class FakeRunner implements FileSourceRunner {
   readonly ids: string[] = []
+  readonly outcomes: import("./types.js").CollectorRunOutcome[] = []
 
-  async runNow(id: string): Promise<DesktopFileSource> {
+  async runNow(id: string): Promise<import("./types.js").CollectorRunResult> {
     this.ids.push(id)
-    return source(id, true)
+    const updated = source(id, true)
+    const outcome = this.outcomes.shift() ?? "success"
+    return {
+      source: updated,
+      outcome,
+      jobId: null,
+      revisionId: null,
+      message: outcome,
+    }
   }
 }
 
@@ -100,6 +119,26 @@ describe("FileSourceScheduler", () => {
 
     // Then
     expect(runner.ids).toEqual(["enabled", "enabled"])
+  })
+
+  it("retries a settling daily file across the original cron minute", async () => {
+    let now = new Date("2026-08-09T08:00:05.000Z")
+    const runner = new FakeRunner()
+    runner.outcomes.push("waiting", "success")
+    const scheduled = source("daily", true, { cron: "0 8 * * *" })
+    const scheduler = new FileSourceScheduler(new FakeReader([scheduled]), runner, {
+      now: () => now,
+      timer: new FakeTimer(),
+      onError: () => undefined,
+    })
+
+    await scheduler.tick()
+    now = new Date("2026-08-09T08:01:05.000Z")
+    await scheduler.tick()
+    now = new Date("2026-08-09T08:02:05.000Z")
+    await scheduler.tick()
+
+    expect(runner.ids).toEqual(["daily", "daily"])
   })
 
   it("starts a thirty-second interval and clears it on stop", () => {

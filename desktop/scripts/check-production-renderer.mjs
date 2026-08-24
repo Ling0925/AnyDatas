@@ -17,6 +17,7 @@ const BACKEND_STATUS = {
   serverUrl: null,
   serverVersion: null,
   protocolVersion: null,
+  capabilities: [],
   message: "请选择单机模式或连接服务器",
   progress: null,
 }

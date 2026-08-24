@@ -58,12 +58,24 @@ def validate_active_schema(connection: sqlite3.Connection) -> None:
         raise ValueError(f"SQLite database is not the active Rust schema; missing: {', '.join(missing)}")
 
 
-def normalize_leaf(value: str, label: str) -> str:
-    """只接受单层文件名，防止数据库中的异常路径把备份读取范围扩展到数据卷之外。"""
-    leaf = Path(value).name
-    if not leaf or leaf in {".", ".."} or Path(leaf).name != leaf:
-        raise ValueError(f"Unsafe {label} filename in SQLite metadata.")
-    return leaf
+def payload_relative_path(value: str, directory_name: str, label: str) -> str:
+    """将数据库路径限制在指定载荷目录内，同时保留不可变版本的嵌套目录。"""
+    path = Path(value)
+    parts = path.parts
+    try:
+        marker = max(index for index, part in enumerate(parts) if part == directory_name)
+        relative_parts = parts[marker + 1 :]
+    except ValueError:
+        relative_parts = (path.name,)
+    relative = PurePosixPath(*relative_parts)
+    if (
+        not relative_parts
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or str(relative) in {"", "."}
+    ):
+        raise ValueError(f"Unsafe {label} path in SQLite metadata.")
+    return relative.as_posix()
 
 
 def artifact_filename(value: str, label: str) -> str:
@@ -74,7 +86,7 @@ def artifact_filename(value: str, label: str) -> str:
     return f"{value}.duckdb"
 
 
-def snapshot_database(source: Path, destination: Path) -> dict[str, set[str]]:
+def snapshot_database(source: Path, destination: Path) -> dict[str, object]:
     """创建在线一致性快照并移除可重建状态，让备份更小且不会恢复半成品导入。"""
     if not source.is_file():
         raise FileNotFoundError(f"SQLite database not found: {source}")
@@ -85,10 +97,21 @@ def snapshot_database(source: Path, destination: Path) -> dict[str, set[str]]:
             source_connection.backup(snapshot_connection)
             validate_active_schema(snapshot_connection)
 
-            uploads = {
-                normalize_leaf(row[0], "upload")
-                for row in snapshot_connection.execute("SELECT stored_path FROM data_sources")
-            }
+            upload_hashes: dict[str, str] = {}
+            if table_exists(snapshot_connection, "source_revisions"):
+                uploads = set()
+                for stored_path, content_sha256 in snapshot_connection.execute(
+                    "SELECT stored_path, content_sha256 FROM source_revisions"
+                ):
+                    relative = payload_relative_path(stored_path, "uploads", "source revision")
+                    uploads.add(relative)
+                    if content_sha256:
+                        upload_hashes[relative] = content_sha256
+            else:
+                uploads = {
+                    payload_relative_path(row[0], "uploads", "upload")
+                    for row in snapshot_connection.execute("SELECT stored_path FROM data_sources")
+                }
             job_results = set()
             if column_exists(snapshot_connection, "jobs", "result_artifact_key"):
                 job_results = {
@@ -114,6 +137,7 @@ def snapshot_database(source: Path, destination: Path) -> dict[str, set[str]]:
             snapshot_connection.commit()
     return {
         "uploads": uploads,
+        "upload-hashes": upload_hashes,
         "job-results": job_results,
         "encrypted-ai-key": {"required"} if encrypted_ai_keys else set(),
     }
@@ -122,17 +146,28 @@ def snapshot_database(source: Path, destination: Path) -> dict[str, set[str]]:
 def copy_referenced_payload(
     data_dir: Path,
     staging: Path,
-    references: dict[str, set[str]],
+    references: dict[str, object],
 ) -> None:
     """只复制数据库快照实际引用的不可重建文件，保证备份边界稳定且缺失文件会立即报错。"""
+    upload_hashes = references.get("upload-hashes", {})
+    if not isinstance(upload_hashes, dict):
+        raise ValueError("Invalid source revision hash inventory.")
     for directory_name in ("uploads", "job-results"):
-        for filename in sorted(references[directory_name]):
+        entries = references[directory_name]
+        if not isinstance(entries, set):
+            raise ValueError(f"Invalid {directory_name} backup inventory.")
+        for filename in sorted(entries):
             source = data_dir / directory_name / filename
             if not source.is_file() or source.is_symlink():
                 raise FileNotFoundError(f"Referenced backup file not found: {source}")
+            expected_hash = upload_hashes.get(filename) if directory_name == "uploads" else None
+            if expected_hash and checksum(source) != expected_hash:
+                raise ValueError(f"Source revision hash does not match SQLite metadata: {filename}")
             destination = staging / directory_name / filename
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
+            if expected_hash and checksum(destination) != expected_hash:
+                raise ValueError(f"Copied source revision hash changed during backup: {filename}")
 
     secret_key = data_dir / ".secret-key"
     if secret_key.is_file() and not secret_key.is_symlink():
@@ -317,6 +352,22 @@ def validate_manifest(payload: Path, manifest: dict) -> Path:
         if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise ValueError("Backup SQLite database failed integrity validation.")
         validate_active_schema(connection)
+        if table_exists(connection, "source_revisions"):
+            for stored_path, content_sha256 in connection.execute(
+                "SELECT stored_path, content_sha256 FROM source_revisions"
+            ):
+                relative = payload_relative_path(
+                    stored_path, "uploads", "source revision"
+                )
+                revision_path = payload / "uploads" / relative
+                if not revision_path.is_file():
+                    raise ValueError(
+                        f"Backup archive is missing source revision: {relative}"
+                    )
+                if content_sha256 and checksum(revision_path) != content_sha256:
+                    raise ValueError(
+                        f"Backup source revision hash mismatch: {relative}"
+                    )
     return database_path
 
 

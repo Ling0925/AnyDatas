@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { defineAsyncComponent, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
   BarChart3,
   ChevronDown,
@@ -9,6 +9,7 @@ import {
   CircleAlert,
   Clock3,
   Download,
+  FolderSync,
   Link2,
   ListPlus,
   Play,
@@ -31,12 +32,15 @@ import { DEFAULT_POST_JS, useWorkspaceStore } from '../stores/workspace'
 
 const ResultChart = defineAsyncComponent(() => import('../components/ResultChart.vue'))
 
+const route = useRoute()
 const router = useRouter()
 const store = useWorkspaceStore()
+const hasDesktop = Boolean(window.desktop)
 const activeTab = ref<'query' | 'preview'>('query')
 const resultMode = ref<'table' | 'chart'>('table')
 // 查询失败属于结果状态而不是瞬时通知；保留文本可让用户对照 SQL 修改，成功重跑时再清空。
 const queryError = ref('')
+const lastSuccessfulQuerySignature = ref('')
 const postJsOpen = ref(false)
 const taskDialogVisible = ref(false)
 const taskForm = reactive({ name: '' })
@@ -44,6 +48,7 @@ const taskCreating = ref(false)
 const saveQueryDialogVisible = ref(false)
 const saveQueryName = ref('')
 const saveQuerySaving = ref(false)
+const automationPending = ref(false)
 let completionDisposable: { dispose: () => void } | null = null
 
 const editorOptions = {
@@ -70,6 +75,10 @@ const postJsEditorOptions = {
 onMounted(async () => {
   try {
     await store.loadSources()
+    const requestedSource = typeof route.query.source === 'string' ? route.query.source : null
+    if (requestedSource && store.sources.some((source) => source.id === requestedSource)) {
+      await store.selectSource(requestedSource)
+    }
   } catch (error) {
     ElMessage.error(errorMessage(error))
   }
@@ -77,10 +86,19 @@ onMounted(async () => {
 
 onUnmounted(() => completionDisposable?.dispose())
 
+function currentQuerySignature() {
+  return JSON.stringify({
+    sql: store.currentSql,
+    postJs: store.currentPostJs,
+    tables: store.queryBindings,
+  })
+}
+
 async function runQuery() {
   queryError.value = ''
   try {
     await store.runQuery()
+    lastSuccessfulQuerySignature.value = currentQuerySignature()
     // AI 建议了图表时，结果默认以该图表呈现（用户仍可切回表格或手调）。
     if (store.appliedChart && store.queryResult) resultMode.value = 'chart'
   } catch (error) {
@@ -119,6 +137,55 @@ function openSaveQueryDialog() {
   saveQueryDialogVisible.value = true
 }
 
+async function navigateToAutomation(savedQueryId: string) {
+  if (!store.primarySourceId) return
+  await router.push({
+    path: '/file-sources',
+    query: {
+      automate: '1',
+      sourceId: store.primarySourceId,
+      savedQueryId,
+    },
+  })
+}
+
+async function openAutomation() {
+  if (!window.desktop) {
+    ElMessage.warning('本地文件自动化仅桌面客户端可用')
+    return
+  }
+  const backend = await window.desktop.getBackendStatus()
+  if (!backend.capabilities.includes('refresh-receipts')) {
+    ElMessage.warning('当前服务端版本不支持可信刷新，请先升级服务端')
+    return
+  }
+  if (!store.queryResult || queryError.value || lastSuccessfulQuerySignature.value !== currentQuerySignature()) {
+    ElMessage.warning('请先成功运行当前版本的查询，再创建自动化')
+    return
+  }
+  const sourceIds = new Set(store.boundTables.map(({ table }) => table.sourceId))
+  if (sourceIds.size !== 1) {
+    ElMessage.warning('可信刷新首版只支持同一物理文件内的逻辑表')
+    return
+  }
+  if (!store.selectedSavedQuery) {
+    automationPending.value = true
+    openSaveQueryDialog()
+    return
+  }
+  try {
+    const saved = await store.saveCurrentQuery(store.selectedSavedQuery.name)
+    if (saved) await navigateToAutomation(saved.id)
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  }
+}
+
+function closeSaveQueryDialog() {
+  automationPending.value = false
+  saveQueryDialogVisible.value = false
+}
+
 async function saveQuery() {
   if (!saveQueryName.value.trim()) {
     ElMessage.warning('请输入查询名称')
@@ -127,9 +194,13 @@ async function saveQuery() {
   saveQuerySaving.value = true
   try {
     const updating = Boolean(store.selectedSavedQueryId)
-    await store.saveCurrentQuery(saveQueryName.value)
+    const saved = await store.saveCurrentQuery(saveQueryName.value)
     saveQueryDialogVisible.value = false
     ElMessage.success(updating ? '查询已更新' : '查询已保存')
+    if (automationPending.value && saved) {
+      automationPending.value = false
+      await navigateToAutomation(saved.id)
+    }
   } catch (error) {
     ElMessage.error(errorMessage(error))
   } finally {
@@ -306,6 +377,10 @@ function configureSqlCompletion(monaco: any) {
                     <Trash2 :size="15" />
                   </el-button>
                 </el-tooltip>
+                <el-button v-if="hasDesktop" class="labeled-action automation-action" @click="openAutomation">
+                  <FolderSync :size="15" />
+                  自动化
+                </el-button>
                 <el-button class="labeled-action" @click="openTaskDialog">
                   <ListPlus :size="15" />
                   后台任务
@@ -542,7 +617,7 @@ function configureSqlCompletion(monaco: any) {
         </div>
       </el-form>
       <template #footer>
-        <el-button @click="saveQueryDialogVisible = false">取消</el-button>
+        <el-button @click="closeSaveQueryDialog">取消</el-button>
         <el-button type="primary" :loading="saveQuerySaving" @click="saveQuery">保存</el-button>
       </template>
     </el-dialog>

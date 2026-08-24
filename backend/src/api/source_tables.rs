@@ -42,12 +42,14 @@ async fn list(
     let rows = sqlx::query_as::<_, SourceTableRow>(
         r#"
         SELECT t.id, t.source_id, d.name AS source_name, d.original_filename,
-               d.stored_path, d.file_kind, t.name, t.sheet_name, t.start_cell,
+               d.stored_path, d.file_kind, d.current_revision_id AS source_revision_id,
+               r.content_sha256, t.name, t.sheet_name, t.start_cell,
                t.end_cell, t.first_row_as_header, t.row_count, t.column_count,
                t.schema_json, t.config_version, t.cache_status,
                t.cache_error, t.is_default, t.created_at, t.updated_at
         FROM source_tables t
         JOIN data_sources d ON d.id = t.source_id
+        LEFT JOIN source_revisions r ON r.id = d.current_revision_id
         WHERE d.workspace_id = ? AND (? IS NULL OR t.source_id = ?)
         ORDER BY d.created_at DESC, t.is_default DESC, t.created_at ASC
         "#,

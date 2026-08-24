@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
-import { createReadStream } from "node:fs"
-import { stat } from "node:fs/promises"
+import { constants } from "node:fs"
+import { open } from "node:fs/promises"
+import type { FileHandle } from "node:fs/promises"
 import { request as httpRequest } from "node:http"
 import type { ClientRequest, IncomingMessage, OutgoingHttpHeaders } from "node:http"
 import { request as httpsRequest } from "node:https"
@@ -9,7 +10,17 @@ import { pipeline } from "node:stream/promises"
 import * as z from "zod"
 
 const MAX_RESPONSE_BYTES = 1024 * 1024
+const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW
 const rowCountSchema = z.object({ rowCount: z.number().int().nonnegative() })
+const refreshReceiptSchema = z.strictObject({
+  refreshId: z.string().min(1),
+  revisionId: z.string().min(1),
+  contentSha256: z.string().length(64),
+  unchanged: z.boolean(),
+  jobId: z.string().nullable(),
+})
+const jobReceiptSchema = z.object({ id: z.string().min(1) })
+const identitySchema = z.object({ workspaceId: z.string().min(1) })
 const apiErrorSchema = z.object({
   error: z.object({ message: z.string().trim().min(1).max(4_096) }),
 })
@@ -26,6 +37,14 @@ type PendingRequest = {
 
 export type ReplaceSourceResult = {
   readonly rowCount: number
+}
+
+export type RefreshSourceResult = z.infer<typeof refreshReceiptSchema>
+
+async function takeUploadHandle(file: string | FileHandle): Promise<FileHandle> {
+  return typeof file === "string"
+    ? open(file, constants.O_RDONLY | NO_FOLLOW)
+    : file
 }
 
 export class ApiRequestError extends Error {
@@ -130,10 +149,15 @@ export class LocalApiClient {
     return { request, response }
   }
 
-  async replaceSource(sourceId: string, filePath: string): Promise<ReplaceSourceResult> {
-    const metadata = await stat(filePath)
+  async replaceSource(
+    sourceId: string,
+    file: string | FileHandle,
+    originalFilename = typeof file === "string" ? basename(file) : "upload.bin",
+  ): Promise<ReplaceSourceResult> {
+    const handle = await takeUploadHandle(file)
+    const metadata = await handle.stat()
     const boundary = `anydatas-${randomUUID()}`
-    const safeFilename = basename(filePath).replace(/["\r\n]/g, "_")
+    const safeFilename = basename(originalFilename).replace(/["\r\n]/g, "_")
     const prefix = Buffer.from(
       `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${safeFilename}"\r\nContent-Type: application/octet-stream\r\n\r\n`,
     )
@@ -144,9 +168,13 @@ export class LocalApiClient {
       "content-length": prefix.length + metadata.size + suffix.length,
     })
     pending.request.write(prefix)
-    const upload = pipeline(createReadStream(filePath), pending.request, { end: false }).then(() => {
+    const upload = pipeline(
+      handle.createReadStream({ autoClose: false }),
+      pending.request,
+      { end: false },
+    ).then(() => {
       pending.request.end(suffix)
-    })
+    }).finally(() => handle.close())
     const [response] = await Promise.all([pending.response, upload])
     await requireSuccess(response, path)
     const result = rowCountSchema.safeParse(await readJson(response, path))
@@ -156,12 +184,75 @@ export class LocalApiClient {
     return { rowCount: result.data.rowCount }
   }
 
-  async runSchedule(scheduleId: string): Promise<void> {
+  async refreshSource(
+    sourceId: string,
+    savedQueryId: string,
+    file: string | FileHandle,
+    originalFilename: string,
+    idempotencyKey: string,
+  ): Promise<RefreshSourceResult> {
+    if (!/^[A-Za-z0-9._-]{1,128}$/u.test(savedQueryId)) {
+      throw new ApiResponseError("/api/data-sources/refresh", "saved query id is invalid")
+    }
+    if (!/^[A-Za-z0-9._:-]{1,128}$/u.test(idempotencyKey)) {
+      throw new ApiResponseError("/api/data-sources/refresh", "idempotency key is invalid")
+    }
+    const handle = await takeUploadHandle(file)
+    const metadata = await handle.stat()
+    const boundary = `anydatas-${randomUUID()}`
+    const safeFilename = basename(originalFilename).replace(/["\r\n]/g, "_")
+    const prefix = Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${safeFilename}"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+    )
+    const suffix = Buffer.from(
+      `\r\n--${boundary}\r\nContent-Disposition: form-data; name="savedQueryId"\r\n\r\n${savedQueryId}\r\n--${boundary}--\r\n`,
+    )
+    const path = `/api/data-sources/${encodeURIComponent(sourceId)}/refresh`
+    const pending = this.#open(path, "POST", {
+      "content-type": `multipart/form-data; boundary=${boundary}`,
+      "content-length": prefix.length + metadata.size + suffix.length,
+      "idempotency-key": idempotencyKey,
+    })
+    pending.request.write(prefix)
+    const upload = pipeline(
+      handle.createReadStream({ autoClose: false }),
+      pending.request,
+      { end: false },
+    ).then(() => {
+      pending.request.end(suffix)
+    }).finally(() => handle.close())
+    const [response] = await Promise.all([pending.response, upload])
+    await requireSuccess(response, path)
+    const result = refreshReceiptSchema.safeParse(await readJson(response, path))
+    if (!result.success) {
+      throw new ApiResponseError(path, "refresh receipt is missing or invalid")
+    }
+    return result.data
+  }
+
+  async getIdentity(): Promise<{ readonly workspaceId: string }> {
+    const path = "/api/auth/me"
+    const pending = this.#open(path, "GET", { "content-length": 0 })
+    pending.request.end()
+    const response = await pending.response
+    await requireSuccess(response, path)
+    const result = identitySchema.safeParse(await readJson(response, path))
+    if (!result.success) {
+      throw new ApiResponseError(path, "workspaceId is missing or invalid")
+    }
+    return result.data
+  }
+
+  async runSchedule(scheduleId: string): Promise<{ readonly id: string }> {
     const path = `/api/schedules/${encodeURIComponent(scheduleId)}/run`
     const pending = this.#open(path, "POST", { "content-length": 0 })
     pending.request.end()
     const response = await pending.response
     await requireSuccess(response, path)
-    response.resume()
+    const result = jobReceiptSchema.safeParse(await readJson(response, path))
+    if (!result.success) {
+      throw new ApiResponseError(path, "job id is missing or invalid")
+    }
+    return result.data
   }
 }

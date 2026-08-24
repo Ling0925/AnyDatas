@@ -24,6 +24,7 @@ const isSmoke = process.env["ANYDATAS_ELECTRON_SMOKE"] === "1"
 let mainWindow: BrowserWindow | null = null
 let proxy: ApiProxy | undefined
 let scheduler: FileSourceScheduler | undefined
+let collector: Collector | undefined
 let removeIpcHandlers: (() => void) | undefined
 let removeBackendIpcHandlers: (() => void) | undefined
 let runtime: BackendRuntimeManager | undefined
@@ -222,7 +223,8 @@ async function startRuntime(): Promise<void> {
 
   const store = new FileSourceStore(userData)
   const api = new LocalApiClient({ baseUrl: new URL(proxy.url) })
-  const collector = new Collector(store, api, {
+  collector = new Collector(store, api, {
+    userData,
     emit: (event) => {
       const window = mainWindow
       if (window !== null && !window.isDestroyed()) {
@@ -233,10 +235,11 @@ async function startRuntime(): Promise<void> {
       }
     },
   })
+  const activeCollector = collector
   removeIpcHandlers = registerFileSourceIpc({
     registrar: registrar(),
     store,
-    runner: collector,
+    runner: activeCollector,
     dialog: {
       showOpenDialog: async () => dialog.showOpenDialog({ properties: ["openDirectory"] }),
     },
@@ -246,7 +249,7 @@ async function startRuntime(): Promise<void> {
   // 运行时恢复 ready 后下一次 30 秒 tick 会自动重新读取配置，无需重建 Scheduler。
   scheduler = new FileSourceScheduler({
     list: async () => runtime?.status().phase === "ready" ? store.list() : [],
-  }, collector, {
+  }, activeCollector, {
     now: () => new Date(),
     timer: new NativeSchedulerTimer(),
     onError: (error) => console.error("desktop.scheduler.tick_failed", error),
@@ -258,7 +261,11 @@ async function startRuntime(): Promise<void> {
   const initialize = configuredTarget === undefined
     ? runtime.initialize()
     : runtime.configure({ mode: "remote", serverUrl: configuredTarget })
-  void initialize.catch((error: unknown) => {
+  void initialize.then(async (status) => {
+    if (status.phase === "ready") {
+      await activeCollector.recover()
+    }
+  }).catch((error: unknown) => {
     console.error("desktop.backend.initialize_failed", error)
   })
   console.info("desktop.runtime.ready")
@@ -287,6 +294,7 @@ app.on("before-quit", (event) => {
   // 等待 Rust 处理 SIGTERM 和 SQLite 收尾后再退出 Electron，防止子进程成为孤儿。
   // allSettled 保证某个清理动作失败时其他资源仍会释放，随后由操作系统结束当前应用。
   void Promise.allSettled([
+    collector?.stop() ?? Promise.resolve(),
     runtime?.stop() ?? Promise.resolve(),
     proxy?.close() ?? Promise.resolve(),
   ]).finally(() => app.quit())
