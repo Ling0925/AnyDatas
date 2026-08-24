@@ -101,7 +101,7 @@ async fn desktop_handshake() -> Json<DesktopHandshake> {
         service: "anydatas-server",
         server_version: env!("CARGO_PKG_VERSION"),
         protocol_version: DESKTOP_PROTOCOL_VERSION,
-        capabilities: &["file-sources", "agent", "post-js"],
+        capabilities: &["file-sources", "agent", "post-js", "refresh-receipts"],
     })
 }
 
@@ -219,5 +219,6 @@ mod tests {
         assert_eq!(payload.server_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(payload.protocol_version, 1);
         assert!(payload.capabilities.contains(&"file-sources"));
+        assert!(payload.capabilities.contains(&"refresh-receipts"));
     }
 }

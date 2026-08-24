@@ -1,13 +1,9 @@
-use std::{collections::HashSet, path::PathBuf};
-
 use axum::{
     Json,
     extract::{Multipart, Path, State},
+    http::{HeaderMap, StatusCode},
 };
-use sqlx::FromRow;
 use uuid::Uuid;
-
-mod persistence;
 
 use crate::{
     api::{
@@ -15,38 +11,9 @@ use crate::{
         data_sources::{StoreMultipartOptions, required_source, store_multipart_file},
     },
     error::{AppError, AppResult},
-    models::{DataSource, FieldDefinition, SharedState, TableData},
-    services::{maintenance, resource_control, spreadsheet},
+    models::{DataSource, SharedState, SourceRefreshReceipt},
+    services::source_refresh::{self, IncomingRevisionFile, RefreshRequest},
 };
-
-#[derive(Debug, FromRow)]
-struct ExistingTable {
-    id: String,
-    name: String,
-    sheet_name: String,
-    start_cell: String,
-    end_cell: Option<String>,
-    first_row_as_header: bool,
-    schema_json: String,
-    cache_key: Option<String>,
-    is_default: bool,
-}
-
-struct PreparedTable {
-    id: String,
-    table: TableData,
-    fields: Vec<FieldDefinition>,
-    is_default: bool,
-    sheet_name: String,
-    start_cell: String,
-    first_row_as_header: bool,
-    previous_cache_key: Option<String>,
-}
-
-struct PreparedReplacement {
-    sheet_names: Vec<String>,
-    tables: Vec<PreparedTable>,
-}
 
 pub(super) async fn replace(
     State(state): State<SharedState>,
@@ -55,120 +22,33 @@ pub(super) async fn replace(
     multipart: Multipart,
 ) -> AppResult<Json<DataSource>> {
     auth.require_analyst()?;
-    let source = required_source(&state, &id, &auth.workspace_id).await?;
-    let tables = sqlx::query_as::<_, ExistingTable>(
-        r#"
-        SELECT id, name, sheet_name, start_cell, end_cell, first_row_as_header,
-               schema_json, cache_key, is_default
-        FROM source_tables
-        WHERE source_id = ?
-        ORDER BY is_default DESC, created_at, id
-        "#,
-    )
-    .bind(&id)
-    .fetch_all(&state.pool)
-    .await?;
-    if tables.is_empty() {
-        return Err(AppError::BadRequest(
-            "数据文件没有可复用的逻辑表配置".to_owned(),
-        ));
-    }
-
-    let staging_id = Uuid::new_v4().to_string();
-    let staging_dir = state.data_dir.join("staging");
+    required_source(&state, &id, &auth.workspace_id).await?;
     let stored = store_multipart_file(
         &state,
         multipart,
         StoreMultipartOptions {
-            directory: &staging_dir,
-            file_id: &staging_id,
+            directory: &state.data_dir.join("staging"),
+            file_id: &Uuid::new_v4().to_string(),
             reject_tables: true,
         },
     )
     .await?;
-    let validation_path = stored.path.clone();
-    let validation_kind = stored.file_kind.to_owned();
-    let prepared = match resource_control::run_file_task(&state, "替换文件校验", move || {
-        prepare_replacement(&validation_path, &validation_kind, tables)
-    })
-    .await
-    {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            let _ = tokio::fs::remove_file(&stored.path).await;
-            return Err(error);
-        }
-    };
-
-    let extension = std::path::Path::new(&stored.original_filename)
-        .extension()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| AppError::BadRequest("无法识别文件扩展名".to_owned()))?;
-    let final_path = state
-        .data_dir
-        .join("uploads")
-        .join(format!("{id}.{extension}"));
-    let old_path = PathBuf::from(&source.stored_path);
-    let backup_path = old_path.with_file_name(format!(".{id}.backup-{}", Uuid::new_v4()));
-    tokio::fs::rename(&old_path, &backup_path).await?;
-    if let Err(error) = tokio::fs::rename(&stored.path, &final_path).await {
-        tokio::fs::rename(&backup_path, &old_path)
-            .await
-            .map_err(|rollback| {
-                AppError::Internal(format!(
-                    "新文件安装失败且旧文件恢复失败: {error}; {rollback}"
-                ))
-            })?;
-        return Err(error.into());
-    }
-
-    let cache_keys = prepared
-        .tables
-        .iter()
-        .filter_map(|table| table.previous_cache_key.clone())
-        .collect::<Vec<_>>();
-    let database_result = persistence::persist(
+    let staged_path = stored.path.clone();
+    let result = source_refresh::refresh_source(
         &state,
-        persistence::ReplacementCommit {
-            source_id: &id,
-            stored: &stored,
-            final_path: &final_path,
-            prepared: &prepared,
+        RefreshRequest {
+            workspace_id: auth.workspace_id.clone(),
+            source_id: id.clone(),
+            idempotency_key: format!("legacy-replace:{}", Uuid::new_v4()),
+            saved_query_id: None,
         },
+        into_revision_file(stored),
     )
     .await;
-    if let Err(error) = database_result {
-        tokio::fs::remove_file(&final_path)
-            .await
-            .map_err(|rollback| {
-                AppError::Internal(format!(
-                    "数据库更新失败且新文件清理失败: {error}; {rollback}"
-                ))
-            })?;
-        tokio::fs::rename(&backup_path, &old_path)
-            .await
-            .map_err(|rollback| {
-                AppError::Internal(format!(
-                    "数据库更新失败且旧文件恢复失败: {error}; {rollback}"
-                ))
-            })?;
-        return Err(error);
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(staged_path).await;
     }
-    if let Err(error) = tokio::fs::remove_file(&backup_path).await {
-        tracing::warn!(
-            ?error,
-            source_id = %id,
-            backup_path = %backup_path.display(),
-            "failed to remove committed replacement backup"
-        );
-    }
-    if let Err(error) = maintenance::remove_cache_keys_if_unreferenced(&state, cache_keys).await {
-        tracing::warn!(
-            ?error,
-            source_id = %id,
-            "failed to remove unreferenced caches after source replacement"
-        );
-    }
+    result?;
     Ok(Json(
         required_source(&state, &id, &auth.workspace_id)
             .await?
@@ -176,49 +56,76 @@ pub(super) async fn replace(
     ))
 }
 
-fn prepare_replacement(
-    path: &std::path::Path,
-    file_kind: &str,
-    tables: Vec<ExistingTable>,
-) -> anyhow::Result<PreparedReplacement> {
-    let inspection = spreadsheet::inspect_file(path, file_kind)?;
-    let sheet_names = inspection
-        .sheets
-        .iter()
-        .map(|sheet| sheet.name.clone())
-        .collect::<Vec<_>>();
-    let available = sheet_names.iter().collect::<HashSet<_>>();
-    let mut prepared = Vec::with_capacity(tables.len());
-    for existing in tables {
-        anyhow::ensure!(
-            available.contains(&existing.sheet_name),
-            "逻辑表 {} 的工作表已不存在",
-            existing.name
-        );
-        let requested: Vec<FieldDefinition> = serde_json::from_str(&existing.schema_json)?;
-        let table = spreadsheet::read_table_range(
-            path,
-            file_kind,
-            &existing.sheet_name,
-            &existing.start_cell,
-            existing.end_cell.as_deref(),
-            existing.first_row_as_header,
-            Some(2_000),
-        )?;
-        let fields = spreadsheet::apply_field_overrides(&table.columns, Some(&requested))?;
-        prepared.push(PreparedTable {
-            id: existing.id,
-            table,
-            fields,
-            is_default: existing.is_default,
-            sheet_name: existing.sheet_name,
-            start_cell: existing.start_cell,
-            first_row_as_header: existing.first_row_as_header,
-            previous_cache_key: existing.cache_key,
-        });
+pub(super) async fn refresh(
+    State(state): State<SharedState>,
+    auth: AuthContext,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    multipart: Multipart,
+) -> AppResult<(StatusCode, Json<SourceRefreshReceipt>)> {
+    auth.require_analyst()?;
+    required_source(&state, &id, &auth.workspace_id).await?;
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest("缺少 Idempotency-Key 请求头".to_owned()))?
+        .to_owned();
+    let stored = store_multipart_file(
+        &state,
+        multipart,
+        StoreMultipartOptions {
+            directory: &state.data_dir.join("staging"),
+            file_id: &Uuid::new_v4().to_string(),
+            reject_tables: true,
+        },
+    )
+    .await?;
+    let saved_query_id = stored
+        .extra_fields
+        .get("savedQueryId")
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest("缺少 savedQueryId 字段".to_owned()));
+    let saved_query_id = match saved_query_id {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&stored.path).await;
+            return Err(error);
+        }
+    };
+    let staged_path = stored.path.clone();
+    let result = source_refresh::refresh_source(
+        &state,
+        RefreshRequest {
+            workspace_id: auth.workspace_id,
+            source_id: id,
+            idempotency_key,
+            saved_query_id: Some(saved_query_id),
+        },
+        into_revision_file(stored),
+    )
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(staged_path).await;
     }
-    Ok(PreparedReplacement {
-        sheet_names,
-        tables: prepared,
-    })
+    let receipt = result?;
+    let status = if receipt.unchanged {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(receipt)))
+}
+
+fn into_revision_file(stored: crate::api::data_sources::StoredUpload) -> IncomingRevisionFile {
+    IncomingRevisionFile {
+        original_filename: stored.original_filename,
+        file_kind: stored.file_kind.to_owned(),
+        media_type: stored.media_type.to_owned(),
+        staged_path: stored.path,
+        size_bytes: stored.size_bytes as u64,
+        content_sha256: stored.content_sha256,
+    }
 }

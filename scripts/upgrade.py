@@ -60,7 +60,7 @@ def wait_for_health(url: str, timeout_seconds: int, checker: HealthChecker, slee
 def run_upgrade(
     compose_files: Sequence[Path],
     retention_days: int = 30,
-    health_url: str = "http://127.0.0.1:8000/readyz",
+    health_url: str = "http://127.0.0.1:28080/api/readyz",
     health_timeout_seconds: int = 120,
     runner: CommandRunner = subprocess.run,
     health_checker: HealthChecker = default_health_checker,
@@ -115,7 +115,7 @@ def main() -> None:
         help="Compose file to include, in order; may be repeated",
     )
     parser.add_argument("--retention-days", type=int, default=30)
-    parser.add_argument("--health-url", default="http://127.0.0.1:8000/readyz")
+    parser.add_argument("--health-url", default="http://127.0.0.1:28080/api/readyz")
     parser.add_argument("--health-timeout-seconds", type=int, default=120)
     args = parser.parse_args()
     compose_files = args.compose_files or [ROOT / "docker-compose.yml"]

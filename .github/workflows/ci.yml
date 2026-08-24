@@ -146,6 +146,7 @@ jobs:
           scripts/backup.py
           scripts/restore.py
           scripts/retention.py
+          scripts/upgrade.py
           scripts/with-duckdb-prebuilt.py
 
       - name: Run operations and prebuilt tests

@@ -81,6 +81,15 @@ export const useTasksStore = defineStore('tasks', () => {
     await refreshSelectedJob()
   }
 
+  async function openJob(id: string) {
+    const job = await api.getJob(id)
+    const index = jobs.value.findIndex((item) => item.id === id)
+    if (index >= 0) jobs.value[index] = job
+    else jobs.value = [job, ...jobs.value]
+    selectedJobId.value = id
+    return job
+  }
+
   async function loadSchedules() {
     schedules.value = await api.listSchedules()
   }
@@ -166,6 +175,7 @@ export const useTasksStore = defineStore('tasks', () => {
     loadSummary,
     refreshSelectedJob,
     selectJob,
+    openJob,
     loadSchedules,
     createJob,
     cancelJob,

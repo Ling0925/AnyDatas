@@ -3360,6 +3360,8 @@ mod tests {
             secret_key: [7u8; 32],
             query_control: Default::default(),
             cache_build_locks: Default::default(),
+            storage_maintenance_lock: Default::default(),
+            active_refresh_preparations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             query_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             file_parse_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             query_max_concurrency: 2,

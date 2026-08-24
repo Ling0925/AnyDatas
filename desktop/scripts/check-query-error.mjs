@@ -13,6 +13,7 @@ const BACKEND_STATUS = {
   serverUrl: null,
   serverVersion: "0.1.1",
   protocolVersion: 1,
+  capabilities: ["refresh-receipts"],
   message: "单机服务已就绪",
   progress: null,
 }

@@ -9,4 +9,5 @@ pub mod query_bindings;
 pub mod query_engine;
 pub mod resource_control;
 pub mod secrets;
+pub mod source_refresh;
 pub mod spreadsheet;

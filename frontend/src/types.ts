@@ -294,6 +294,16 @@ export interface JobLog {
 
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
 
+export interface JobInputSnapshot {
+  tableId: string
+  sourceId: string
+  alias: string
+  ordinal: number
+  revisionId: string | null
+  contentSha256: string | null
+  configVersion: number
+}
+
 export interface Job {
   id: string
   sourceId: string
@@ -304,6 +314,7 @@ export interface Job {
   sql: string
   postJs?: string | null
   tables: QueryTableBinding[]
+  inputs?: JobInputSnapshot[]
   status: JobStatus
   progress: number
   triggerType: string

@@ -4172,6 +4172,32 @@ input:focus-visible {
   font-size: 11px;
 }
 
+.input-snapshot-list {
+  display: grid;
+  gap: 6px;
+}
+
+.input-snapshot-list > div {
+  display: grid;
+  grid-template-columns: minmax(70px, 0.8fr) minmax(100px, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  background: var(--surface-subtle);
+  font-size: 11px;
+}
+
+.input-snapshot-list code {
+  color: var(--primary-text);
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.input-snapshot-list small {
+  color: var(--text-secondary);
+}
+
 .tasks-layout {
   height: 100%;
   min-height: 0;

@@ -49,6 +49,8 @@ async fn main() -> anyhow::Result<()> {
         secret_key,
         query_control: Default::default(),
         cache_build_locks: Default::default(),
+        storage_maintenance_lock: Default::default(),
+        active_refresh_preparations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         query_semaphore: Arc::new(Semaphore::new(config.query_max_concurrency)),
         file_parse_semaphore: Arc::new(Semaphore::new(config.file_parse_max_concurrency)),
         query_max_concurrency: config.query_max_concurrency,
@@ -74,11 +76,21 @@ async fn main() -> anyhow::Result<()> {
         agent_context_chars: config.agent_context_chars,
     });
 
+    let backfilled_revisions = services::source_refresh::backfill_legacy_hashes(&state).await?;
+    if backfilled_revisions > 0 {
+        info!(
+            backfilled_revisions,
+            "legacy source revision hashes backfilled"
+        );
+    }
+    services::source_refresh::verify_current_revisions(&state).await?;
     let cleanup = services::maintenance::cleanup_startup_storage(&state).await?;
     info!(
         query_directories = cleanup.query_directories,
         temporary_caches = cleanup.temporary_caches,
         orphaned_caches = cleanup.orphaned_caches,
+        orphaned_revisions = cleanup.orphaned_revisions,
+        expired_revisions = cleanup.expired_revisions,
         expired_imports = cleanup.expired_imports,
         temporary_results = cleanup.temporary_results,
         orphaned_results = cleanup.orphaned_results,

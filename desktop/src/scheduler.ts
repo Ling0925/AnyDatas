@@ -1,5 +1,5 @@
 import { cronMatches } from "./cron.js"
-import type { DesktopFileSource } from "./types.js"
+import type { CollectorRunResult, DesktopFileSource, FileSourceRunOrigin } from "./types.js"
 
 export type TimerHandle = object
 
@@ -13,13 +13,17 @@ export type FileSourceReader = {
 }
 
 export type FileSourceRunner = {
-  readonly runNow: (id: string) => Promise<DesktopFileSource>
+  readonly runNow: (
+    id: string,
+    origin?: FileSourceRunOrigin,
+  ) => Promise<CollectorRunResult>
 }
 
 type SchedulerOptions = {
   readonly now: () => Date
   readonly timer: SchedulerTimer
   readonly onError: (error: unknown) => void
+  readonly catchUpWindowMinutes?: number
 }
 
 export class NativeSchedulerTimer implements SchedulerTimer {
@@ -33,16 +37,36 @@ export class NativeSchedulerTimer implements SchedulerTimer {
 
   clear(handle: TimerHandle): void {
     const nativeHandle = this.#nativeHandles.get(handle)
-    if (nativeHandle === undefined) {
-      return
-    }
+    if (nativeHandle === undefined) return
     clearInterval(nativeHandle)
     this.#nativeHandles.delete(handle)
   }
 }
 
+function hasMissedOccurrence(
+  source: DesktopFileSource,
+  previous: Date | null,
+  now: Date,
+  catchUpWindowMinutes: number,
+): boolean {
+  if (previous === null || now.getTime() <= previous.getTime() + 60_000) return false
+  const earliest = Math.max(
+    previous.getTime(),
+    now.getTime() - catchUpWindowMinutes * 60_000,
+  )
+  let minute = Math.floor(earliest / 60_000) * 60_000 + 60_000
+  const finalMinute = Math.floor(now.getTime() / 60_000) * 60_000
+  while (minute <= finalMinute) {
+    if (cronMatches(source.cron, new Date(minute), source.timezone)) return true
+    minute += 60_000
+  }
+  return false
+}
+
 export class FileSourceScheduler {
   readonly #lastUtcMinute = new Map<string, number>()
+  readonly #pendingRetries = new Set<string>()
+  #lastTickAt: Date | null = null
   #timerHandle: TimerHandle | undefined
 
   constructor(
@@ -57,41 +81,51 @@ export class FileSourceScheduler {
     const sources = await this.reader.list()
     const currentIds = new Set(sources.map((source) => source.id))
     for (const id of this.#lastUtcMinute.keys()) {
-      if (!currentIds.has(id)) {
-        this.#lastUtcMinute.delete(id)
-      }
+      if (!currentIds.has(id)) this.#lastUtcMinute.delete(id)
+    }
+    for (const id of this.#pendingRetries) {
+      const source = sources.find((candidate) => candidate.id === id)
+      if (source === undefined || !source.enabled) this.#pendingRetries.delete(id)
     }
 
-    for (const source of sources) {
-      if (
-        !source.enabled ||
-        this.#lastUtcMinute.get(source.id) === utcMinute ||
-        !cronMatches(source.cron, now, source.timezone)
-      ) {
-        continue
+    const previousTick = this.#lastTickAt
+    this.#lastTickAt = now
+    const catchUpWindow = this.options.catchUpWindowMinutes ?? 24 * 60
+    const due = sources.filter((source) => {
+      if (!source.enabled) return false
+      if (this.#pendingRetries.has(source.id)) return true
+      if (this.#lastUtcMinute.get(source.id) === utcMinute) return false
+      return cronMatches(source.cron, now, source.timezone)
+        || hasMissedOccurrence(source, previousTick, now, catchUpWindow)
+    })
+
+    await Promise.all(due.map(async (source) => {
+      if (!this.#pendingRetries.has(source.id)) {
+        this.#lastUtcMinute.set(source.id, utcMinute)
       }
-      this.#lastUtcMinute.set(source.id, utcMinute)
       try {
-        await this.runner.runNow(source.id)
+        const result = await this.runner.runNow(source.id, "scheduled")
+        if (result.outcome === "waiting") {
+          this.#pendingRetries.add(source.id)
+        } else {
+          this.#pendingRetries.delete(source.id)
+        }
       } catch (error) {
+        this.#pendingRetries.delete(source.id)
         this.options.onError(error)
       }
-    }
+    }))
   }
 
   start(): void {
-    if (this.#timerHandle !== undefined) {
-      return
-    }
+    if (this.#timerHandle !== undefined) return
     this.#timerHandle = this.options.timer.set(() => {
       void this.tick().catch(this.options.onError)
     }, 30_000)
   }
 
   stop(): void {
-    if (this.#timerHandle === undefined) {
-      return
-    }
+    if (this.#timerHandle === undefined) return
     this.options.timer.clear(this.#timerHandle)
     this.#timerHandle = undefined
   }

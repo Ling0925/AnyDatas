@@ -77,7 +77,15 @@ describe("registerFileSourceIpc", () => {
     registerFileSourceIpc({
       registrar,
       store,
-      runner: { runNow: async () => source },
+      runner: {
+        runNow: async () => ({
+          source,
+          outcome: "success",
+          jobId: null,
+          revisionId: null,
+          message: "ok",
+        }),
+      },
       dialog: {
         showOpenDialog: async (options) => {
           dialogProperties = options.properties
@@ -164,7 +172,12 @@ describe("emitFileSourceEvent", () => {
   it("sends payloads only on the fixed event channel", () => {
     // Given
     const calls: unknown[][] = []
-    const event = { id: "source", lastRun: null, runs: [] }
+    const event = {
+      id: "source",
+      activity: { phase: "idle" as const, message: "idle", file: null },
+      lastRun: null,
+      runs: [],
+    }
 
     // When
     emitFileSourceEvent({ send: (...args) => calls.push(args) }, event)

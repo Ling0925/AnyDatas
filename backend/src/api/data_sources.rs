@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -10,6 +10,7 @@ use axum::{
     routing::{get, patch},
 };
 use chrono::{DateTime, Duration, Utc};
+use sha2::{Digest, Sha256};
 use sqlx::FromRow;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
@@ -23,7 +24,7 @@ use crate::{
         ImportSheetInspection, ImportTableConfig, InspectImportTableRequest, PreviewParams,
         PreviewResponse, SharedState, TableData, UpdateSourceConfig,
     },
-    services::{job_results, maintenance, resource_control, spreadsheet},
+    services::{job_results, maintenance, resource_control, source_refresh, spreadsheet},
 };
 
 pub fn router(max_upload_bytes: usize) -> Router<SharedState> {
@@ -33,6 +34,10 @@ pub fn router(max_upload_bytes: usize) -> Router<SharedState> {
         .route(
             "/data-sources/{id}/replace",
             axum::routing::post(super::data_source_replacement::replace),
+        )
+        .route(
+            "/data-sources/{id}/refresh",
+            axum::routing::post(super::data_source_replacement::refresh),
         )
         .layer(axum::extract::DefaultBodyLimit::max(max_upload_bytes));
     Router::new()
@@ -59,21 +64,24 @@ struct StagedImportRow {
     media_type: String,
     file_kind: String,
     size_bytes: i64,
+    content_sha256: Option<String>,
     expires_at: String,
 }
 
-pub(super) struct StoredUpload {
-    pub(super) original_filename: String,
-    pub(super) file_kind: &'static str,
-    pub(super) media_type: &'static str,
-    pub(super) path: PathBuf,
-    pub(super) size_bytes: usize,
+pub(crate) struct StoredUpload {
+    pub(crate) original_filename: String,
+    pub(crate) file_kind: &'static str,
+    pub(crate) media_type: &'static str,
+    pub(crate) path: PathBuf,
+    pub(crate) size_bytes: usize,
+    pub(crate) content_sha256: String,
+    pub(crate) extra_fields: HashMap<String, String>,
 }
 
-pub(super) struct StoreMultipartOptions<'a> {
-    pub(super) directory: &'a Path,
-    pub(super) file_id: &'a str,
-    pub(super) reject_tables: bool,
+pub(crate) struct StoreMultipartOptions<'a> {
+    pub(crate) directory: &'a Path,
+    pub(crate) file_id: &'a str,
+    pub(crate) reject_tables: bool,
 }
 
 struct PreparedImportTable {
@@ -168,8 +176,8 @@ async fn inspect_upload(
         r#"
         INSERT INTO staged_imports (
             id, workspace_id, user_id, original_filename, stored_path,
-            media_type, file_kind, size_bytes, created_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            media_type, file_kind, size_bytes, content_sha256, created_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&token)
@@ -180,6 +188,7 @@ async fn inspect_upload(
     .bind(stored.media_type)
     .bind(stored.file_kind)
     .bind(stored.size_bytes as i64)
+    .bind(&stored.content_sha256)
     .bind(now.to_rfc3339())
     .bind(expires_at.to_rfc3339())
     .execute(&state.pool)
@@ -212,7 +221,7 @@ async fn preview_import(
     let staged = sqlx::query_as::<_, StagedImportRow>(
         r#"
         SELECT id, original_filename, stored_path, media_type, file_kind,
-               size_bytes, expires_at
+               size_bytes, content_sha256, expires_at
         FROM staged_imports
         WHERE id = ? AND workspace_id = ? AND user_id = ?
         "#,
@@ -271,7 +280,7 @@ async fn commit_import(
     let staged = sqlx::query_as::<_, StagedImportRow>(
         r#"
         SELECT id, original_filename, stored_path, media_type, file_kind,
-               size_bytes, expires_at
+               size_bytes, content_sha256, expires_at
         FROM staged_imports
         WHERE id = ? AND workspace_id = ? AND user_id = ?
         "#,
@@ -306,10 +315,15 @@ async fn commit_import(
         .and_then(|value| value.to_str())
         .ok_or_else(|| AppError::BadRequest("无法识别文件扩展名".to_owned()))?;
     let source_id = Uuid::new_v4().to_string();
-    let final_path = state
-        .data_dir
-        .join("uploads")
-        .join(format!("{source_id}.{extension}"));
+    let revision_id = Uuid::new_v4().to_string();
+    let _storage_guard = state.storage_maintenance_lock.lock().await;
+    let revision_dir = state.data_dir.join("uploads").join(&source_id);
+    tokio::fs::create_dir_all(&revision_dir).await?;
+    let final_path = revision_dir.join(format!("{revision_id}.{extension}"));
+    let content_sha256 = match staged.content_sha256.clone() {
+        Some(value) => value,
+        None => source_refresh::hash_file(&staged_path).await?,
+    };
     tokio::fs::rename(&staged_path, &final_path).await?;
 
     let default_table = prepared
@@ -354,6 +368,19 @@ async fn commit_import(
         .bind(&now)
         .bind(&now)
         .execute(&mut *transaction)
+        .await?;
+        source_refresh::register_initial_revision(
+            &mut transaction,
+            &revision_id,
+            &source_id,
+            &content_sha256,
+            staged.size_bytes,
+            &final_path,
+            &staged.original_filename,
+            &staged.media_type,
+            &staged.file_kind,
+            &now,
+        )
         .await?;
         for (index, table) in prepared.iter().enumerate() {
             sqlx::query(
@@ -416,7 +443,7 @@ async fn discard_import(
     let staged = sqlx::query_as::<_, StagedImportRow>(
         r#"
         SELECT id, original_filename, stored_path, media_type, file_kind,
-               size_bytes, expires_at
+               size_bytes, content_sha256, expires_at
         FROM staged_imports
         WHERE id = ? AND workspace_id = ? AND user_id = ?
         "#,
@@ -454,13 +481,15 @@ async fn upload(
         .ok_or_else(|| AppError::BadRequest("无法识别文件扩展名".to_owned()))?;
     let (file_kind, media_type) = file_metadata(&extension)?;
     let id = Uuid::new_v4().to_string();
-    let stored_path = state
-        .data_dir
-        .join("uploads")
-        .join(format!("{id}.{extension}"));
+    let revision_id = Uuid::new_v4().to_string();
+    let _storage_guard = state.storage_maintenance_lock.lock().await;
+    let revision_dir = state.data_dir.join("uploads").join(&id);
+    tokio::fs::create_dir_all(&revision_dir).await?;
+    let stored_path = revision_dir.join(format!("{revision_id}.{extension}"));
     maintenance::ensure_free_space(&state.data_dir, state.query_runtime.min_free_space_bytes, 0)
         .map_err(|error| AppError::BadRequest(error.to_string()))?;
     let mut output = tokio::fs::File::create(&stored_path).await?;
+    let mut digest = Sha256::new();
     let mut size_bytes = 0usize;
     let mut next_space_check = 64 * 1024 * 1024usize;
     let mut field = field;
@@ -487,11 +516,14 @@ async fn upload(
             }
             next_space_check = next_space_check.saturating_add(64 * 1024 * 1024);
         }
+        digest.update(&chunk);
         output.write_all(&chunk).await?;
     }
     output.flush().await?;
+    output.sync_all().await?;
     drop(output);
 
+    let content_sha256 = hex::encode(digest.finalize());
     let inspect_path = stored_path.clone();
     let inspection = match resource_control::run_file_task(&state, "文件检查", move || {
         spreadsheet::inspect_file(&inspect_path, file_kind)
@@ -567,6 +599,19 @@ async fn upload(
         let _ = tokio::fs::remove_file(&stored_path).await;
         return Err(error.into());
     }
+    source_refresh::register_initial_revision(
+        &mut transaction,
+        &revision_id,
+        &id,
+        &content_sha256,
+        size_bytes as i64,
+        &stored_path,
+        &original_filename,
+        media_type,
+        file_kind,
+        &now,
+    )
+    .await?;
     let default_schema = serde_json::to_string(&default_table.columns)
         .map_err(|error| AppError::Internal(error.to_string()))?;
     for (index, sheet) in inspection.sheets.iter().enumerate() {
@@ -740,6 +785,7 @@ async fn delete_one(
     AxumPath(id): AxumPath<String>,
 ) -> AppResult<StatusCode> {
     auth.require_analyst()?;
+    let _storage_guard = state.storage_maintenance_lock.lock().await;
     let source = required_source(&state, &id, &auth.workspace_id).await?;
     let cache_keys = sqlx::query_scalar::<_, String>(
         "SELECT cache_key FROM source_tables WHERE source_id = ? AND cache_key IS NOT NULL",
@@ -756,15 +802,36 @@ async fn delete_one(
     for artifact_key in artifact_keys {
         job_results::remove_artifact(&state, &artifact_key).await?;
     }
+    let revision_paths = sqlx::query_scalar::<_, String>(
+        "SELECT stored_path FROM source_revisions WHERE source_id = ?",
+    )
+    .bind(&id)
+    .fetch_all(&state.pool)
+    .await?;
     sqlx::query("DELETE FROM data_sources WHERE id = ? AND workspace_id = ?")
         .bind(&id)
         .bind(&auth.workspace_id)
         .execute(&state.pool)
         .await?;
-    if let Err(error) = tokio::fs::remove_file(source.stored_path).await
+    for revision_path in revision_paths {
+        if let Err(error) = tokio::fs::remove_file(&revision_path).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(?error, source_id = %id, %revision_path, "failed to remove source revision");
+        }
+    }
+    // Databases inserted by tests or pre-revision tools may still have only the compatibility path.
+    if let Err(error) = tokio::fs::remove_file(&source.stored_path).await
         && error.kind() != std::io::ErrorKind::NotFound
     {
         tracing::warn!(?error, source_id = %id, "failed to remove uploaded file");
+    }
+    let revision_dir = state.data_dir.join("uploads").join(&id);
+    if let Err(error) = tokio::fs::remove_dir(&revision_dir).await
+        && error.kind() != std::io::ErrorKind::NotFound
+        && error.kind() != std::io::ErrorKind::DirectoryNotEmpty
+    {
+        tracing::warn!(?error, source_id = %id, "failed to remove revision directory");
     }
     maintenance::remove_cache_keys_if_unreferenced(&state, cache_keys)
         .await
@@ -773,7 +840,7 @@ async fn delete_one(
 }
 
 /// 流式保存 Multipart 文件并在超过上限时立即清理，避免将大文件完整缓存在内存中。
-pub(super) async fn store_multipart_file(
+pub(crate) async fn store_multipart_file(
     state: &SharedState,
     mut multipart: Multipart,
     options: StoreMultipartOptions<'_>,
@@ -814,6 +881,7 @@ pub(super) async fn store_multipart_file(
         .directory
         .join(format!("{}.{extension}", options.file_id));
     let mut output = tokio::fs::File::create(&path).await?;
+    let mut digest = Sha256::new();
     let mut size_bytes = 0usize;
     let mut next_space_check = 64 * 1024 * 1024usize;
     let mut field = field;
@@ -840,21 +908,36 @@ pub(super) async fn store_multipart_file(
             }
             next_space_check = next_space_check.saturating_add(64 * 1024 * 1024);
         }
+        digest.update(&chunk);
         output.write_all(&chunk).await?;
     }
     output.flush().await?;
+    output.sync_all().await?;
     drop(output);
     drop(field);
+    let mut extra_fields = HashMap::new();
     while let Some(extra) = multipart
         .next_field()
         .await
         .map_err(|error| AppError::BadRequest(format!("无法读取额外上传字段: {error}")))?
     {
-        if options.reject_tables && extra.name() == Some("tables") {
+        let name = extra.name().map(str::to_owned).unwrap_or_default();
+        if options.reject_tables && name == "tables" {
             let _ = tokio::fs::remove_file(&path).await;
             return Err(AppError::BadRequest(
                 "当前版本不支持显式 tables 配置".to_owned(),
             ));
+        }
+        if !name.is_empty() {
+            let value = extra
+                .text()
+                .await
+                .map_err(|error| AppError::BadRequest(format!("无法读取字段 {name}: {error}")))?;
+            if value.len() > 4_096 {
+                let _ = tokio::fs::remove_file(&path).await;
+                return Err(AppError::BadRequest(format!("字段 {name} 过长")));
+            }
+            extra_fields.insert(name, value);
         }
     }
     Ok(StoredUpload {
@@ -863,6 +946,8 @@ pub(super) async fn store_multipart_file(
         media_type,
         path,
         size_bytes,
+        content_sha256: hex::encode(digest.finalize()),
+        extra_fields,
     })
 }
 

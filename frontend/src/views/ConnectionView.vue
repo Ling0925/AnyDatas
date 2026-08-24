@@ -27,6 +27,7 @@ const status = ref<DesktopBackendStatus>({
   serverUrl: null,
   serverVersion: null,
   protocolVersion: null,
+  capabilities: [],
   message: '请选择运行模式',
   progress: null,
 })

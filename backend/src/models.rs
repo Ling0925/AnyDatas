@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -23,6 +23,8 @@ pub struct AppState {
     pub secret_key: [u8; 32],
     pub query_control: Mutex<QueryControl>,
     pub cache_build_locks: CacheBuildLocks,
+    pub storage_maintenance_lock: tokio::sync::Mutex<()>,
+    pub active_refresh_preparations: Arc<AtomicUsize>,
     pub query_semaphore: Arc<Semaphore>,
     pub file_parse_semaphore: Arc<Semaphore>,
     pub query_max_concurrency: usize,
@@ -170,6 +172,7 @@ impl CacheBuildLocks {
 pub struct QueryControl {
     pub active: HashMap<String, Arc<InterruptHandle>>,
     pub canceled: HashSet<String>,
+    pub worker_jobs: HashSet<String>,
 }
 
 /// 运行控制对象同时提供无锁状态检查和异步唤醒，使取消可以立即中断正在等待的模型请求。
@@ -319,6 +322,8 @@ pub struct SourceTableRow {
     pub original_filename: String,
     pub stored_path: String,
     pub file_kind: String,
+    pub source_revision_id: Option<String>,
+    pub content_sha256: Option<String>,
     pub name: String,
     pub sheet_name: String,
     pub start_cell: String,
@@ -518,6 +523,28 @@ pub struct QueryTableBinding {
     pub alias: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct JobInputSnapshot {
+    pub table_id: String,
+    pub source_id: String,
+    pub alias: String,
+    pub ordinal: i64,
+    pub revision_id: Option<String>,
+    pub content_sha256: Option<String>,
+    pub config_version: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRefreshReceipt {
+    pub refresh_id: String,
+    pub revision_id: String,
+    pub content_sha256: String,
+    pub unchanged: bool,
+    pub job_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryRequest {
@@ -665,6 +692,7 @@ pub struct Job {
     pub sql: String,
     pub post_js: Option<String>,
     pub tables: Vec<QueryTableBinding>,
+    pub inputs: Vec<JobInputSnapshot>,
     pub status: String,
     pub progress: i64,
     pub trigger_type: String,
@@ -694,6 +722,7 @@ impl From<JobRow> for Job {
             sql: row.sql_text,
             post_js: row.post_js,
             tables: Vec::new(),
+            inputs: Vec::new(),
             status: row.status,
             progress: row.progress,
             trigger_type: row.trigger_type,

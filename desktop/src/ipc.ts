@@ -1,20 +1,11 @@
 import * as z from "zod"
 import type { FileSourceEvent } from "./collector.js"
+import { FILE_SOURCE_CHANNELS } from "./file-source-channels.js"
 import { FileSourceNotFoundError, FileSourceStore } from "./store.js"
 import type { FileSourceRunner } from "./scheduler.js"
 import type { DesktopFileSourceConfig } from "./types.js"
 
-export const FILE_SOURCE_CHANNELS = {
-  list: "desktop:file-sources:list",
-  create: "desktop:file-sources:create",
-  update: "desktop:file-sources:update",
-  delete: "desktop:file-sources:delete",
-  toggle: "desktop:file-sources:toggle",
-  runNow: "desktop:file-sources:run-now",
-  pickDirectory: "desktop:pick-directory",
-  apiTarget: "desktop:api-target",
-  event: "desktop:file-source-event",
-} as const
+export { FILE_SOURCE_CHANNELS }
 
 export type IpcHandler = (...args: readonly unknown[]) => Promise<unknown>
 
@@ -46,9 +37,12 @@ const idSchema = z.string().min(1)
 const configString = z.string().trim().min(1)
 const updateSchema = z.strictObject({
   name: configString.optional(),
+  mode: z.union([z.literal("legacy_schedule"), z.literal("saved_query")]).optional(),
   directory: configString.optional(),
   pattern: configString.optional(),
   targetSourceId: configString.optional(),
+  savedQueryId: configString.nullable().optional(),
+  workspaceId: configString.nullable().optional(),
   cron: configString.optional(),
   timezone: configString.optional(),
   triggerScheduleIds: z.array(configString).optional(),
@@ -88,9 +82,12 @@ export function registerFileSourceIpc(options: RegisterIpcOptions): () => void {
     }
     const merged: DesktopFileSourceConfig = {
       name: update.name ?? source.name,
+      mode: update.mode ?? source.mode,
       directory: update.directory ?? source.directory,
       pattern: update.pattern ?? source.pattern,
       targetSourceId: update.targetSourceId ?? source.targetSourceId,
+      savedQueryId: update.savedQueryId === undefined ? source.savedQueryId : update.savedQueryId,
+      workspaceId: update.workspaceId === undefined ? source.workspaceId : update.workspaceId,
       cron: update.cron ?? source.cron,
       timezone: update.timezone ?? source.timezone,
       triggerScheduleIds: update.triggerScheduleIds ?? source.triggerScheduleIds,

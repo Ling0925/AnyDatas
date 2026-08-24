@@ -3,8 +3,48 @@ use serde_json::Value;
 
 use super::replacement_test_support::{
     OTHER_SESSION_TOKEN, ReplacementFixture, SESSION_TOKEN, SOURCE_ID, multipart_file,
-    multipart_file_with_tables,
+    multipart_file_with_tables, multipart_refresh,
 };
+
+#[tokio::test]
+async fn source_table_list_hydrates_current_revision_metadata() {
+    let fixture = ReplacementFixture::new().await;
+    fixture.seed_source().await;
+
+    let response = fixture.request_source_tables(SESSION_TOKEN).await;
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1_048_576).await.unwrap();
+
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload.as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn direct_upload_creates_an_initial_immutable_revision() {
+    let fixture = ReplacementFixture::new().await;
+    fixture.seed_source().await;
+    let bytes = b"id,amount\n1,10\n";
+
+    let response = fixture
+        .request_upload(SESSION_TOKEN, multipart_file("new-source.csv", bytes))
+        .await;
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1_048_576).await.unwrap();
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let source_id = payload["id"].as_str().unwrap();
+    let (revision_id, content_sha256, stored_path) = fixture.source_revision(source_id).await;
+    assert!(!revision_id.is_empty());
+    assert_eq!(content_sha256.len(), 64);
+    assert!(stored_path.contains(source_id));
+    assert_eq!(std::fs::read(stored_path).unwrap(), bytes);
+}
 
 #[tokio::test]
 async fn replaces_compatible_file_when_posting_to_public_endpoint() {
@@ -17,7 +57,7 @@ async fn replaces_compatible_file_when_posting_to_public_endpoint() {
     // When: the client replaces the source through the public multipart endpoint.
     let response = fixture.request(SOURCE_ID, SESSION_TOKEN, body).await;
 
-    // Then: source/table identities survive, metadata changes, and each cache is invalidated once.
+    // Then: source/table identities survive and fully validated revision caches are published once.
     let status = response.status();
     let response_body = to_bytes(response.into_body(), 1_048_576).await.unwrap();
     assert_eq!(
@@ -38,8 +78,8 @@ async fn replaces_compatible_file_when_posting_to_public_endpoint() {
         assert_eq!(after.name, before.name);
         assert_eq!(after.is_default, before.is_default);
         assert_eq!(after.config_version, before.config_version + 1);
-        assert_eq!(after.cache_status, "pending");
-        assert_eq!(after.cache_key, None);
+        assert_eq!(after.cache_status, "ready");
+        assert!(after.cache_key.as_ref().is_some_and(|key| key.len() == 64));
         assert_eq!(after.cache_error, None);
         assert_eq!(after.row_count, 3);
         assert_eq!(after.schema_json, before.schema_json);
@@ -139,16 +179,146 @@ async fn returns_not_found_when_source_belongs_to_another_workspace() {
 
 #[tokio::test]
 async fn rejects_explicit_tables_multipart_field_for_mvp() {
-    // Given: a compatible replacement plus an explicit tables field.
     let fixture = ReplacementFixture::new().await;
     fixture.seed_source().await;
     let metadata_before = fixture.source_state().await;
     let body = multipart_file_with_tables("replacement.csv", b"id,amount\n1,20\n");
 
-    // When: the client requests unsupported explicit table configuration.
     let response = fixture.request(SOURCE_ID, SESSION_TOKEN, body).await;
 
-    // Then: the boundary rejects the request without modifying the source.
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(fixture.source_state().await, metadata_before);
+}
+
+#[tokio::test]
+async fn refresh_publishes_one_revision_and_one_pinned_saved_query_job() {
+    let fixture = ReplacementFixture::new().await;
+    fixture.seed_source().await;
+    fixture.seed_saved_query().await;
+    let body = multipart_refresh("daily.csv", b"id,amount\n1,120\n2,240\n");
+
+    let response = fixture
+        .request_refresh(SOURCE_ID, SESSION_TOKEN, "attempt-1", body)
+        .await;
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1_048_576).await.unwrap();
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let revision_id = payload["revisionId"].as_str().unwrap();
+    let job_id = payload["jobId"].as_str().unwrap();
+    assert_eq!(payload["unchanged"], false);
+    assert_eq!(fixture.revision_count().await, 2);
+    assert_eq!(fixture.job_count().await, 1);
+    assert_eq!(fixture.current_revision_id().await, revision_id);
+    assert_eq!(fixture.job_input_revision(job_id).await, revision_id);
+    assert_eq!(fixture.source_state().await.original_filename, "daily.csv");
+    assert_eq!(payload["contentSha256"].as_str().unwrap().len(), 64);
+}
+
+#[tokio::test]
+async fn refresh_idempotency_returns_the_original_receipt_without_duplicate_job() {
+    let fixture = ReplacementFixture::new().await;
+    fixture.seed_source().await;
+    fixture.seed_saved_query().await;
+    let bytes = b"id,amount\n1,120\n2,240\n";
+
+    let first = fixture
+        .request_refresh(
+            SOURCE_ID,
+            SESSION_TOKEN,
+            "attempt-repeat",
+            multipart_refresh("daily.csv", bytes),
+        )
+        .await;
+    let first_body = to_bytes(first.into_body(), 1_048_576).await.unwrap();
+    let first_payload: Value = serde_json::from_slice(&first_body).unwrap();
+    let second = fixture
+        .request_refresh(
+            SOURCE_ID,
+            SESSION_TOKEN,
+            "attempt-repeat",
+            multipart_refresh("daily.csv", bytes),
+        )
+        .await;
+    let second_status = second.status();
+    let second_body = to_bytes(second.into_body(), 1_048_576).await.unwrap();
+    let second_payload: Value = serde_json::from_slice(&second_body).unwrap();
+
+    assert_eq!(second_status, StatusCode::CREATED);
+    assert_eq!(first_payload["refreshId"], second_payload["refreshId"]);
+    assert_eq!(first_payload["revisionId"], second_payload["revisionId"]);
+    assert_eq!(first_payload["jobId"], second_payload["jobId"]);
+    assert_eq!(fixture.revision_count().await, 2);
+    assert_eq!(fixture.job_count().await, 1);
+
+    let changed = fixture
+        .request_refresh(
+            SOURCE_ID,
+            SESSION_TOKEN,
+            "attempt-repeat",
+            multipart_refresh("daily.csv", b"id,amount\n1,999\n"),
+        )
+        .await;
+    assert_eq!(changed.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn refresh_can_publish_bytes_seen_in_an_older_retained_revision() {
+    let fixture = ReplacementFixture::new().await;
+    fixture.seed_source().await;
+    fixture.seed_saved_query().await;
+
+    let first = fixture
+        .request_refresh(
+            SOURCE_ID,
+            SESSION_TOKEN,
+            "attempt-b",
+            multipart_refresh("daily.csv", b"id,amount\n1,20\n"),
+        )
+        .await;
+    assert_eq!(first.status(), StatusCode::CREATED);
+    let second = fixture
+        .request_refresh(
+            SOURCE_ID,
+            SESSION_TOKEN,
+            "attempt-a-again",
+            multipart_refresh("daily.csv", b"id,amount\n1,10\n"),
+        )
+        .await;
+
+    assert_eq!(second.status(), StatusCode::CREATED);
+    assert_eq!(fixture.revision_count().await, 3);
+    assert_eq!(fixture.job_count().await, 2);
+}
+
+#[tokio::test]
+async fn refresh_rejects_a_late_type_error_before_publication() {
+    let fixture = ReplacementFixture::new().await;
+    fixture.seed_source().await;
+    fixture.seed_saved_query().await;
+    let mut content = String::from("id,amount\n");
+    for index in 0..2_000 {
+        content.push_str(&format!("{index},{index}\n"));
+    }
+    content.push_str("late,not-a-number\n");
+    let revision_before = fixture.current_revision_id().await;
+
+    let response = fixture
+        .request_refresh(
+            SOURCE_ID,
+            SESSION_TOKEN,
+            "attempt-late-value",
+            multipart_refresh("daily.csv", content.as_bytes()),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(fixture.current_revision_id().await, revision_before);
+    assert_eq!(fixture.revision_count().await, 1);
+    assert_eq!(fixture.job_count().await, 0);
 }

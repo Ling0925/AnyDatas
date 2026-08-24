@@ -107,12 +107,14 @@ pub async fn get_source_table(
     sqlx::query_as::<_, SourceTableRow>(
         r#"
         SELECT t.id, t.source_id, d.name AS source_name, d.original_filename,
-               d.stored_path, d.file_kind, t.name, t.sheet_name, t.start_cell,
+               d.stored_path, d.file_kind, d.current_revision_id AS source_revision_id,
+               r.content_sha256, t.name, t.sheet_name, t.start_cell,
                t.end_cell, t.first_row_as_header, t.row_count, t.column_count,
                t.schema_json, t.config_version, t.cache_status,
                t.cache_error, t.is_default, t.created_at, t.updated_at
         FROM source_tables t
         JOIN data_sources d ON d.id = t.source_id
+        LEFT JOIN source_revisions r ON r.id = d.current_revision_id
         WHERE t.id = ? AND (? IS NULL OR d.workspace_id = ?)
         "#,
     )
@@ -132,12 +134,14 @@ pub async fn get_default_source_table(
     sqlx::query_as::<_, SourceTableRow>(
         r#"
         SELECT t.id, t.source_id, d.name AS source_name, d.original_filename,
-               d.stored_path, d.file_kind, t.name, t.sheet_name, t.start_cell,
+               d.stored_path, d.file_kind, d.current_revision_id AS source_revision_id,
+               r.content_sha256, t.name, t.sheet_name, t.start_cell,
                t.end_cell, t.first_row_as_header, t.row_count, t.column_count,
                t.schema_json, t.config_version, t.cache_status,
                t.cache_error, t.is_default, t.created_at, t.updated_at
         FROM source_tables t
         JOIN data_sources d ON d.id = t.source_id
+        LEFT JOIN source_revisions r ON r.id = d.current_revision_id
         WHERE t.source_id = ? AND t.is_default = 1
           AND (? IS NULL OR d.workspace_id = ?)
         "#,
@@ -195,9 +199,27 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
+        let trusted_refresh_tables: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'table'
+              AND name IN ('source_revisions', 'source_refresh_runs', 'job_input_tables')
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let current_revision_column: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('data_sources') WHERE name = 'current_revision_id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(tables, 4);
         assert_eq!(active_index, 1);
         assert_eq!(reasoning_effort_column, 1);
         assert_eq!(job_artifact_columns, 4);
+        assert_eq!(trusted_refresh_tables, 3);
+        assert_eq!(current_revision_column, 1);
     }
 }

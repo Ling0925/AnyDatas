@@ -46,6 +46,7 @@ function initialStatus(): BackendStatus {
     serverUrl: null,
     serverVersion: null,
     protocolVersion: null,
+    capabilities: [],
     message: "请选择单机模式或连接服务器",
     progress: null,
   }
@@ -214,6 +215,7 @@ export class BackendRuntimeManager {
       serverUrl: selection.mode === "remote" ? selection.serverUrl : null,
       serverVersion: null,
       protocolVersion: null,
+      capabilities: [],
       message: selection.mode === "standalone" ? "正在准备单机服务…" : "正在连接服务器…",
       progress: null,
     })
@@ -251,6 +253,7 @@ export class BackendRuntimeManager {
         serverUrl: connection.baseUrl.href,
         serverVersion: connection.handshake.serverVersion,
         protocolVersion: connection.handshake.protocolVersion,
+        capabilities: [...connection.handshake.capabilities],
         message: selection.mode === "standalone" ? "单机服务已就绪" : "服务器连接成功",
         progress: 1,
       })

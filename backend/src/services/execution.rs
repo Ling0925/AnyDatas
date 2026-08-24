@@ -1,5 +1,6 @@
 use std::{collections::HashSet, path::PathBuf, time::Duration};
 
+use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::{
@@ -14,6 +15,23 @@ use crate::{
 enum BlockingQueryError {
     Engine(anyhow::Error),
     Post(post_process::PostProcessError),
+}
+
+#[derive(Debug, FromRow)]
+struct JobInputExecutionRow {
+    table_id: String,
+    config_version: i64,
+    revision_id: Option<String>,
+    content_sha256: Option<String>,
+    stored_path: String,
+    file_kind: String,
+    sheet_name: String,
+    start_cell: String,
+    end_cell: Option<String>,
+    first_row_as_header: bool,
+    schema_json: String,
+    row_count: i64,
+    alias: String,
 }
 
 impl From<anyhow::Error> for BlockingQueryError {
@@ -61,7 +79,11 @@ pub async fn execute_job_to_artifact(
     job_id: String,
     artifact_path: PathBuf,
 ) -> AppResult<query_engine::QueryArtifactExecution> {
-    let sources = resolve_query_sources(&state, request, None).await?;
+    let mut sources = resolve_job_query_sources(&state, &job_id).await?;
+    if sources.is_empty() {
+        // Only databases created before migration 0011 can reach this fallback.
+        sources = resolve_query_sources(&state, request, None).await?;
+    }
     let sql = request.sql.clone();
     let post_js = post_process::normalize_post_js(request.post_js.as_deref());
     let js_limits = state.js_runtime.clone();
@@ -320,6 +342,46 @@ fn cancel_execution(state: &SharedState, execution_id: &str) {
     }
 }
 
+/// Resolve immutable job inputs captured at enqueue time. Server paths stay internal and each row
+/// already carries the exact table configuration and source revision the worker must use.
+async fn resolve_job_query_sources(
+    state: &SharedState,
+    job_id: &str,
+) -> AppResult<Vec<query_engine::QuerySource>> {
+    let rows = sqlx::query_as::<_, JobInputExecutionRow>(
+        r#"
+        SELECT source_table_id AS table_id, config_version,
+               source_revision_id AS revision_id, content_sha256, stored_path,
+               file_kind, sheet_name, start_cell, end_cell, first_row_as_header,
+               schema_json, row_count, alias
+        FROM job_input_tables
+        WHERE job_id = ?
+        ORDER BY ordinal
+        "#,
+    )
+    .bind(job_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| query_engine::QuerySource {
+            table_id: row.table_id,
+            config_version: row.config_version,
+            revision_id: row.revision_id,
+            content_sha256: row.content_sha256,
+            path: PathBuf::from(row.stored_path),
+            file_kind: row.file_kind,
+            sheet: row.sheet_name,
+            start_cell: row.start_cell,
+            end_cell: row.end_cell,
+            first_row_as_header: row.first_row_as_header,
+            alias: row.alias,
+            columns: serde_json::from_str(&row.schema_json).unwrap_or_default(),
+            row_count: row.row_count.max(0) as usize,
+        })
+        .collect())
+}
+
 /// 将兼容的 sourceId 或新的 tables 绑定解析为执行源，并阻止重复及非法别名。
 async fn resolve_query_sources(
     state: &SharedState,
@@ -387,6 +449,8 @@ fn to_query_source(
     query_engine::QuerySource {
         table_id: table.id,
         config_version: table.config_version,
+        revision_id: table.source_revision_id,
+        content_sha256: table.content_sha256,
         path: PathBuf::from(table.stored_path),
         file_kind: table.file_kind,
         sheet: table.sheet_name,

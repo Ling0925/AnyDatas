@@ -1,8 +1,4 @@
-// Electron 桌面壳的类型声明（preload 通过 contextBridge 注入 window.desktop）。
-// 网页浏览器中 window.desktop 与 window.__ANYDATAS_API_BASE__ 均为 undefined，
-// 所有访问都必须先做运行时守卫（见 AppShell.vue / router.ts / FileSourcesView.vue）。
-// 本文件不导入任何模块，保持全局脚本声明以便 Electron 主进程侧也能复用同一契约。
-// 服务端/主进程返回的数据不可变：字段一律 readonly，渲染层只能整体替换，不能原地修改。
+// Electron desktop bridge exposed by preload through contextBridge.
 
 interface DesktopFileSourceRun {
   readonly at: string
@@ -10,6 +6,10 @@ interface DesktopFileSourceRun {
   readonly file: string | null
   readonly error: string | null
   readonly rowsImported: number | null
+  readonly contentSha256: string | null
+  readonly revisionId: string | null
+  readonly jobId: string | null
+  readonly failureStage: 'scan' | 'snapshot' | 'refresh' | 'enqueue' | null
 }
 
 interface DesktopFileSourceLastRun {
@@ -19,32 +19,66 @@ interface DesktopFileSourceLastRun {
   readonly fileHash: string | null
   readonly rowsImported: number | null
   readonly error: string | null
+  readonly revisionId: string | null
+  readonly jobId: string | null
+  readonly failureStage: 'scan' | 'snapshot' | 'refresh' | 'enqueue' | null
+}
+
+interface DesktopFileSourceAttempt {
+  readonly id: string
+  readonly stagedPath: string | null
+  readonly contentSha256: string | null
+  readonly file: string | null
+  readonly phase: 'copying' | 'waiting' | 'uploading' | 'publishing' | 'needs_login' | 'needs_attention'
+  readonly createdAt: string
 }
 
 interface DesktopFileSource {
   readonly id: string
   readonly name: string
+  readonly mode: 'legacy_schedule' | 'saved_query'
   readonly directory: string
   readonly pattern: string
   readonly targetSourceId: string
+  readonly savedQueryId: string | null
+  readonly workspaceId: string | null
   readonly cron: string
   readonly timezone: string
   readonly enabled: boolean
   readonly triggerScheduleIds: string[]
   readonly createdAt: string
   readonly updatedAt: string
+  readonly lastAppliedHash: string | null
+  readonly activeAttempt: DesktopFileSourceAttempt | null
   readonly lastRun: DesktopFileSourceLastRun | null
   readonly runs: DesktopFileSourceRun[]
 }
 
 interface DesktopFileSourceConfig {
   readonly name: string
+  readonly mode?: 'legacy_schedule' | 'saved_query'
   readonly directory: string
   readonly pattern: string
   readonly targetSourceId: string
+  readonly savedQueryId?: string | null
+  readonly workspaceId?: string | null
   readonly cron: string
   readonly timezone: string
-  readonly triggerScheduleIds: string[]
+  readonly triggerScheduleIds?: string[]
+}
+
+interface DesktopFileSourceActivity {
+  readonly phase: 'scanning' | 'waiting' | 'uploading' | 'publishing' | 'queued' | 'needs_login' | 'needs_attention' | 'idle'
+  readonly message: string
+  readonly file: string | null
+}
+
+interface DesktopCollectorRunResult {
+  readonly source: DesktopFileSource
+  readonly outcome: 'success' | 'skipped' | 'failed' | 'waiting'
+  readonly jobId: string | null
+  readonly revisionId: string | null
+  readonly message: string
 }
 
 type DesktopBackendSelection =
@@ -57,6 +91,7 @@ interface DesktopBackendStatus {
   readonly serverUrl: string | null
   readonly serverVersion: string | null
   readonly protocolVersion: number | null
+  readonly capabilities: string[]
   readonly message: string
   readonly progress: number | null
 }
@@ -72,13 +107,14 @@ interface Window {
     readonly updateFileSource: (id: string, config: Partial<DesktopFileSource>) => Promise<DesktopFileSource>
     readonly deleteFileSource: (id: string) => Promise<void>
     readonly toggleFileSource: (id: string, enabled: boolean) => Promise<DesktopFileSource>
-    readonly runFileSourceNow: (id: string) => Promise<DesktopFileSource>
+    readonly runFileSourceNow: (id: string) => Promise<DesktopCollectorRunResult>
     readonly pickDirectory: () => Promise<string | null>
     readonly apiTarget: () => Promise<string | null>
     readonly onBackendStatus: (callback: (status: DesktopBackendStatus) => void) => () => void
     readonly onFileSourceEvent: (
       callback: (payload: {
         readonly id: string
+        readonly activity: DesktopFileSourceActivity
         readonly lastRun: DesktopFileSource['lastRun']
         readonly runs: DesktopFileSourceRun[]
       }) => void,

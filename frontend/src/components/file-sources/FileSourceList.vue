@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { FolderSync } from '@lucide/vue'
 
-import type { DataSource, ScheduleItem } from '../../types'
+import type { DataSource, SavedQuery, ScheduleItem } from '../../types'
 import FileSourceRow from './FileSourceRow.vue'
 
 defineProps<{
@@ -11,7 +11,9 @@ defineProps<{
   toggleId: string | null
   expandedRunsId: string | null
   dataSources: DataSource[]
+  savedQueries: SavedQuery[]
   schedules: ScheduleItem[]
+  activities: Record<string, DesktopFileSourceActivity>
 }>()
 
 const emit = defineEmits<{
@@ -43,7 +45,9 @@ const emit = defineEmits<{
       :toggle-id="toggleId"
       :expanded="expandedRunsId === source.id"
       :data-sources="dataSources"
+      :saved-queries="savedQueries"
       :schedules="schedules"
+      :activity="activities[source.id] ?? null"
       @toggle="(row, value) => emit('toggle', row, value)"
       @run="(row) => emit('run', row)"
       @edit="(row) => emit('edit', row)"

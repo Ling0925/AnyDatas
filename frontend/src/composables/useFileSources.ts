@@ -1,14 +1,19 @@
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRoute, useRouter } from 'vue-router'
 
 import { api, errorMessage } from '../api'
-import type { DataSource, ScheduleItem } from '../types'
+import { useAuthStore } from '../stores/auth'
+import type { DataSource, SavedQuery, ScheduleItem } from '../types'
 
 export interface FileSourceForm {
   name: string
+  mode: 'legacy_schedule' | 'saved_query'
   directory: string
   pattern: string
   targetSourceId: string
+  savedQueryId: string
+  workspaceId: string
   cron: string
   timezone: string
   triggerScheduleIds: string[]
@@ -26,10 +31,15 @@ function ipcErrorMessage(error: unknown): string {
  * 每个 IPC 动作仍做 hasDesktop 运行时守卫。
  */
 export function useFileSources() {
+  const route = useRoute()
+  const router = useRouter()
+  const auth = useAuthStore()
   const hasDesktop = Boolean(window.desktop)
   const sources = ref<DesktopFileSource[]>([])
   const dataSources = ref<DataSource[]>([])
+  const savedQueries = ref<SavedQuery[]>([])
   const schedules = ref<ScheduleItem[]>([])
+  const activities = ref<Record<string, DesktopFileSourceActivity>>({})
   const loading = ref(false)
   const actionId = ref<string | null>(null)
   const toggleId = ref<string | null>(null)
@@ -40,13 +50,16 @@ export function useFileSources() {
   const dialogVisible = ref(false)
   const form = reactive<FileSourceForm>({
     name: '',
+    mode: 'saved_query',
     directory: '',
     pattern: '',
     targetSourceId: '',
+    savedQueryId: '',
+    workspaceId: auth.user?.workspaceId ?? '',
     cron: '0 8 * * *',
     timezone: 'Asia/Shanghai',
     triggerScheduleIds: [],
-    enabled: true,
+    enabled: false,
   })
 
   let unsubscribe: (() => void) | undefined
@@ -54,6 +67,7 @@ export function useFileSources() {
   onMounted(async () => {
     if (!hasDesktop) return
     unsubscribe = window.desktop.onFileSourceEvent((payload) => {
+      activities.value = { ...activities.value, [payload.id]: payload.activity }
       const index = sources.value.findIndex((item) => item.id === payload.id)
       const current = index >= 0 ? sources.value[index] : undefined
       if (current) {
@@ -64,6 +78,19 @@ export function useFileSources() {
     })
     await loadFileSources()
     await loadTargets()
+    if (route.query.automate === '1') {
+      editingId.value = null
+      resetForm()
+      const sourceId = typeof route.query.sourceId === 'string' ? route.query.sourceId : ''
+      const savedQueryId = typeof route.query.savedQueryId === 'string' ? route.query.savedQueryId : ''
+      form.targetSourceId = sourceId
+      form.savedQueryId = savedQueryId
+      form.name = savedQueries.value.find((query) => query.id === savedQueryId)?.name
+        ? `${savedQueries.value.find((query) => query.id === savedQueryId)?.name}自动化`
+        : '本地文件自动化'
+      dialogVisible.value = true
+      await router.replace({ path: '/file-sources' })
+    }
   })
 
   onUnmounted(() => {
@@ -81,13 +108,16 @@ export function useFileSources() {
   }
   function resetForm() {
     form.name = ''
+    form.mode = 'saved_query'
     form.directory = ''
     form.pattern = ''
     form.targetSourceId = ''
+    form.savedQueryId = ''
+    form.workspaceId = auth.user?.workspaceId ?? ''
     form.cron = '0 8 * * *'
     form.timezone = 'Asia/Shanghai'
     form.triggerScheduleIds = []
-    form.enabled = true
+    form.enabled = false
   }
 
   function isValidCron(value: string): boolean {
@@ -111,11 +141,13 @@ export function useFileSources() {
     if (!hasDesktop) return
     dialogTargetsLoading.value = true
     try {
-      const [loadedSources, loadedSchedules] = await Promise.all([
+      const [loadedSources, loadedQueries, loadedSchedules] = await Promise.all([
         api.listSources(),
+        api.listSavedQueries(),
         api.listSchedules(),
       ])
       dataSources.value = loadedSources
+      savedQueries.value = loadedQueries
       schedules.value = loadedSchedules
     } catch (error) {
       ElMessage.error(errorMessage(error))
@@ -129,14 +161,22 @@ export function useFileSources() {
     resetForm()
     dialogVisible.value = true
     await loadTargets()
+    const backend = await window.desktop.getBackendStatus()
+    if (!backend.capabilities.includes('refresh-receipts')) {
+      form.mode = 'legacy_schedule'
+      ElMessage.warning('当前服务端版本不支持可信刷新，新文件源将使用兼容计划模式')
+    }
   }
 
   async function openEditDialog(source: DesktopFileSource) {
     editingId.value = source.id
     form.name = source.name
+    form.mode = source.mode
     form.directory = source.directory
     form.pattern = source.pattern
     form.targetSourceId = source.targetSourceId
+    form.savedQueryId = source.savedQueryId ?? ''
+    form.workspaceId = source.workspaceId ?? (auth.user?.workspaceId ?? '')
     form.cron = source.cron
     form.timezone = source.timezone
     form.triggerScheduleIds = [...source.triggerScheduleIds]
@@ -165,31 +205,54 @@ export function useFileSources() {
       ElMessage.warning('请完整填写文件源信息')
       return
     }
+    if (form.mode === 'saved_query' && (!form.savedQueryId || !form.workspaceId)) {
+      ElMessage.warning('请选择保存查询，并确认当前工作区')
+      return
+    }
     if (!isValidCron(cron)) {
       ElMessage.warning('定时表达式需要 5 个以空格分隔的字段（分 时 日 月 周）')
       return
     }
-    const config = {
+    const config: DesktopFileSourceConfig = {
       name,
+      mode: form.mode,
       directory,
       pattern,
       targetSourceId: form.targetSourceId,
+      savedQueryId: form.mode === 'saved_query' ? form.savedQueryId : null,
+      workspaceId: form.mode === 'saved_query' ? form.workspaceId : null,
       cron,
       timezone: form.timezone,
-      triggerScheduleIds: [...form.triggerScheduleIds],
+      triggerScheduleIds: form.mode === 'legacy_schedule' ? [...form.triggerScheduleIds] : [],
     }
     saving.value = true
     try {
       if (editingId.value) {
         replaceInList(await window.desktop.updateFileSource(editingId.value, { ...config, enabled: form.enabled }))
+        ElMessage.success('文件源已更新')
+      } else if (form.mode === 'saved_query') {
+        const created = await window.desktop.createFileSource(config)
+        const paused = await window.desktop.toggleFileSource(created.id, false)
+        replaceInList(paused)
+        const result = await window.desktop.runFileSourceNow(created.id)
+        replaceInList(result.source)
+        if (form.enabled && (result.outcome === 'success' || result.outcome === 'skipped')) {
+          replaceInList(await window.desktop.toggleFileSource(created.id, true))
+        }
+        if (result.outcome === 'failed') {
+          ElMessage.error(`试运行失败，自动化保持暂停：${result.message}`)
+        } else if (result.outcome === 'waiting') {
+          ElMessage.info('文件仍在写入，自动化保持暂停，请稍后再次试运行')
+        } else {
+          ElMessage.success(form.enabled ? '试运行成功，自动化已启用' : '试运行成功，自动化保持暂停')
+        }
       } else {
         const created = await window.desktop.createFileSource(config)
-        // 新建接口默认启用；取消勾选“创建后立即启用”时跟随一次原子关闭并保存返回值。
         const updated = form.enabled ? created : await window.desktop.toggleFileSource(created.id, false)
         replaceInList(updated)
+        ElMessage.success('兼容文件源已创建')
       }
       dialogVisible.value = false
-      ElMessage.success(editingId.value ? '文件源已更新' : '文件源已创建')
     } catch (error) {
       ElMessage.error(ipcErrorMessage(error))
     } finally {
@@ -214,15 +277,16 @@ export function useFileSources() {
     if (!hasDesktop) return
     actionId.value = source.id
     try {
-      const updated = await window.desktop.runFileSourceNow(source.id)
-      replaceInList(updated)
-      const status = updated.lastRun?.status
-      if (status === 'failed') {
-        ElMessage.error(updated.lastRun?.error || '采集失败')
-      } else if (status === 'skipped') {
-        ElMessage.success('文件未变化，已跳过')
+      const result = await window.desktop.runFileSourceNow(source.id)
+      replaceInList(result.source)
+      if (result.outcome === 'failed') {
+        ElMessage.error(result.message || result.source.lastRun?.error || '采集失败')
+      } else if (result.outcome === 'waiting') {
+        ElMessage.info(result.message || '文件仍在写入，请稍后重试')
+      } else if (result.outcome === 'skipped') {
+        ElMessage.success(result.message || '文件未变化，已跳过')
       } else {
-        ElMessage.success('采集完成')
+        ElMessage.success(result.message || '新数据版本已发布，分析任务已入队')
       }
     } catch (error) {
       ElMessage.error(ipcErrorMessage(error))
@@ -257,7 +321,7 @@ export function useFileSources() {
 
   return {
     hasDesktop,
-    sources, dataSources, schedules,
+    sources, dataSources, savedQueries, schedules, activities,
     loading, actionId, toggleId,
     dialogTargetsLoading, saving, editingId,
     expandedRunsId, dialogVisible, form,

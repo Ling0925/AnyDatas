@@ -31,6 +31,8 @@ const EMPTY_RESULT_MARKER_COLUMN: &str = "__anydatas_empty";
 pub struct QuerySource {
     pub table_id: String,
     pub config_version: i64,
+    pub revision_id: Option<String>,
+    pub content_sha256: Option<String>,
     pub path: PathBuf,
     pub file_kind: String,
     pub sheet: String,
@@ -568,6 +570,8 @@ fn source_cache_key(source: &QuerySource) -> String {
     let mut digest = Sha256::new();
     for field in [
         source.table_id.as_bytes(),
+        source.revision_id.as_deref().unwrap_or("").as_bytes(),
+        source.content_sha256.as_deref().unwrap_or("").as_bytes(),
         source.sheet.as_bytes(),
         source.start_cell.as_bytes(),
         source.end_cell.as_deref().unwrap_or("").as_bytes(),
@@ -578,6 +582,21 @@ fn source_cache_key(source: &QuerySource) -> String {
     digest.update(source.config_version.to_le_bytes());
     digest.update([u8::from(source.first_row_as_header)]);
     hex::encode(digest.finalize())
+}
+
+/// Fully build and validate one source cache without executing user SQL.
+///
+/// Refresh publication uses this seam to prove every row is convertible before changing the
+/// current source revision. The resulting cache remains unreferenced until the caller commits its
+/// metadata; startup maintenance safely removes it if publication loses a compare-and-swap race.
+pub(crate) fn prepare_source_cache_only(
+    source: &QuerySource,
+    cache_root: &Path,
+    cache_build_locks: &CacheBuildLocks,
+    runtime: &QueryRuntimeLimits,
+) -> Result<QueryCacheUpdate> {
+    let (_, update) = prepare_source_cache(source, cache_root, cache_build_locks, runtime, None)?;
+    Ok(update)
 }
 
 /// 在全局构建锁内检查并生成单表缓存，避免多个请求同时重复导入同一大文件。
@@ -1683,6 +1702,8 @@ mod tests {
         QuerySource {
             table_id: table_id.to_owned(),
             config_version: 1,
+            revision_id: None,
+            content_sha256: None,
             path: path.to_path_buf(),
             file_kind: "csv".to_owned(),
             sheet: "数据".to_owned(),

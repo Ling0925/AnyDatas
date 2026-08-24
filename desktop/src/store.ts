@@ -1,15 +1,18 @@
 import { randomUUID } from "node:crypto"
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
+import { mkdir, open, readFile, rename } from "node:fs/promises"
 import { join } from "node:path"
+import { removeStableFileSnapshot } from "./file-snapshot.js"
 import {
   FileSourceDataError,
   FileSourceValidationError,
   parseFileSourceConfig,
   parseFileSources,
+  parseAttempt,
   parseRunAppend,
+  serializeFileSources,
 } from "./store-schema.js"
 import type { FileSourceRunAppend } from "./store-schema.js"
-import type { DesktopFileSource } from "./types.js"
+import type { DesktopFileSource, DesktopFileSourceAttempt } from "./types.js"
 
 export { FileSourceDataError, FileSourceValidationError }
 export type { FileSourceRunAppend }
@@ -73,11 +76,13 @@ export class FileSourceStore {
   async #write(sources: readonly DesktopFileSource[]): Promise<void> {
     await mkdir(this.userData, { recursive: true })
     const temporaryPath = `${this.#filePath}.${process.pid}.${randomUUID()}.tmp`
-    await writeFile(temporaryPath, `${JSON.stringify(sources, null, 2)}\n`, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    })
+    const handle = await open(temporaryPath, "wx", 0o600)
+    try {
+      await handle.writeFile(serializeFileSources(sources), "utf8")
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
     await rename(temporaryPath, this.#filePath)
   }
 
@@ -109,11 +114,16 @@ export class FileSourceStore {
       const timestamp = this.dependencies.now().toISOString()
       const created: DesktopFileSource = {
         ...config,
-        triggerScheduleIds: [...config.triggerScheduleIds],
+        mode: config.mode ?? "legacy_schedule",
+        savedQueryId: config.savedQueryId ?? null,
+        workspaceId: config.workspaceId ?? null,
+        triggerScheduleIds: [...(config.triggerScheduleIds ?? [])],
         id: this.dependencies.createId(),
         enabled: true,
         createdAt: timestamp,
         updatedAt: timestamp,
+        lastAppliedHash: null,
+        activeAttempt: null,
         lastRun: null,
         runs: [],
       }
@@ -130,10 +140,26 @@ export class FileSourceStore {
       if (source === undefined) {
         throw new FileSourceNotFoundError(id)
       }
+      const nextMode = config.mode ?? source.mode
+      const nextSavedQueryId = config.savedQueryId ?? null
+      const nextWorkspaceId = config.workspaceId ?? null
+      const invalidatesAttempt = source.directory !== config.directory
+        || source.pattern !== config.pattern
+        || source.targetSourceId !== config.targetSourceId
+        || source.mode !== nextMode
+        || source.savedQueryId !== nextSavedQueryId
+        || source.workspaceId !== nextWorkspaceId
+      if (invalidatesAttempt && source.activeAttempt?.stagedPath) {
+        await removeStableFileSnapshot(this.userData, source.activeAttempt.stagedPath)
+      }
       return this.#replace(sources, {
         ...source,
         ...config,
-        triggerScheduleIds: [...config.triggerScheduleIds],
+        mode: nextMode,
+        savedQueryId: nextSavedQueryId,
+        workspaceId: nextWorkspaceId,
+        triggerScheduleIds: [...(config.triggerScheduleIds ?? [])],
+        activeAttempt: invalidatesAttempt ? null : source.activeAttempt,
         createdAt: source.createdAt,
         updatedAt: this.dependencies.now().toISOString(),
       })
@@ -143,10 +169,14 @@ export class FileSourceStore {
   delete(id: string): Promise<void> {
     return this.#mutate(async () => {
       const sources = await this.#read()
-      if (!sources.some((source) => source.id === id)) {
+      const source = sources.find((candidate) => candidate.id === id)
+      if (source === undefined) {
         throw new FileSourceNotFoundError(id)
       }
-      await this.#write(sources.filter((source) => source.id !== id))
+      if (source.activeAttempt?.stagedPath) {
+        await removeStableFileSnapshot(this.userData, source.activeAttempt.stagedPath)
+      }
+      await this.#write(sources.filter((candidate) => candidate.id !== id))
     })
   }
 
@@ -165,6 +195,25 @@ export class FileSourceStore {
     })
   }
 
+  setActiveAttempt(
+    id: string,
+    input: DesktopFileSourceAttempt | null,
+  ): Promise<DesktopFileSource> {
+    return this.#mutate(async () => {
+      const attempt = parseAttempt(input)
+      const sources = await this.#read()
+      const source = sources.find((candidate) => candidate.id === id)
+      if (source === undefined) {
+        throw new FileSourceNotFoundError(id)
+      }
+      return this.#replace(sources, {
+        ...source,
+        activeAttempt: attempt,
+        updatedAt: this.dependencies.now().toISOString(),
+      })
+    })
+  }
+
   appendRun(id: string, input: unknown): Promise<DesktopFileSource> {
     return this.#mutate(async () => {
       const appended = parseRunAppend(input)
@@ -173,9 +222,14 @@ export class FileSourceStore {
       if (source === undefined) {
         throw new FileSourceNotFoundError(id)
       }
+      const successfulHash = appended.run.status === "success" || appended.run.status === "skipped"
+        ? appended.fileHash
+        : source.lastAppliedHash
       const updated: DesktopFileSource = {
         ...source,
         updatedAt: this.dependencies.now().toISOString(),
+        lastAppliedHash: successfulHash,
+        activeAttempt: null,
         runs: [...source.runs, appended.run].slice(-20),
         lastRun: {
           status: appended.run.status,
@@ -184,6 +238,9 @@ export class FileSourceStore {
           fileHash: appended.fileHash,
           rowsImported: appended.run.rowsImported,
           error: appended.run.error,
+          revisionId: appended.run.revisionId,
+          jobId: appended.run.jobId,
+          failureStage: appended.run.failureStage,
         },
       }
       return this.#replace(sources, updated)
