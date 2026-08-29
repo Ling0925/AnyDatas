@@ -118,19 +118,23 @@ pub struct ToolDefinition {
 
 #[derive(Debug, Clone, Serialize)]
 struct FunctionDefinition {
-    name: &'static str,
-    description: &'static str,
+    name: String,
+    description: String,
     parameters: Value,
 }
 
 impl ToolDefinition {
-    /// 从受信任的静态名称、说明和 JSON Schema 构造 OpenAI function tool。
-    pub fn function(name: &'static str, description: &'static str, parameters: Value) -> Self {
+    /// 构造 OpenAI function tool；名称在 Runtime 内登记，MCP 工具使用动态字符串。
+    pub fn function(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: Value,
+    ) -> Self {
         Self {
             kind: "function",
             function: FunctionDefinition {
-                name,
-                description,
+                name: name.into(),
+                description: description.into(),
                 parameters,
             },
         }

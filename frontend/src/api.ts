@@ -7,6 +7,7 @@ import type {
   AiSettingsPayload,
   AiAgentConversationDetail,
   AiAgentConversationSummary,
+  AiAgentAnswerPayload,
   AiAgentRun,
   AiAgentRunPayload,
   AiAgentReasoningEffort,
@@ -142,11 +143,15 @@ export const api = {
   },
   /** EventSource 使用同源 Cookie 订阅持久化 Run 快照。 */
   agentRunEventsUrl(id: string) {
-    return `/api/ai/agent/runs/${encodeURIComponent(id)}/events`
+    return `${API_BASE}/api/ai/agent/runs/${encodeURIComponent(id)}/events`
   },
   /** 停止模型请求和正在执行的只读 DuckDB 工具。 */
   async cancelAgentRun(id: string) {
     return (await client.post<AiAgentRun>(`/ai/agent/runs/${id}/cancel`)).data
+  },
+  /** 提交 ask_user 回答并恢复同一 Run。 */
+  async answerAgentRun(id: string, payload: AiAgentAnswerPayload) {
+    return (await client.post<AiAgentRun>(`/ai/agent/runs/${id}/answer`, payload)).data
   },
   /** 原位重试最近失败或停止的 Run，不新增重复用户消息。 */
   async retryAgentRun(id: string) {

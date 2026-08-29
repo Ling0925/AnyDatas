@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod agent_provider;
+pub mod agent_skills;
 pub mod execution;
 pub mod job_results;
 pub mod maintenance;

@@ -492,6 +492,7 @@ mod tests {
             agent_max_steps: 4,
             agent_timeout_seconds: 30,
             agent_context_chars: 80_000,
+            mcp: Default::default(),
         });
         (directory, state)
     }

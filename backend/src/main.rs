@@ -2,6 +2,7 @@ mod api;
 mod config;
 mod db;
 mod error;
+mod mcp;
 mod models;
 mod services;
 mod workers;
@@ -34,6 +35,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     tokio::fs::create_dir_all(config.upload_dir()).await?;
     tokio::fs::create_dir_all(config.staging_dir()).await?;
+    tokio::fs::create_dir_all(config.data_dir.join("agent-skills")).await?;
     let secret_key = services::secrets::load_or_create(&config.data_dir)?;
     let pool = db::connect(&config.database_url).await?;
     db::recover_interrupted_jobs(&pool).await?;
@@ -74,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
         agent_max_steps: config.agent_max_steps,
         agent_timeout_seconds: config.agent_timeout_seconds,
         agent_context_chars: config.agent_context_chars,
+        mcp: Default::default(),
     });
 
     let backfilled_revisions = services::source_refresh::backfill_legacy_hashes(&state).await?;

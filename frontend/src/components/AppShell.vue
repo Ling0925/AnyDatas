@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, provide, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -26,6 +26,9 @@ const router = useRouter()
 const auth = useAuthStore()
 const loggingOut = ref(false)
 const aiSettingsVisible = ref(false)
+provide('openAiSettings', () => {
+  aiSettingsVisible.value = true
+})
 const activePath = computed(() => {
   if (route.path.startsWith('/tasks')) return '/tasks'
   if (route.path.startsWith('/agent')) return '/agent'

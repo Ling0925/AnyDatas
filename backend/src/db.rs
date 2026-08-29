@@ -42,7 +42,7 @@ pub async fn recover_interrupted_jobs(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
-/// 服务重启后关闭无法继续的 Agent Run 和 Step，持久化状态不会永久停留在运行中。
+/// 服务重启后关闭无法续跑的 queued/running Run；waiting_user 保留，用户仍可回答。
 pub async fn recover_interrupted_agent_runs(pool: &SqlitePool) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     let mut transaction = pool.begin().await?;
@@ -215,11 +215,18 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
+        let mcp_servers_column: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('workspace_ai_settings') WHERE name = 'mcp_servers_json'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(tables, 4);
         assert_eq!(active_index, 1);
         assert_eq!(reasoning_effort_column, 1);
         assert_eq!(job_artifact_columns, 4);
         assert_eq!(trusted_refresh_tables, 3);
         assert_eq!(current_revision_column, 1);
+        assert_eq!(mcp_servers_column, 1);
     }
 }
