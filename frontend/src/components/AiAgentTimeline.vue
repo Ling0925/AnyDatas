@@ -35,7 +35,7 @@ const emit = defineEmits<{
   retry: []
 }>()
 
-const isActive = computed(() => ['queued', 'running'].includes(props.run.status))
+const isActive = computed(() => ['queued', 'running', 'waiting_user'].includes(props.run.status))
 const hasStreamingAnswer = computed(() => props.run.steps.some((step) => {
   if (step.kind !== 'model' || step.status !== 'running') return false
   const output = recordValue(step.output)
@@ -52,7 +52,7 @@ const timelineItems = computed<TimelineItem[]>(() => props.run.steps
     outcome: stepOutcome(step),
   })))
 const waitingForModel = computed(() => {
-  if (!isActive.value || hasStreamingAnswer.value) return false
+  if (!isActive.value || hasStreamingAnswer.value || props.run.status === 'waiting_user') return false
   const lastStep = props.run.steps[props.run.steps.length - 1]
   return !lastStep || lastStep.kind === 'model' || lastStep.status !== 'running'
 })
@@ -62,6 +62,7 @@ function runTitle(): string {
   if (props.run.status === 'completed') return 'Agent 已完成分析'
   if (props.run.status === 'failed') return 'Agent 运行失败'
   if (props.run.status === 'canceled') return 'Agent 已停止'
+  if (props.run.status === 'waiting_user') return '等待你的回答'
   if (timelineItems.value.length) return 'Agent 正在验证分析'
   return 'Agent 正在思考'
 }
@@ -79,6 +80,9 @@ function stepTitle(step: AiAgentRunStep): string {
   if (title) return title
   if (step.toolName === 'inspect_table') return '检查逻辑表样本'
   if (step.toolName === 'preview_sql') return '验证 SQL 查询'
+  if (step.toolName === 'ask_user') return '向用户提问'
+  if (step.toolName === 'list_skills' || step.toolName === 'load_skill') return '加载技能'
+  if (step.toolName?.startsWith('mcp_')) return '调用 MCP 工具'
   return step.toolName ? `执行 ${step.toolName}` : '执行只读工具'
 }
 
@@ -109,12 +113,19 @@ function recordValue(value: unknown): Record<string, unknown> | null {
 /** 将步骤状态翻译为界面文案，失败原因由独立区域完整展示。 */
 function stepStatus(step: AiAgentRunStep): string {
   if (step.status === 'running') return '执行中'
+  if (step.status === 'waiting') return '等待回答'
   if (step.status === 'completed') return '已完成'
   if (step.status === 'canceled') return '已停止'
   return '失败'
 }
 
-/** 显示步骤开始时间，时间信息放在标题右侧而不挤压时间轴主内容。 */
+function stepKindLabel(step: AiAgentRunStep): string {
+  if (step.toolName === 'ask_user') return '向你提问'
+  if (step.toolName === 'list_skills' || step.toolName === 'load_skill') return '技能'
+  if (step.toolName?.startsWith('mcp_')) return 'MCP'
+  if (step.toolName === 'inspect_table') return '读取数据'
+  return 'SQL 验证'
+}
 function stepClock(step: AiAgentRunStep): string {
   return new Date(step.startedAt).toLocaleTimeString('zh-CN', {
     hour: '2-digit',
@@ -136,7 +147,8 @@ function stepDuration(step: AiAgentRunStep): string | null {
   <details class="agent-run-timeline" :open="isActive || retryable">
     <summary class="agent-run-summary">
       <span class="agent-run-summary-icon">
-        <LoaderCircle v-if="isActive" class="ai-spin" :size="16" />
+        <LoaderCircle v-if="run.status === 'queued' || run.status === 'running'" class="ai-spin" :size="16" />
+        <Clock3 v-else-if="run.status === 'waiting_user'" :size="16" />
         <CircleAlert v-else-if="run.status === 'failed'" :size="16" />
         <Square v-else-if="run.status === 'canceled'" :size="14" />
         <Check v-else :size="16" />
@@ -162,6 +174,7 @@ function stepDuration(step: AiAgentRunStep): string | null {
         >
           <span class="agent-step-marker">
             <LoaderCircle v-if="item.step.status === 'running'" class="ai-spin" :size="13" />
+            <Clock3 v-else-if="item.step.status === 'waiting'" :size="13" />
             <CircleAlert v-else-if="item.step.status === 'failed'" :size="13" />
             <Square v-else-if="item.step.status === 'canceled'" :size="11" />
             <Check v-else :size="13" />
@@ -171,7 +184,7 @@ function stepDuration(step: AiAgentRunStep): string | null {
             <header class="agent-step-header">
               <div>
                 <strong>{{ item.title }}</strong>
-                <span>{{ item.step.toolName === 'inspect_table' ? '读取数据' : 'SQL 验证' }}</span>
+                <span>{{ stepKindLabel(item.step) }}</span>
               </div>
               <div class="agent-step-meta">
                 <span>{{ stepStatus(item.step) }}</span>
@@ -368,6 +381,12 @@ function stepDuration(step: AiAgentRunStep): string | null {
   border-radius: 50%;
   color: var(--primary-text);
   background: var(--panel-muted);
+}
+
+.agent-step.waiting .agent-step-marker {
+  border-color: var(--amber-border);
+  color: var(--amber);
+  background: var(--amber-soft);
 }
 
 .agent-step.failed .agent-step-marker,

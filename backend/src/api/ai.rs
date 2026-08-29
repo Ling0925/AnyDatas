@@ -12,7 +12,7 @@ use crate::{
     api::auth::AuthContext,
     error::{AppError, AppResult},
     models::SharedState,
-    services::{agent_provider, secrets},
+    services::{agent_provider, agent_skills, secrets},
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -30,6 +30,7 @@ struct AiSettingsRow {
     base_url: String,
     model: String,
     api_key_ciphertext: Option<String>,
+    mcp_servers_json: String,
     updated_at: String,
 }
 
@@ -40,6 +41,8 @@ struct AiSettingsResponse {
     base_url: String,
     model: String,
     api_key_configured: bool,
+    mcp_servers: Vec<crate::mcp::McpServerConfig>,
+    skills: Vec<agent_skills::SkillSummary>,
     updated_at: Option<String>,
 }
 
@@ -53,6 +56,8 @@ struct UpdateAiSettingsRequest {
     api_key: Option<String>,
     #[serde(default)]
     clear_api_key: bool,
+    #[serde(default)]
+    mcp_servers: Option<Vec<crate::mcp::McpServerConfig>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,6 +73,7 @@ async fn get_settings(
     auth: AuthContext,
 ) -> AppResult<Json<AiSettingsResponse>> {
     Ok(Json(settings_response(
+        &state,
         load_settings(&state, &auth.workspace_id).await?,
     )))
 }
@@ -113,20 +119,34 @@ async fn update_settings(
                 .map_err(|error| AppError::Internal(error.to_string()))?,
         )
     } else {
-        existing.and_then(|settings| settings.api_key_ciphertext)
+        existing
+            .as_ref()
+            .and_then(|settings| settings.api_key_ciphertext.clone())
+    };
+    let mcp_servers_json = match request.mcp_servers {
+        Some(servers) => {
+            crate::mcp::validate_configs(&servers).map_err(AppError::BadRequest)?;
+            serde_json::to_string(&servers)
+                .map_err(|error| AppError::Internal(error.to_string()))?
+        }
+        None => existing
+            .as_ref()
+            .map(|settings| settings.mcp_servers_json.clone())
+            .unwrap_or_else(|| "[]".to_owned()),
     };
     let now = Utc::now().to_rfc3339();
     sqlx::query(
         r#"
         INSERT INTO workspace_ai_settings (
-            workspace_id, enabled, base_url, model, api_key_ciphertext,
+            workspace_id, enabled, base_url, model, api_key_ciphertext, mcp_servers_json,
             updated_by_user_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(workspace_id) DO UPDATE SET
             enabled = excluded.enabled,
             base_url = excluded.base_url,
             model = excluded.model,
             api_key_ciphertext = excluded.api_key_ciphertext,
+            mcp_servers_json = excluded.mcp_servers_json,
             updated_by_user_id = excluded.updated_by_user_id,
             updated_at = excluded.updated_at
         "#,
@@ -136,6 +156,7 @@ async fn update_settings(
     .bind(&base_url)
     .bind(&model)
     .bind(api_key_ciphertext)
+    .bind(&mcp_servers_json)
     .bind(&auth.user_id)
     .bind(&now)
     .bind(&now)
@@ -149,6 +170,7 @@ async fn update_settings(
         "AI settings saved"
     );
     Ok(Json(settings_response(
+        &state,
         load_settings(&state, &auth.workspace_id).await?,
     )))
 }
@@ -170,7 +192,7 @@ async fn load_settings(
 ) -> AppResult<Option<AiSettingsRow>> {
     Ok(sqlx::query_as::<_, AiSettingsRow>(
         r#"
-        SELECT enabled, base_url, model, api_key_ciphertext, updated_at
+        SELECT enabled, base_url, model, api_key_ciphertext, mcp_servers_json, updated_at
         FROM workspace_ai_settings
         WHERE workspace_id = ?
         "#,
@@ -181,13 +203,16 @@ async fn load_settings(
 }
 
 /// 把数据库记录投影成无密钥响应；新工作区默认关闭，避免意外产生外部模型请求。
-fn settings_response(settings: Option<AiSettingsRow>) -> AiSettingsResponse {
+fn settings_response(state: &SharedState, settings: Option<AiSettingsRow>) -> AiSettingsResponse {
+    let skills = agent_skills::list_skills(&state.data_dir);
     match settings {
         Some(settings) => AiSettingsResponse {
             enabled: settings.enabled,
             base_url: settings.base_url,
             model: settings.model,
             api_key_configured: settings.api_key_ciphertext.is_some(),
+            mcp_servers: crate::mcp::parse_configs(&settings.mcp_servers_json).unwrap_or_default(),
+            skills,
             updated_at: Some(settings.updated_at),
         },
         None => AiSettingsResponse {
@@ -195,6 +220,8 @@ fn settings_response(settings: Option<AiSettingsRow>) -> AiSettingsResponse {
             base_url: DEFAULT_BASE_URL.to_owned(),
             model: String::new(),
             api_key_configured: false,
+            mcp_servers: Vec::new(),
+            skills,
             updated_at: None,
         },
     }
@@ -312,6 +339,7 @@ mod tests {
             agent_max_steps: 4,
             agent_timeout_seconds: 30,
             agent_context_chars: 80_000,
+            mcp: Default::default(),
         });
         let auth = AuthContext {
             user_id: "ai-user".to_owned(),
@@ -359,6 +387,7 @@ mod tests {
                 model: "local-model".to_owned(),
                 api_key: None,
                 clear_api_key: false,
+                mcp_servers: None,
             }),
         )
         .await

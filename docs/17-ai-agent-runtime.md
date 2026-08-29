@@ -1,6 +1,6 @@
 # AI Agent Runtime 架构与实现
 
-更新日期: 2026-07-26
+更新日期: 2026-08-29
 
 ## 1. 目标
 
@@ -57,6 +57,9 @@ stateDiagram-v2
     running --> completed
     running --> failed
     running --> canceled
+    running --> waiting_user: ask_user
+    waiting_user --> running: answer
+    waiting_user --> canceled
     completed --> [*]
     failed --> queued: retry
     canceled --> queued: retry
@@ -70,6 +73,8 @@ stateDiagram-v2
 4. 每次模型调用和工具执行先写 `running` Step，完成后再写结构化结果。
 5. 最后一轮不再声明工具，强制模型在步骤预算内收敛为最终回复。
 6. 助手消息和 `completed` 状态在同一事务写入，避免只保存其中一半。
+
+`ask_user` 会把当前工具步骤写成 `waiting`、Run 写成 `waiting_user` 后结束后台任务。等待期间不计入 300 秒总超时；进程重启会保留 `waiting_user`，用户仍可回答。回答接口先校验数据表签名，再完成等待步骤、把 Run 切回 `running` 并启动新的 supervise 循环，前端才能继续订阅 SSE。签名变化返回冲突且不消费等待步骤，需要取消后重发。
 
 停止 Run 会设置进程内取消令牌、更新 SQLite 状态，并调用 DuckDB `InterruptHandle` 中断当前工具查询。失败或取消的最近 Run 可原位重试，复用原用户消息，不制造“请重试”之类的伪业务历史。
 
@@ -113,7 +118,25 @@ SSE 解析器按 `choices[].delta.tool_calls[index]` 拼接 call id、函数名�
 - Runtime 生成带安全标识符转义的 `SELECT * FROM "alias" LIMIT n`。
 - `limit` 被限制在 1 到 20。
 
-未知工具和无效参数不会动态调用任何代码。它们被记录为失败 Step，并作为工具观察返回模型，使模型有机会在后续步骤自行修正。
+### 6.3 `ask_user`
+
+- 参数: `{ "question": "...", "options": [{"id","label"}], "allowMultiple": false, "allowFreeText": true }`
+- 始终声明，不依赖是否选表。
+- 问题 1–500 字；选项 0 或 2–6 个。没有选项时强制允许自由文本。
+- 前端提交 `{ selectedIds, text }` 到 `/runs/{id}/answer`。
+
+### 6.4 `list_skills` / `load_skill`
+
+- 扫描 `{data_dir}/agent-skills/{name}/SKILL.md`。目录名须匹配 `[a-z0-9-]{1,64}`，最多 32 个，正文最多 16k 字。
+- 目录非空才声明这两个工具。`list_skills` 只返回名称和描述，`load_skill` 再展开正文。
+
+### 6.5 MCP stdio
+
+- 工作区设置保存 `mcp_servers_json`：`name/command/args/env/enabled`，最多 8 个服务器、每服务器 32 个工具。
+- 仅 stdio JSON-RPC 2.0（Content-Length 或单行 JSON）。映射为 `mcp_{server}_{tool}`。
+- 连接失败只记警告，不让整个 Run 失败。不支持 HTTP MCP、resources、prompts、OAuth。
+
+未知工具和无效参数不会动态调用任何代码。它们被记录为失败 Step，并作为工具观察返回模型，使模型有机会在后续步骤自行修正。`parallel_tool_calls` 为 false。
 
 ## 7. 上下文与长对话
 
@@ -142,8 +165,9 @@ SSE 解析器按 `choices[].delta.tool_calls[index]` 拼接 call id、函数名�
 | POST | `/api/ai/agent/conversations/{id}/regenerate` | 从助手消息处分叉重生成 |
 | GET | `/api/ai/agent/runs/{id}` | 获取 Run 和 Steps |
 | GET | `/api/ai/agent/runs/{id}/events` | 订阅事件驱动的 Run 快照 |
-| POST | `/api/ai/agent/runs/{id}/cancel` | 停止 Run |
+| POST | `/api/ai/agent/runs/{id}/cancel` | 停止 Run，含 `waiting_user` |
 | POST | `/api/ai/agent/runs/{id}/retry` | 原位重试失败/取消 Run |
+| POST | `/api/ai/agent/runs/{id}/answer` | 提交 ask_user 回答并恢复同一 Run |
 
 全部接口要求 Analyst 以上角色，并在数据库查询中同时校验 `workspace_id` 和 `user_id`。工作区 AI 配置仍只有 Owner/Admin 可以修改或测试。
 
@@ -155,7 +179,7 @@ SSE 解析器按 `choices[].delta.tool_calls[index]` 拼接 call id、函数名�
 | `ANYDATAS_AGENT_TIMEOUT_SECONDS` | `300` | 30-1800 | 单 Run 总超时，同时作为单次上游请求上限 |
 | `ANYDATAS_AGENT_CONTEXT_CHARS` | `80000` | 20000-500000 | 系统、Schema、摘要和近期消息总字符预算 |
 
-部署升级时 SQLx 自动运行迁移。启动恢复会关闭重启前遗留的 `queued/running` Run 和 `running` Step。SQLite 仍应使用 Online Backup API 备份，并同时保存 `/data/.secret-key`、上传文件和缓存。
+部署升级时 SQLx 自动运行迁移。启动恢复会关闭重启前遗留的 `queued/running` Run 和 `running` Step；`waiting_user` 保留。自定义 Skill 目录是 `{ANYDATAS_DATA_DIR}/agent-skills/{name}/SKILL.md`，进程启动时创建该目录。SQLite 仍应使用 Online Backup API 备份，并同时保存 `/data/.secret-key`、上传文件和缓存。
 
 ## 10. 前端行为
 
@@ -169,7 +193,7 @@ SSE 解析器按 `choices[].delta.tool_calls[index]` 拼接 call id、函数名�
 
 ## 11. 当前边界
 
-- 运行中服务进程重启会把 Run 标记为失败，不做跨进程断点续跑。
-- 正常路径使用 SSE；浏览器或代理不支持事件流时才以 700ms 短轮询降级。
-- 工具注册表只有 SQL 预览和表样本读取，后续可增加字段统计、查询解释和保存报表，但必须继续走显式注册和权限校验。
+- 运行中服务进程重启会把 `queued/running` Run 标记为失败；`waiting_user` 可跨进程回答后续跑。
+- 正常路径使用 SSE；浏览器或代理不支持事件流时才以 700ms 短轮询降级。`waiting_user` 会结束当前 SSE，回答后再订阅。
+- 工具注册表现有 SQL 预览、表样本、ask_user、本地 skills 和 stdio MCP。不引入插件框架、HTTP MCP、skill 编辑器或市场。
 - 仍使用 Chat Completions 兼容协议；Responses API 和厂商私有 Agent 协议未接入。

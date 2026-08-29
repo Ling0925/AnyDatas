@@ -42,6 +42,7 @@ pub struct AppState {
     pub agent_max_steps: usize,
     pub agent_timeout_seconds: u64,
     pub agent_context_chars: usize,
+    pub mcp: crate::mcp::McpHub,
 }
 
 pub type SharedState = Arc<AppState>;

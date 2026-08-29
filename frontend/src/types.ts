@@ -27,11 +27,26 @@ export interface LoginPayload {
   password: string
 }
 
+export interface AiMcpServerConfig {
+  name: string
+  command: string
+  args: string[]
+  env: Record<string, string>
+  enabled: boolean
+}
+
+export interface AiSkillSummary {
+  name: string
+  description: string
+}
+
 export interface AiSettings {
   enabled: boolean
   baseUrl: string
   model: string
   apiKeyConfigured: boolean
+  mcpServers: AiMcpServerConfig[]
+  skills: AiSkillSummary[]
   updatedAt: string | null
 }
 
@@ -41,20 +56,45 @@ export interface AiSettingsPayload {
   model: string
   apiKey?: string
   clearApiKey: boolean
+  mcpServers?: AiMcpServerConfig[]
 }
 
 export type AiChatRole = 'user' | 'assistant'
 
 export interface AiToolRun {
-  tool: 'previewSql' | 'inspectTable' | string
+  tool: 'previewSql' | 'inspectTable' | 'askUser' | string
   sql: string
   ok: boolean
   result: QueryResponse | null
   error: string | null
+  observation?: string | null
 }
 
-export type AiAgentRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'canceled'
-export type AiAgentStepStatus = 'running' | 'completed' | 'failed' | 'canceled'
+export type AiAgentRunStatus =
+  | 'queued'
+  | 'running'
+  | 'waiting_user'
+  | 'completed'
+  | 'failed'
+  | 'canceled'
+export type AiAgentStepStatus = 'running' | 'waiting' | 'completed' | 'failed' | 'canceled'
+
+export interface AiAskUserOption {
+  id: string
+  label: string
+}
+
+export interface AiAskUserPrompt {
+  question: string
+  options: AiAskUserOption[]
+  allowMultiple: boolean
+  allowFreeText: boolean
+}
+
+export interface AiAgentAnswerPayload {
+  selectedIds: string[]
+  text?: string
+}
 export type AiAgentReasoningEffort = 'low' | 'medium' | 'high'
 
 export interface AiAgentConversationSummary {

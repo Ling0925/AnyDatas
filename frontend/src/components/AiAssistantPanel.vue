@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Bot,
   Brain,
   Check,
+  CircleHelp,
   Copy,
   Database,
   Eye,
@@ -33,6 +34,7 @@ import type {
   AiAgentMessage,
   AiAgentReasoningEffort,
   AiAgentRun,
+  AiAskUserPrompt,
   AiToolRun,
   QueryResponse,
 } from '../types'
@@ -41,6 +43,12 @@ import AiAgentTimeline from './AiAgentTimeline.vue'
 import AiResultPreview from './AiResultPreview.vue'
 import AiChartPreview from './AiChartPreview.vue'
 
+const props = withDefaults(defineProps<{
+  embedded?: boolean
+}>(), {
+  embedded: false,
+})
+
 const emit = defineEmits<{
   applySql: [payload: { sql: string; chart?: AgentChartSpec }]
   runSql: [payload: { sql: string; chart?: AgentChartSpec }]
@@ -48,6 +56,8 @@ const emit = defineEmits<{
 
 const auth = useAuthStore()
 const store = useWorkspaceStore()
+const openAiSettings = inject<() => void>('openAiSettings', () => {})
+const aiReady = ref<boolean | null>(null)
 const conversations = ref<AiAgentConversationSummary[]>([])
 const activeConversation = ref<AiAgentConversationDetail | null>(null)
 const activeRun = ref<AiAgentRun | null>(null)
@@ -57,7 +67,10 @@ const includeResultContext = ref(false)
 const listLoading = ref(false)
 const conversationLoading = ref(false)
 const startingRun = ref(false)
+const answeringRun = ref(false)
 const stoppingRun = ref(false)
+const selectedAnswerIds = ref<string[]>([])
+const answerText = ref('')
 const previewingId = ref<string | null>(null)
 const applyingRunId = ref<string | null>(null)
 const manualPreviews = ref<Record<string, QueryResponse>>({})
@@ -73,16 +86,39 @@ const reasoningOptions = [
   { label: '深入', value: 'high' },
 ]
 
-const dataStarterPrompts = [
-  '先检查已选表的结构和实际数据，帮我识别适合分析的指标',
-  '检查已选表是否存在口径或关联问题',
-  '根据当前表格上下文设计一套分析方案',
+interface PromptTemplate {
+  icon: string
+  label: string
+  prompt: string
+}
+
+const dataTemplates: PromptTemplate[] = [
+  {
+    icon: '1',
+    label: '这是什么数据',
+    prompt: '先看已选表的字段和几行样本，用两三句话说明这是什么数据、哪些字段值得分析。',
+  },
+  {
+    icon: '2',
+    label: '找出问题',
+    prompt: '检查空值、重复和明显异常，只指出最值得处理的问题。',
+  },
+  {
+    icon: '3',
+    label: '看趋势',
+    prompt: '如果有日期或批次字段，按时间汇总最重要的指标，并给出一条可运行的 SQL。',
+  },
+  {
+    icon: '4',
+    label: '把表连起来',
+    prompt: '根据已选表找出可以 JOIN 的字段，给出一条能跑通的关联查询。',
+  },
 ]
-const generalStarterPrompts = [
-  '帮我梳理这个分析需求，先列出需要确认的业务口径',
-  '给我一套从原始数据到分析结论的实施步骤',
-  '解释一下怎样设计一条清晰、可复核的数据分析流程',
-]
+
+const currentTemplates = computed(() => (
+  store.agentTableBindings.length ? dataTemplates : []
+))
+
 
 const messages = computed(() => activeConversation.value?.messages ?? [])
 const filteredConversations = computed(() => {
@@ -92,7 +128,16 @@ const filteredConversations = computed(() => {
     conversation.title.toLocaleLowerCase().includes(query)
   ))
 })
-const sending = computed(() => startingRun.value || isActiveRun(activeRun.value))
+const sending = computed(() => (
+  startingRun.value || answeringRun.value || isBusyRun(activeRun.value)
+))
+const waitingPrompt = computed(() => parseAskUserPrompt(activeRun.value))
+const canAnswer = computed(() => {
+  const prompt = waitingPrompt.value
+  if (!prompt || answeringRun.value) return false
+  if (selectedAnswerIds.value.length) return true
+  return prompt.allowFreeText && Boolean(answerText.value.trim())
+})
 const currentContextReady = computed(() => store.agentContextReady)
 const currentContextSignature = computed(() => store.agentTableBindings
   .map((binding) => {
@@ -108,8 +153,7 @@ const contextChanged = computed(() => Boolean(
 const canSend = computed(() => Boolean(
   draft.value.trim()
   && currentContextReady.value
-  && !sending.value
-  && !contextChanged.value,
+  && !sending.value,
 ))
 const canUseAgentSql = computed(() => Boolean(
   store.agentTableBindings.length
@@ -119,21 +163,28 @@ const canUseAgentSql = computed(() => Boolean(
 /** 当发送被禁用时给出可读原因，避免按钮静默置灰让人以为界面坏了。 */
 const sendDisabledReason = computed(() => {
   if (sending.value) return ''
-  if (contextChanged.value) return '数据上下文已变更，请先按新选择继续或恢复原选择'
-  if (!currentContextReady.value) return '所选表格无效或超过 16 张，请调整右侧数据上下文'
+  if (contextChanged.value) return '表格已变，发送会开启新对话'
+  if (!currentContextReady.value) {
+    return props.embedded
+      ? '所选表格无效或超过 16 张，请调整当前查询用到的表'
+      : '所选表格无效或超过 16 张，请调整数据表选择'
+  }
   if (!draft.value.trim()) return '请先输入问题'
   return ''
 })
 const sqlDisabledReason = computed(() => {
-  if (contextChanged.value) return '数据上下文已变更，请先确认或恢复选择'
-  if (!store.agentTableBindings.length) return '当前为纯对话模式，请先在右侧选择数据表'
+  if (contextChanged.value) return '数据表已变化，请先确认或恢复选择'
+  if (!store.agentTableBindings.length) {
+    return props.embedded
+      ? '先把工作表加入查询，或在输入框使用 /all'
+      : '当前为纯对话。请先选择数据表，或输入 /all'
+  }
   if (!currentContextReady.value) return '所选表格无效或超过 16 张'
   return ''
 })
-const starterPrompts = computed(() => (
-  store.agentTableBindings.length ? dataStarterPrompts : generalStarterPrompts
-))
+
 const workbenchContextMatches = computed(() => {
+
   if (!store.agentTableBindings.length || !currentContextReady.value) return false
   if (store.agentTableBindings.length !== store.queryBindings.length) return false
   return store.agentTableBindings.every((binding, index) => {
@@ -150,13 +201,14 @@ const contextLabel = computed(() => {
   const tables = store.agentTableBindings.length
     ? `${store.agentBoundTables.length} 张表`
     : '未选择表格'
+  if (waitingPrompt.value) return `${tables} · 等待回答`
   if (sending.value) return `${tables} · Agent 运行中`
   return workbenchContextMatches.value && store.queryResult && includeResultContext.value
     ? `${tables} · 含结果样本`
     : tables
 })
 const agentModeLabel = computed(() => (
-  store.agentTableBindings.length ? '自动规划 · 只读工具' : '仅对话模式'
+  store.agentTableBindings.length ? '会查询已选表格' : '未选择数据表'
 ))
 const runNeedsAttention = computed(() => Boolean(
   activeRun.value
@@ -180,10 +232,23 @@ watch(
   () => auth.user?.userId,
   (userId) => {
     resetState()
-    if (userId) void initializeConversations()
+    aiReady.value = null
+    if (userId) {
+      void loadAiReady()
+      void initializeConversations()
+    }
   },
   { immediate: true },
 )
+
+async function loadAiReady() {
+  try {
+    const settings = await api.getAiSettings()
+    aiReady.value = settings.enabled && Boolean(settings.model.trim())
+  } catch {
+    aiReady.value = false
+  }
+}
 watch(
   () => [messages.value.length, activeRun.value?.stepCount, streamingContent.value.length],
   () => { void scrollToBottom(false) },
@@ -191,6 +256,13 @@ watch(
 watch(reasoningEffort, (value) => {
   window.localStorage.setItem('anydatas.agent.reasoningEffort', value)
 })
+watch(
+  () => waitingPrompt.value?.question ?? '',
+  () => {
+    selectedAnswerIds.value = []
+    answerText.value = ''
+  },
+)
 watch(workbenchContextMatches, (matches) => {
   if (!matches) includeResultContext.value = false
 })
@@ -238,6 +310,9 @@ async function initializeConversations() {
     conversations.value = await api.listAgentConversations()
     const first = conversations.value[0]
     if (first) await openConversation(first.id)
+    else if (!store.agentTableBindings.length && store.queryBindings.length) {
+      store.setAgentTableBindings(store.queryBindings)
+    }
   } catch (error) {
     ElMessage.error(`AI 会话加载失败：${errorMessage(error)}`)
   } finally {
@@ -271,14 +346,15 @@ async function openConversation(id: string) {
 }
 
 /**
- * 进入本地新对话草稿态并清空表格选择，首次发送时才创建服务端记录。
- * 这样每个新对话都真正从零上下文开始，也不会制造没有消息的空历史。
+ * 进入本地新对话草稿。保留当前选表，避免每次新建都要从零勾表。
  */
 async function startNewConversation() {
   invalidateRunTracking()
   activeConversation.value = null
   activeRun.value = null
-  store.clearAgentTableBindings()
+  if (!store.agentTableBindings.length && store.queryBindings.length) {
+    store.setAgentTableBindings(store.queryBindings)
+  }
   includeResultContext.value = false
   draft.value = ''
   manualPreviews.value = {}
@@ -369,8 +445,7 @@ async function sendMessage() {
     return
   }
   if (contextChanged.value) {
-    ElMessage.warning('请先确认当前数据上下文')
-    return
+    await continueWithCurrentSelection()
   }
   startingRun.value = true
   try {
@@ -490,10 +565,10 @@ async function finishRunTracking(run: AiAgentRun, generation: number) {
   }
 }
 
-/** 停止服务端 Run，同时中断模型等待和正在执行的 DuckDB 工具查询。 */
+/** 停止服务端 Run，同时中断模型等待、用户问答和正在执行的 DuckDB 工具查询。 */
 async function stopGenerating() {
   const run = activeRun.value
-  if (!isActiveRun(run) || stoppingRun.value) return
+  if (!isBusyRun(run) || stoppingRun.value) return
   stoppingRun.value = true
   try {
     invalidateRunTracking()
@@ -567,9 +642,65 @@ async function regenerateMessage(message: AiAgentMessage) {
   }
 }
 
-/** 判断 Run 是否仍由后台处理，queued 和 running 在交互上都应锁定重复发送。 */
+/** 判断 Run 是否仍由后台处理，queued 和 running 才继续订阅 SSE。 */
 function isActiveRun(run: AiAgentRun | null): run is AiAgentRun {
   return Boolean(run && ['queued', 'running'].includes(run.status))
+}
+
+/** waiting_user 会锁发送、允许取消，但不保持 SSE。 */
+function isBusyRun(run: AiAgentRun | null): run is AiAgentRun {
+  return Boolean(run && ['queued', 'running', 'waiting_user'].includes(run.status))
+}
+
+function parseAskUserPrompt(run: AiAgentRun | null): AiAskUserPrompt | null {
+  if (!run || run.status !== 'waiting_user') return null
+  const step = [...run.steps].reverse().find((item) => item.kind === 'tool' && item.status === 'waiting')
+  const output = recordValue(step?.output)
+  const question = typeof output?.question === 'string' ? output.question.trim() : ''
+  if (!question) return null
+  const options = Array.isArray(output?.options)
+    ? output.options.flatMap((item) => {
+        const option = recordValue(item)
+        const id = typeof option?.id === 'string' ? option.id.trim() : ''
+        const label = typeof option?.label === 'string' ? option.label.trim() : ''
+        return id && label ? [{ id, label }] : []
+      })
+    : []
+  return {
+    question,
+    options,
+    allowMultiple: output?.allowMultiple === true,
+    allowFreeText: output?.allowFreeText !== false || options.length === 0,
+  }
+}
+
+function toggleAnswerId(id: string) {
+  if (waitingPrompt.value?.allowMultiple) {
+    selectedAnswerIds.value = selectedAnswerIds.value.includes(id)
+      ? selectedAnswerIds.value.filter((item) => item !== id)
+      : [...selectedAnswerIds.value, id]
+    return
+  }
+  selectedAnswerIds.value = [id]
+}
+
+/** 提交 ask_user 回答后后端会把同一 Run 切回 running，再恢复事件订阅。 */
+async function submitAnswer() {
+  const run = activeRun.value
+  if (!run || run.status !== 'waiting_user' || !canAnswer.value) return
+  answeringRun.value = true
+  try {
+    const resumed = await api.answerAgentRun(run.id, {
+      selectedIds: selectedAnswerIds.value,
+      text: answerText.value.trim() || undefined,
+    })
+    activeRun.value = resumed
+    void trackRun(resumed)
+  } catch (error) {
+    ElMessage.error(`提交回答失败：${errorMessage(error)}`)
+  } finally {
+    answeringRun.value = false
+  }
 }
 
 /** 将协议值转换为紧凑中文标签，运行中和历史时间轴使用同一套文案。 */
@@ -785,6 +916,7 @@ function formatConversationTime(timestamp: string): string {
 function conversationStatus(conversation: AiAgentConversationSummary): string {
   if (conversation.lastRunStatus === 'queued') return '排队中'
   if (conversation.lastRunStatus === 'running') return '运行中'
+  if (conversation.lastRunStatus === 'waiting_user') return '等待回答'
   if (conversation.lastRunStatus === 'failed') return '失败'
   if (conversation.lastRunStatus === 'canceled') return '已停止'
   return formatConversationTime(conversation.updatedAt)
@@ -807,10 +939,16 @@ async function scrollToBottom(force = true) {
   if (!messageList.value || !shouldFollow) return
   messageList.value.scrollTop = messageList.value.scrollHeight
 }
+
+defineExpose({
+  setPrompt: (text: string) => {
+    draft.value = text
+  },
+})
 </script>
 
 <template>
-  <section class="ai-assistant-panel">
+  <section class="ai-assistant-panel" :class="{ embedded }">
     <aside class="ai-conversation-sidebar">
       <header class="ai-conversation-header">
         <div>
@@ -900,7 +1038,7 @@ async function scrollToBottom(force = true) {
             <div class="ai-context-popover">
               <strong>当前运行上下文</strong>
               <dl>
-                <div><dt>逻辑表</dt><dd>{{ store.agentBoundTables.length }}</dd></div>
+                <div><dt>数据表</dt><dd>{{ store.agentBoundTables.length }}</dd></div>
                 <div>
                   <dt>当前 SQL</dt>
                   <dd>{{ workbenchContextMatches && store.currentSql.trim() ? '已包含' : '不包含' }}</dd>
@@ -914,8 +1052,8 @@ async function scrollToBottom(force = true) {
                   </dd>
                 </div>
                 <div>
-                  <dt>执行模式</dt>
-                  <dd>{{ store.agentTableBindings.length ? '自动规划 · 只读工具' : '仅对话' }}</dd>
+                  <dt>模式</dt>
+                  <dd>{{ store.agentTableBindings.length ? '会查询已选表格' : '未选择数据表' }}</dd>
                 </div>
               </dl>
               <el-checkbox
@@ -925,41 +1063,90 @@ async function scrollToBottom(force = true) {
                 包含小型结果样本
               </el-checkbox>
               <p v-if="!workbenchContextMatches" class="ai-context-note">
-                只有 AI 选表与工作台绑定完全一致时，才可附加当前 SQL 和结果样本。
+                选表需要和工作台当前查询一致，才能附带正在编辑的 SQL 和结果。
               </p>
             </div>
           </el-popover>
         </div>
       </header>
 
+      <div v-if="embedded" class="ai-embedded-tables">
+        <span>当前表</span>
+        <template v-if="store.boundTables.length">
+          <code v-for="item in store.boundTables" :key="`${item.binding.tableId}-${item.binding.alias}`">
+            {{ item.binding.alias }}
+          </code>
+          <button type="button" class="ai-sync-tables" @click="store.setAgentTableBindings(store.queryBindings)">
+            与查询同步
+          </button>
+        </template>
+        <em v-else>查询还没有表。在左侧点 +，或输入 /all</em>
+      </div>
+
       <div ref="messageList" v-loading="conversationLoading" class="ai-message-list" aria-live="polite">
         <div v-if="contextChanged" class="ai-context-warning">
           <div>
             <Database :size="16" />
-            <span><strong>表格选择已变化</strong>为避免旧消息泄露已排除表格，请使用新对话继续</span>
+            <span><strong>选表已经变了。</strong>继续发送会开启新对话，不会改写旧聊天。</span>
           </div>
           <div>
             <el-button size="small" @click="restoreConversationSelection">
-              恢复原选择
+              恢复原来的表
             </el-button>
             <el-button size="small" type="primary" @click="continueWithCurrentSelection">
-              按此选择新建
+              用新表开始
             </el-button>
           </div>
         </div>
 
-        <div v-if="!messages.length && !conversationLoading" class="ai-chat-empty">
-          <span><Sparkles :size="26" /></span>
-          <strong>{{ store.agentTableBindings.length ? '从已选数据开始分析' : '从一个问题开始' }}</strong>
-          <p>
-            {{ store.agentTableBindings.length
-              ? `本对话只会使用右侧选择的 ${store.agentTableBindings.length} 张表`
-              : '默认不携带任何表格信息，也不会调用数据工具' }}
-          </p>
-          <button v-for="prompt in starterPrompts" :key="prompt" type="button" @click="selectStarter(prompt)">
-            {{ prompt }}
-          </button>
+        <div v-if="!messages.length && !conversationLoading && aiReady !== null" class="ai-chat-empty">
+          <template v-if="aiReady === false">
+            <strong>还没有接上 AI</strong>
+            <p>在工作区设置里填写兼容 OpenAI 的接口和模型后，就可以开始问数据。</p>
+            <button type="button" class="wb-btn wb-btn-primary" @click="openAiSettings()">
+              打开 AI 设置
+            </button>
+          </template>
+          <template v-else-if="!store.agentTableBindings.length">
+            <strong>先选要分析的表</strong>
+            <p>{{ embedded ? '用当前查询里的表，或到 AI Agent 页勾选工作表。' : '在右侧勾选工作表后，AI 才能查数和写 SQL。' }}</p>
+            <div class="ai-empty-actions">
+              <button
+                v-if="store.queryBindings.length"
+                type="button"
+                class="wb-btn wb-btn-primary"
+                @click="store.setAgentTableBindings(store.queryBindings)"
+              >
+                用当前查询的表
+              </button>
+              <button
+                v-else-if="store.sourceTables.length && !embedded"
+                type="button"
+                class="wb-btn wb-btn-primary"
+                @click="store.selectAllAgentTables()"
+              >
+                分析全部表格
+              </button>
+            </div>
+          </template>
+          <template v-else>
+            <strong>问一句关于这些表的问题</strong>
+            <p>已选 {{ store.agentTableBindings.length }} 张表。直接提问，或用下面的起点。</p>
+            <div class="ai-empty-templates-grid">
+              <button
+                v-for="tpl in currentTemplates"
+                :key="tpl.label"
+                type="button"
+                class="ai-template-card"
+                @click="selectStarter(tpl.prompt)"
+              >
+                <strong>{{ tpl.label }}</strong>
+                <span class="ai-template-prompt">{{ tpl.prompt }}</span>
+              </button>
+            </div>
+          </template>
         </div>
+
 
         <article v-for="message in messages" :key="message.id" class="ai-message" :class="message.role">
           <div class="ai-message-avatar">
@@ -981,7 +1168,7 @@ async function scrollToBottom(force = true) {
               class="ai-tool-activity"
             >
               <header>
-                <div><Wrench :size="14" /><strong>Agent 工具</strong></div>
+                <div><Wrench :size="14" /><strong>查询过程</strong></div>
                 <span>{{ message.toolRuns.length }} 步</span>
               </header>
               <details
@@ -1005,7 +1192,7 @@ async function scrollToBottom(force = true) {
 
             <section v-if="message.sql" class="ai-sql-proposal">
               <header>
-                <div><FilePenLine :size="14" /><strong>候选 SQL</strong></div>
+                <div><FilePenLine :size="14" /><strong>可运行的 SQL</strong></div>
                 <div class="ai-sql-header-actions">
                   <span>{{ message.model }}</span>
                   <el-tooltip content="复制 SQL" placement="top">
@@ -1024,11 +1211,11 @@ async function scrollToBottom(force = true) {
                   :disabled="!canUseAgentSql"
                   @click="applySql(message.sql, message.chart)"
                 >
-                  <Check :size="14" />应用
+                  <Check :size="14" />写入工作台
                 </el-button>
                 <el-button
                   size="small"
-                  aria-label="预览候选 SQL 结果"
+                  aria-label="预览 SQL 结果"
                   :loading="previewingId === message.id"
                   :disabled="!canUseAgentSql"
                   @click="previewSql(message)"
@@ -1038,18 +1225,18 @@ async function scrollToBottom(force = true) {
                 <el-button
                   size="small"
                   type="primary"
-                  aria-label="应用候选 SQL 并运行"
+                  aria-label="在工作台运行 SQL"
                   :loading="applyingRunId === message.id"
                   :disabled="!canUseAgentSql || applyingRunId !== null"
                   @click="runSql(message.sql, message.chart, message.id)"
                 >
-                  <Play :size="14" />应用并运行
+                  <Play :size="14" />在工作台运行
                 </el-button>
                 <p v-if="!canUseAgentSql" class="ai-context-note">
                   {{
                     contextChanged
-                      ? '表格上下文已变化，确认后再应用/运行候选 SQL'
-                      : '需先选择表格并确认上下文后才能应用 SQL'
+                      ? '选表已变，确认后再运行这条 SQL'
+                      : '先选表才能预览或运行 SQL'
                   }}
                 </p>
                 </div>
@@ -1104,6 +1291,44 @@ async function scrollToBottom(force = true) {
               :retryable="runNeedsAttention"
               @retry="retryRun"
             />
+            <section v-if="waitingPrompt" class="ai-ask-card">
+              <header>
+                <CircleHelp :size="15" />
+                <strong>{{ waitingPrompt.question }}</strong>
+              </header>
+              <div v-if="waitingPrompt.options.length" class="ai-ask-options">
+                <button
+                  v-for="option in waitingPrompt.options"
+                  :key="option.id"
+                  type="button"
+                  :class="{ active: selectedAnswerIds.includes(option.id) }"
+                  @click="toggleAnswerId(option.id)"
+                >
+                  {{ option.label }}
+                </button>
+              </div>
+              <el-input
+                v-if="waitingPrompt.allowFreeText"
+                v-model="answerText"
+                type="textarea"
+                resize="none"
+                :autosize="{ minRows: 2, maxRows: 4 }"
+                maxlength="2000"
+                show-word-limit
+                placeholder="补充说明"
+              />
+              <div class="ai-ask-actions">
+                <el-button
+                  type="primary"
+                  size="small"
+                  :disabled="!canAnswer"
+                  :loading="answeringRun"
+                  @click="submitAnswer"
+                >
+                  提交回答
+                </el-button>
+              </div>
+            </section>
             <section v-if="streamingContent" class="ai-streaming-response">
               <header>
                 <span><i />正在回复</span>
@@ -1149,14 +1374,33 @@ async function scrollToBottom(force = true) {
               <kbd>Enter</kbd>
             </button>
           </div>
+
+          <!-- 快捷 Prompt 标签条 -->
+          <div v-if="messages.length && currentTemplates.length" class="ai-prompt-pills-bar">
+            <button
+              v-for="tpl in currentTemplates"
+              :key="tpl.label"
+              type="button"
+              class="ai-prompt-pill"
+              @click="selectStarter(tpl.prompt)"
+            >
+              <span>{{ tpl.icon }}</span>
+              <span>{{ tpl.label }}</span>
+            </button>
+          </div>
+
           <div class="ai-composer-main">
+
+
             <el-input
               v-model="draft"
               type="textarea"
               resize="none"
               :autosize="{ minRows: 2, maxRows: 6 }"
               maxlength="4000"
-              placeholder="输入问题，或输入 / 查看命令；默认不携带表格"
+              :placeholder="store.agentTableBindings.length
+                ? '输入关于当前数据的问题，或输入 / 查看命令'
+                : '输入问题；默认不携带表格。输入 /all 可选全部表'"
               @keydown="handleComposerKeydown"
             />
             <el-tooltip v-if="sending" content="停止" placement="top">
@@ -1182,7 +1426,7 @@ async function scrollToBottom(force = true) {
             </el-tooltip>
           </div>
           <div class="ai-composer-toolbar">
-            <span><Brain :size="14" />思考等级</span>
+            <span><Brain :size="14" />回答</span>
             <el-segmented
               v-model="reasoningEffort"
               :options="reasoningOptions"

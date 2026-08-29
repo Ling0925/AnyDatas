@@ -16,8 +16,8 @@ use crate::{
     models::SharedState,
     services::agent::{
         self, AgentConversationDetail, AgentConversationSummary, AgentIdentity, AgentRun,
-        CreateConversationRequest, RegenerateAgentRunRequest, StartAgentRunRequest,
-        UpdateConversationContextRequest,
+        AnswerAgentRunRequest, CreateConversationRequest, RegenerateAgentRunRequest,
+        StartAgentRunRequest, UpdateConversationContextRequest,
     },
 };
 
@@ -45,6 +45,7 @@ pub fn router() -> Router<SharedState> {
         .route("/ai/agent/runs/{id}/events", get(stream_run))
         .route("/ai/agent/runs/{id}/cancel", post(cancel_run))
         .route("/ai/agent/runs/{id}/retry", post(retry_run))
+        .route("/ai/agent/runs/{id}/answer", post(answer_run))
 }
 
 /// 返回当前用户的活跃会话列表，其他工作区或成员的记录不会进入结果集。
@@ -197,14 +198,23 @@ async fn stream_run(
         if cursor.pending_run.is_none() {
             let events = cursor.events.as_mut()?;
             if events.changed().await.is_err() {
-                cursor.finished = true;
-                let payload =
-                    serde_json::json!({ "message": "Agent 实时事件通道已关闭，请重新连接" })
-                        .to_string();
-                return Some((
-                    Ok(Event::default().event("run-error").data(payload)),
-                    cursor,
-                ));
+                match agent::get_run(&cursor.state, &cursor.identity, &cursor.run_id).await {
+                    Ok(run) => {
+                        cursor.finished = true;
+                        let payload = serde_json::to_string(&run)
+                            .unwrap_or_else(|_| "{\"errorMessage\":\"Run 序列化失败\"}".to_owned());
+                        return Some((Ok(Event::default().event("run").data(payload)), cursor));
+                    }
+                    Err(error) => {
+                        cursor.finished = true;
+                        let payload =
+                            serde_json::json!({ "message": error.to_string() }).to_string();
+                        return Some((
+                            Ok(Event::default().event("run-error").data(payload)),
+                            cursor,
+                        ));
+                    }
+                }
             }
         }
         let run = match cursor.pending_run.take() {
@@ -244,6 +254,20 @@ async fn cancel_run(
     auth.require_analyst()?;
     Ok(Json(
         agent::cancel_run(&state, &identity(&auth), &id).await?,
+    ))
+}
+
+/// 提交 ask_user 回答并恢复同一 Run。
+async fn answer_run(
+    State(state): State<SharedState>,
+    auth: AuthContext,
+    Path(id): Path<String>,
+    Json(request): Json<AnswerAgentRunRequest>,
+) -> AppResult<(StatusCode, Json<AgentRun>)> {
+    auth.require_analyst()?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(agent::answer_run(&state, &identity(&auth), &id, request).await?),
     ))
 }
 

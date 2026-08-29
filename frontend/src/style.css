@@ -4749,3 +4749,104 @@ input:focus-visible {
   font-size: 11px;
   line-height: 1.45;
 }
+
+.ai-ask-card {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--primary-border);
+  border-radius: 7px;
+  background: var(--primary-soft);
+}
+
+.ai-ask-card header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--primary-text);
+}
+
+.ai-ask-card header strong {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.ai-ask-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ai-ask-options button {
+  appearance: none;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.ai-ask-options button.active {
+  border-color: var(--primary-border);
+  color: var(--primary-text);
+  background: var(--panel-muted);
+}
+
+.ai-ask-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ai-mcp-list {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.ai-mcp-row {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel-muted);
+}
+
+.ai-mcp-row-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.ai-skill-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.ai-skill-list li {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.ai-skill-list strong {
+  color: var(--text);
+  font-size: var(--fs-body);
+}
+
+.ai-skill-list span,
+.ai-settings-empty {
+  color: var(--muted);
+  font-size: var(--fs-body);
+  line-height: 1.45;
+}
