@@ -167,10 +167,7 @@ async fn stream_run(
     auth.require_analyst()?;
     let identity = identity(&auth);
     let authenticated_run = agent::get_run(&state, &identity, &id).await?;
-    let (initial_run, events) = if matches!(
-        authenticated_run.status.as_str(),
-        "queued" | "running"
-    )
+    let (initial_run, events) = if matches!(authenticated_run.status.as_str(), "queued" | "running")
     {
         let mut events = state
             .agent_events
@@ -204,14 +201,14 @@ async fn stream_run(
                 match agent::get_run(&cursor.state, &cursor.identity, &cursor.run_id).await {
                     Ok(run) => {
                         cursor.finished = true;
-                        let payload = serde_json::to_string(&run).unwrap_or_else(|_| {
-                            "{\"errorMessage\":\"Run 序列化失败\"}".to_owned()
-                        });
+                        let payload = serde_json::to_string(&run)
+                            .unwrap_or_else(|_| "{\"errorMessage\":\"Run 序列化失败\"}".to_owned());
                         return Some((Ok(Event::default().event("run").data(payload)), cursor));
                     }
                     Err(error) => {
                         cursor.finished = true;
-                        let payload = serde_json::json!({ "message": error.to_string() }).to_string();
+                        let payload =
+                            serde_json::json!({ "message": error.to_string() }).to_string();
                         return Some((
                             Ok(Event::default().event("run-error").data(payload)),
                             cursor,

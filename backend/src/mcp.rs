@@ -112,7 +112,10 @@ impl McpHub {
                 }),
             )
             .await?;
-        Ok(truncate_chars(&stringify_mcp_result(result), MAX_RESULT_CHARS))
+        Ok(truncate_chars(
+            &stringify_mcp_result(result),
+            MAX_RESULT_CHARS,
+        ))
     }
 }
 
@@ -198,7 +201,11 @@ async fn connect_server(config: &McpServerConfig) -> Result<(McpSession, Vec<Lis
             }),
         )
         .await?;
-    if init.get("protocolVersion").and_then(Value::as_str).is_none() {
+    if init
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .is_none()
+    {
         return Err("MCP initialize 响应无效".to_owned());
     }
     session
@@ -336,7 +343,9 @@ fn json_id(value: &Value) -> Option<u64> {
     }
 }
 
-async fn read_message(reader: &mut BufReader<tokio::process::ChildStdout>) -> Result<Value, String> {
+async fn read_message(
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+) -> Result<Value, String> {
     let mut line = String::new();
     let read = reader
         .read_line(&mut line)

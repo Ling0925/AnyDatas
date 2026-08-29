@@ -10,11 +10,11 @@ use uuid::Uuid;
 use crate::{
     db,
     error::{AppError, AppResult},
+    mcp,
     models::{
         AgentRunControl, FieldDefinition, QueryRequest, QueryResponse, QueryTableBinding,
         SharedState,
     },
-    mcp,
     services::{
         agent_provider::{
             self, AgentModelSettings, AssistantTurn, ModelMessage, ModelToolCall, ToolDefinition,
@@ -867,8 +867,7 @@ pub async fn answer_run(
         .output
         .clone()
         .ok_or_else(|| AppError::Conflict("等待中的问题已损坏".to_owned()))?;
-    let observation = validate_user_answer(&payload, &request)
-        .map_err(AppError::BadRequest)?;
+    let observation = validate_user_answer(&payload, &request).map_err(AppError::BadRequest)?;
     let conversation = required_conversation(state, identity, &run.conversation_id).await?;
     let settings = agent_provider::load_enabled_settings(state, &identity.workspace_id).await?;
     let tables = parse_tables(&conversation.table_bindings_json)?;
@@ -906,10 +905,7 @@ pub async fn answer_run(
     get_run(state, identity, run_id).await
 }
 
-fn validate_user_answer(
-    payload: &Value,
-    request: &AnswerAgentRunRequest,
-) -> Result<Value, String> {
+fn validate_user_answer(payload: &Value, request: &AnswerAgentRunRequest) -> Result<Value, String> {
     let question = payload
         .get("question")
         .and_then(Value::as_str)
@@ -1126,9 +1122,7 @@ async fn execute_agent_loop(
     )
     .await
     .map_err(runtime_error)?;
-    let existing_steps = load_step_rows(state, run_id)
-        .await
-        .map_err(runtime_error)?;
+    let existing_steps = load_step_rows(state, run_id).await.map_err(runtime_error)?;
     let mut tool_runs = Vec::new();
     replay_completed_steps(&existing_steps, &mut messages, &mut tool_runs);
     let mut ordinal = existing_steps
@@ -1211,7 +1205,9 @@ async fn execute_agent_loop(
         .map_err(runtime_error)?;
 
         if turn.tool_calls.is_empty() {
-            return Ok(LoopOutcome::Completed(completion_from_turn(&turn, tool_runs)));
+            return Ok(LoopOutcome::Completed(completion_from_turn(
+                &turn, tool_runs,
+            )));
         }
 
         messages.push(ModelMessage::assistant_turn(&turn));
@@ -1285,10 +1281,7 @@ async fn execute_agent_loop(
     ))
 }
 
-fn completion_from_turn(
-    turn: &AssistantTurn,
-    tool_runs: Vec<AgentToolRun>,
-) -> AgentCompletion {
+fn completion_from_turn(turn: &AssistantTurn, tool_runs: Vec<AgentToolRun>) -> AgentCompletion {
     let content = if turn.content.trim().is_empty() {
         "分析已完成，但模型没有返回可展示的说明，请换一种方式描述需求。".to_owned()
     } else {
@@ -1300,7 +1293,10 @@ fn completion_from_turn(
         sql,
         chart,
         tool_runs,
-        finish_reason: turn.finish_reason.clone().unwrap_or_else(|| "stop".to_owned()),
+        finish_reason: turn
+            .finish_reason
+            .clone()
+            .unwrap_or_else(|| "stop".to_owned()),
     }
 }
 
@@ -1408,7 +1404,12 @@ fn execute_ask_user(call: &ModelToolCall) -> ToolOutcome {
             ));
         }
     };
-    match normalize_ask_user(arguments.question, arguments.options, arguments.allow_multiple, arguments.allow_free_text) {
+    match normalize_ask_user(
+        arguments.question,
+        arguments.options,
+        arguments.allow_multiple,
+        arguments.allow_free_text,
+    ) {
         Ok(payload) => ToolOutcome::AskUser(payload),
         Err(error) => ToolOutcome::Done(tool_failure("askUser", "", error)),
     }
@@ -1483,7 +1484,11 @@ fn execute_load_skill(state: &SharedState, call: &ModelToolCall) -> ToolExecutio
     let arguments = match serde_json::from_str::<Arguments>(&call.function.arguments) {
         Ok(arguments) => arguments,
         Err(error) => {
-            return tool_failure("loadSkill", "", format!("工具 load_skill 参数无效: {error}"));
+            return tool_failure(
+                "loadSkill",
+                "",
+                format!("工具 load_skill 参数无效: {error}"),
+            );
         }
     };
     match agent_skills::load_skill(&state.data_dir, &arguments.name) {
@@ -2738,8 +2743,8 @@ async fn complete_waiting_step(
     step_id: &str,
     output: Value,
 ) -> AppResult<()> {
-    let output_json = serde_json::to_string(&output)
-        .map_err(|error| AppError::Internal(error.to_string()))?;
+    let output_json =
+        serde_json::to_string(&output).map_err(|error| AppError::Internal(error.to_string()))?;
     let now = Utc::now().to_rfc3339();
     let mut transaction = state.pool.begin().await?;
     let updated = sqlx::query(
@@ -2755,9 +2760,7 @@ async fn complete_waiting_step(
     .execute(&mut *transaction)
     .await?;
     if updated.rows_affected() == 0 {
-        return Err(AppError::Conflict(
-            "问题已失效，请刷新后重试".to_owned(),
-        ));
+        return Err(AppError::Conflict("问题已失效，请刷新后重试".to_owned()));
     }
     sqlx::query("UPDATE ai_runs SET updated_at = ? WHERE id = ?")
         .bind(&now)
@@ -3518,16 +3521,18 @@ mod tests {
         assert_eq!(payload["allowFreeText"], false);
         assert_eq!(payload["options"].as_array().unwrap().len(), 2);
         assert!(normalize_ask_user("".into(), vec![], false, true).is_err());
-        assert!(normalize_ask_user(
-            "只有一个选项".into(),
-            vec![AskUserOption {
-                id: "a".into(),
-                label: "A".into()
-            }],
-            false,
-            false
-        )
-        .is_err());
+        assert!(
+            normalize_ask_user(
+                "只有一个选项".into(),
+                vec![AskUserOption {
+                    id: "a".into(),
+                    label: "A".into()
+                }],
+                false,
+                false
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -3644,9 +3649,11 @@ mod tests {
                 .unwrap();
             assert!(!required.iter().any(|item| item == "stepTitle"));
             assert!(!required.iter().any(|item| item == "reasoningSummary"));
-            assert!(value["function"]["parameters"]["properties"]
-                .get("stepTitle")
-                .is_some());
+            assert!(
+                value["function"]["parameters"]["properties"]
+                    .get("stepTitle")
+                    .is_some()
+            );
         }
     }
     #[test]
@@ -4010,15 +4017,18 @@ mod tests {
             assert!(!request.contains("\"name\":\"list_skills\""));
             assert!(!request.contains("leaked_context_marker"));
             assert!(!request.contains("leaked-result-marker"));
-            write_json_http(&mut socket, json!({
-                "choices": [{
-                    "message": {
-                        "content": "同比增长用于比较本期与上年同期的变化幅度。",
-                        "tool_calls": []
-                    },
-                    "finish_reason": "stop"
-                }]
-            }))
+            write_json_http(
+                &mut socket,
+                json!({
+                    "choices": [{
+                        "message": {
+                            "content": "同比增长用于比较本期与上年同期的变化幅度。",
+                            "tool_calls": []
+                        },
+                        "finish_reason": "stop"
+                    }]
+                }),
+            )
             .await;
         });
         (format!("http://{address}/v1"), server)
@@ -4034,15 +4044,18 @@ mod tests {
             assert!(request.contains("load_skill"));
             assert!(request.contains("ask_user"));
             assert!(!request.contains("preview_sql"));
-            write_json_http(&mut socket, json!({
-                "choices": [{
-                    "message": {
-                        "content": "先列出技能再按需加载。",
-                        "tool_calls": []
-                    },
-                    "finish_reason": "stop"
-                }]
-            }))
+            write_json_http(
+                &mut socket,
+                json!({
+                    "choices": [{
+                        "message": {
+                            "content": "先列出技能再按需加载。",
+                            "tool_calls": []
+                        },
+                        "finish_reason": "stop"
+                    }]
+                }),
+            )
             .await;
         });
         (format!("http://{address}/v1"), server)
