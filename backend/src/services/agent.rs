@@ -321,13 +321,25 @@ struct ToolExecution {
 }
 
 enum ToolOutcome {
-    Done(ToolExecution),
+    Done(Box<ToolExecution>),
     AskUser(Value),
 }
 
+impl ToolOutcome {
+    fn done(execution: ToolExecution) -> Self {
+        Self::Done(Box::new(execution))
+    }
+}
+
 enum LoopOutcome {
-    Completed(AgentCompletion),
+    Completed(Box<AgentCompletion>),
     WaitingUser,
+}
+
+impl LoopOutcome {
+    fn completed(completion: AgentCompletion) -> Self {
+        Self::Completed(Box::new(completion))
+    }
 }
 
 enum RuntimeFailure {
@@ -1067,7 +1079,7 @@ async fn supervise_run(
     .await;
     match outcome {
         Ok(Ok(LoopOutcome::Completed(completion))) => {
-            if let Err(error) = complete_run(&state, run_id, &settings.model, completion).await {
+            if let Err(error) = complete_run(&state, run_id, &settings.model, *completion).await {
                 tracing::error!(run_id, error = %error, "Agent Run 完成状态写入失败");
                 let _ =
                     mark_run_failed(&state, run_id, &error.to_string(), "persistence_error").await;
@@ -1205,7 +1217,7 @@ async fn execute_agent_loop(
         .map_err(runtime_error)?;
 
         if turn.tool_calls.is_empty() {
-            return Ok(LoopOutcome::Completed(completion_from_turn(
+            return Ok(LoopOutcome::completed(completion_from_turn(
                 &turn, tool_runs,
             )));
         }
@@ -1310,8 +1322,8 @@ async fn execute_tool(
 ) -> Result<ToolOutcome, RuntimeFailure> {
     match call.function.name.as_str() {
         "ask_user" => Ok(execute_ask_user(call)),
-        "list_skills" => Ok(ToolOutcome::Done(execute_list_skills(state))),
-        "load_skill" => Ok(ToolOutcome::Done(execute_load_skill(state, call))),
+        "list_skills" => Ok(ToolOutcome::done(execute_list_skills(state))),
+        "load_skill" => Ok(ToolOutcome::done(execute_load_skill(state, call))),
         "preview_sql" => {
             #[derive(Deserialize)]
             struct Arguments {
@@ -1320,7 +1332,7 @@ async fn execute_tool(
             let arguments = match serde_json::from_str::<Arguments>(&call.function.arguments) {
                 Ok(arguments) => arguments,
                 Err(error) => {
-                    return Ok(ToolOutcome::Done(tool_failure(
+                    return Ok(ToolOutcome::done(tool_failure(
                         "previewSql",
                         "",
                         format!("工具 preview_sql 参数无效: {error}"),
@@ -1329,7 +1341,7 @@ async fn execute_tool(
             };
             execute_sql_tool(state, run_id, context, "previewSql", arguments.sql, control)
                 .await
-                .map(ToolOutcome::Done)
+                .map(ToolOutcome::done)
         }
         "inspect_table" => {
             #[derive(Deserialize)]
@@ -1341,7 +1353,7 @@ async fn execute_tool(
             let arguments = match serde_json::from_str::<Arguments>(&call.function.arguments) {
                 Ok(arguments) => arguments,
                 Err(error) => {
-                    return Ok(ToolOutcome::Done(tool_failure(
+                    return Ok(ToolOutcome::done(tool_failure(
                         "inspectTable",
                         "",
                         format!("工具 inspect_table 参数无效: {error}"),
@@ -1355,7 +1367,7 @@ async fn execute_tool(
                 .find(|binding| binding.alias.eq_ignore_ascii_case(alias))
                 .map(|binding| binding.alias.as_str());
             let Some(alias) = known_alias else {
-                return Ok(ToolOutcome::Done(tool_failure(
+                return Ok(ToolOutcome::done(tool_failure(
                     "inspectTable",
                     "",
                     format!("逻辑表别名不存在: {}", arguments.alias),
@@ -1365,16 +1377,16 @@ async fn execute_tool(
             let sql = format!("SELECT * FROM {} LIMIT {limit}", quote_identifier(alias));
             execute_sql_tool(state, run_id, context, "inspectTable", sql, control)
                 .await
-                .map(ToolOutcome::Done)
+                .map(ToolOutcome::done)
         }
         name if name.starts_with("mcp_") => {
             let result = state.mcp.call(name, &call.function.arguments).await;
-            Ok(ToolOutcome::Done(match result {
+            Ok(ToolOutcome::done(match result {
                 Ok(text) => observation_success(name, text),
                 Err(error) => tool_failure(name, "", error),
             }))
         }
-        name => Ok(ToolOutcome::Done(tool_failure(
+        name => Ok(ToolOutcome::done(tool_failure(
             name,
             "",
             format!("不支持的 Agent 工具: {name}"),
@@ -1397,7 +1409,7 @@ fn execute_ask_user(call: &ModelToolCall) -> ToolOutcome {
     let arguments = match serde_json::from_str::<Arguments>(&call.function.arguments) {
         Ok(arguments) => arguments,
         Err(error) => {
-            return ToolOutcome::Done(tool_failure(
+            return ToolOutcome::done(tool_failure(
                 "askUser",
                 "",
                 format!("工具 ask_user 参数无效: {error}"),
@@ -1411,7 +1423,7 @@ fn execute_ask_user(call: &ModelToolCall) -> ToolOutcome {
         arguments.allow_free_text,
     ) {
         Ok(payload) => ToolOutcome::AskUser(payload),
-        Err(error) => ToolOutcome::Done(tool_failure("askUser", "", error)),
+        Err(error) => ToolOutcome::done(tool_failure("askUser", "", error)),
     }
 }
 
@@ -1801,6 +1813,7 @@ async fn execute_sql_tool(
  * 仅在会话拥有有效表绑定时向模型声明数据工具。
  * 空上下文不暴露工具定义可从协议层消除误调用，也能让 Provider 请求明确保持纯对话模式。
  */
+#[cfg(test)]
 fn tool_definitions_for_context(context: &ResolvedContext) -> Vec<ToolDefinition> {
     if tool_context_source_id(context).is_ok() {
         tool_definitions()

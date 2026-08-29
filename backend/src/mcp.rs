@@ -21,6 +21,8 @@ const MAX_RESULT_CHARS: usize = 24_000;
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_MESSAGE_BYTES: usize = 8_000_000;
 
+type PendingReplies = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerConfig {
@@ -62,7 +64,7 @@ struct HubInner {
 struct McpSession {
     child: Child,
     stdin: ChildStdin,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
+    pending: PendingReplies,
     next_id: u64,
 }
 
@@ -294,10 +296,7 @@ async fn write_message(stdin: &mut ChildStdin, value: &Value) -> Result<(), Stri
     stdin.flush().await.map_err(|error| error.to_string())
 }
 
-async fn read_stdout(
-    stdout: tokio::process::ChildStdout,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
-) {
+async fn read_stdout(stdout: tokio::process::ChildStdout, pending: PendingReplies) {
     let mut reader = BufReader::new(stdout);
     loop {
         match read_message(&mut reader).await {
@@ -313,10 +312,7 @@ async fn read_stdout(
     }
 }
 
-async fn dispatch_message(
-    message: Value,
-    pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
-) {
+async fn dispatch_message(message: Value, pending: &PendingReplies) {
     let Some(id) = message.get("id").and_then(json_id) else {
         return;
     };
